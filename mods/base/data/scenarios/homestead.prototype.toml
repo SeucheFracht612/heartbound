@@ -1,0 +1,8 @@
+kind = "scenario"
+id = "base:scenarios/homestead"
+display_name = "Homestead"
+start_region = "temperate_valley"
+spawn_mode = "homestead"
+starting_items = "base:items/raw_clay,base:items/nails"
+starting_cargo = "base:cargo/heavy_log"
+tags = "co_op,settlement_start"

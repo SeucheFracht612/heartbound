@@ -1,0 +1,5 @@
+kind = "build_piece"
+id = "base:build_pieces/kiln_firebox"
+display_name = "Kiln Firebox"
+material_tags = "clay,stone,heat_resistant"
+network_ports = "fuel_input,operator_access"

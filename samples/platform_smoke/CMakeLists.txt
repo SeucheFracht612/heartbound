@@ -1,0 +1,3 @@
+add_executable(heartstead_platform_smoke main.cpp)
+target_link_libraries(heartstead_platform_smoke PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_platform_smoke)

@@ -1,0 +1,141 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "default-debug",
+      "displayName": "Default Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/default-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "default-debug-werror",
+      "displayName": "Default Debug Warnings As Errors",
+      "inherits": "default-debug",
+      "binaryDir": "${sourceDir}/build/default-debug-werror",
+      "cacheVariables": {
+        "HEARTSTEAD_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "displayName": "Linux Clang Debug",
+      "inherits": "default-debug",
+      "binaryDir": "${sourceDir}/build/linux-clang-debug",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "/usr/bin/clang++"
+      }
+    },
+    {
+      "name": "linux-gcc-debug",
+      "displayName": "Linux GCC Debug",
+      "inherits": "default-debug",
+      "binaryDir": "${sourceDir}/build/linux-gcc-debug",
+      "cacheVariables": {
+        "CMAKE_CXX_COMPILER": "/usr/bin/g++"
+      }
+    },
+    {
+      "name": "linux-clang-asan",
+      "displayName": "Linux Clang Address/Undefined Sanitizers",
+      "inherits": "linux-clang-debug",
+      "binaryDir": "${sourceDir}/build/linux-clang-asan",
+      "cacheVariables": {
+        "HEARTSTEAD_ENABLE_VULKAN": "OFF",
+        "HEARTSTEAD_SANITIZERS": "address,undefined"
+      }
+    },
+    {
+      "name": "linux-clang-tsan",
+      "displayName": "Linux Clang Thread Sanitizer",
+      "inherits": "linux-clang-debug",
+      "binaryDir": "${sourceDir}/build/linux-clang-tsan",
+      "cacheVariables": {
+        "HEARTSTEAD_ENABLE_VULKAN": "OFF",
+        "HEARTSTEAD_SANITIZERS": "thread"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default-debug",
+      "configurePreset": "default-debug"
+    },
+    {
+      "name": "default-debug-werror",
+      "configurePreset": "default-debug-werror"
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang-debug"
+    },
+    {
+      "name": "linux-gcc-debug",
+      "configurePreset": "linux-gcc-debug"
+    },
+    {
+      "name": "linux-clang-asan",
+      "configurePreset": "linux-clang-asan"
+    },
+    {
+      "name": "linux-clang-tsan",
+      "configurePreset": "linux-clang-tsan"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default-debug",
+      "configurePreset": "default-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "default-debug-werror",
+      "configurePreset": "default-debug-werror",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-clang-debug",
+      "configurePreset": "linux-clang-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-debug",
+      "configurePreset": "linux-gcc-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-clang-asan",
+      "configurePreset": "linux-clang-asan",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=0",
+        "LSAN_OPTIONS": "detect_leaks=0"
+      },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-clang-tsan",
+      "configurePreset": "linux-clang-tsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

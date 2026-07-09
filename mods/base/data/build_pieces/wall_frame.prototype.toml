@@ -1,0 +1,5 @@
+kind = "build_piece"
+id = "base:build_pieces/wall_frame"
+display_name = "Wall Frame"
+material_tags = "wood,frame"
+room_contribution_tags = "wall,enclosure"

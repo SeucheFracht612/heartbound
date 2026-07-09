@@ -1,0 +1,3 @@
+add_executable(heartstead_map_profile_inspector main.cpp)
+target_link_libraries(heartstead_map_profile_inspector PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_map_profile_inspector)

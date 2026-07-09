@@ -1,0 +1,7 @@
+kind = "cargo"
+id = "base:cargo/heavy_log"
+display_name = "Heavy Log"
+mass_grams = "90000"
+volume_milliliters = "180000"
+transport_modes = "cart,wagon,animal"
+hazard_tags = "crush"

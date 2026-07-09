@@ -1,0 +1,3 @@
+add_executable(heartstead_jobs_sandbox main.cpp)
+target_link_libraries(heartstead_jobs_sandbox PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_jobs_sandbox)

@@ -1,0 +1,5 @@
+kind = "item"
+id = "base:items/nails"
+display_name = "Nails"
+stack_limit = "128"
+tags = "metal,construction,fastener"

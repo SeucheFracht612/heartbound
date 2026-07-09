@@ -1,0 +1,3 @@
+add_executable(heartstead_math_sandbox main.cpp)
+target_link_libraries(heartstead_math_sandbox PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_math_sandbox)

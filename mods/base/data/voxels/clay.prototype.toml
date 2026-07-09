@@ -1,0 +1,5 @@
+kind = "voxel"
+id = "base:voxels/clay"
+display_name = "Clay"
+mining_tool = "shovel"
+terrain_material = "clay"

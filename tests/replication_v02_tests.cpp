@@ -1,0 +1,258 @@
+#include "engine/net/client_session.hpp"
+#include "engine/net/host_session.hpp"
+#include "engine/net/replication.hpp"
+#include "engine/net/server_command.hpp"
+#include "engine/save/save_metadata.hpp"
+#include "engine/world/replication_delta.hpp"
+#include "engine/world/world_state.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace {
+
+using namespace heartstead;
+
+void accept_welcome(net::HostSession& host, core::NetId client_id, net::ClientSession& client) {
+    auto messages = host.drain_client_messages(client_id);
+    assert(messages);
+    assert(messages.value().size() == 1);
+    assert(client.receive_server_message(messages.value().front()));
+}
+
+net::ServerCommandDispatcher make_mutation_dispatcher() {
+    net::ServerCommandDispatcher dispatcher;
+    auto registered = dispatcher.register_command(net::CommandDescriptor{
+        "test.mutate",
+        true,
+        true,
+        [](const net::CommandEnvelope& envelope, const net::CommandExecutionContext&,
+           world::WorldOperation& operation) {
+            auto status = operation.record_mutation("test mutation " + envelope.payload);
+            if (!status) {
+                return status;
+            }
+            operation.emit_event({"test.changed", core::SaveId::from_value(10), envelope.payload});
+            operation.mark_replication_dirty();
+            operation.mark_save_dirty();
+            return core::Status::ok();
+        },
+    });
+    assert(registered);
+    return dispatcher;
+}
+
+void test_two_clients_may_both_use_command_sequence_one() {
+    net::HostSession host(net::HostSessionConfig{
+        net::TransportHostDesc{
+            net::TransportBackend::in_memory,
+            net::InMemoryTransportHostConfig{core::NetId::from_value(50), 4096},
+        },
+        net::ReplicationRelevancePolicy{},
+    });
+    assert(host.start());
+
+    auto first_id = host.connect_client();
+    auto second_id = host.connect_client();
+    assert(first_id);
+    assert(second_id);
+    net::ClientSession first(first_id.value());
+    net::ClientSession second(second_id.value());
+    accept_welcome(host, first_id.value(), first);
+    accept_welcome(host, second_id.value(), second);
+
+    auto first_command = first.create_command("test.mutate", "first");
+    auto second_command = second.create_command("test.mutate", "second");
+    assert(first_command);
+    assert(second_command);
+    assert(first_command.value().sequence == 1);
+    assert(second_command.value().sequence == 1);
+    assert(host.send_client_command(first_id.value(), first_command.value()));
+    assert(host.send_client_command(second_id.value(), second_command.value()));
+
+    auto dispatcher = make_mutation_dispatcher();
+    auto tick = host.tick(dispatcher, net::CommandExecutionContext{});
+    assert(tick);
+    assert(tick.value().command_reports.size() == 2);
+    assert(tick.value().command_reports[0].sequence == 1);
+    assert(tick.value().command_reports[1].sequence == 1);
+    assert(tick.value().command_reports[0].replication_sequence == 1);
+    assert(tick.value().command_reports[1].replication_sequence == 2);
+
+    for (auto* client : {&first, &second}) {
+        const auto client_id = client->client_id();
+        auto messages = host.drain_client_messages(client_id);
+        assert(messages);
+        assert(messages.value().size() == 3);
+        for (const auto& message : messages.value()) {
+            assert(client->receive_server_message(message));
+        }
+
+        auto results = client->drain_command_results();
+        assert(results.size() == 1);
+        assert(results.front().sequence == 1);
+
+        auto batches = client->drain_replication_batches();
+        assert(batches.size() == 2);
+        assert(batches[0].command_sequence == 1);
+        assert(batches[1].command_sequence == 1);
+        assert(net::replication_stream_sequence(batches[0]) == 1);
+        assert(net::replication_stream_sequence(batches[1]) == 2);
+        assert(batches[0].source_client_id == first_id.value());
+        assert(batches[1].source_client_id == second_id.value());
+        assert(client->stats().last_replication_sequence == 2);
+    }
+}
+
+void test_mixed_visibility_filters_events_ids_and_typed_state() {
+    net::HostSession host(net::HostSessionConfig{
+        net::TransportHostDesc{
+            net::TransportBackend::in_memory,
+            net::InMemoryTransportHostConfig{core::NetId::from_value(60), 8192},
+        },
+        net::ReplicationRelevancePolicy{},
+    });
+    assert(host.start());
+    auto first_id = host.connect_client();
+    auto second_id = host.connect_client();
+    assert(first_id);
+    assert(second_id);
+    (void)host.drain_client_messages(first_id.value());
+    (void)host.drain_client_messages(second_id.value());
+
+    net::ReplicationRelevancePolicy policy;
+    policy.broadcast_by_default = false;
+    policy.client_rules.push_back({first_id.value(), {core::SaveId::from_value(100)}, false});
+    policy.client_rules.push_back({second_id.value(), {core::SaveId::from_value(101)}, false});
+    host.set_replication_relevance_policy(policy);
+
+    net::ServerCommandDispatcher dispatcher;
+    auto registered = dispatcher.register_command(net::CommandDescriptor{
+        "test.private_mutation",
+        true,
+        true,
+        [](const net::CommandEnvelope&, const net::CommandExecutionContext& context,
+           world::WorldOperation& operation) {
+            assert(context.save_ids != nullptr);
+            auto first = operation.reserve_save_id(*context.save_ids);
+            auto second = operation.reserve_save_id(*context.save_ids);
+            assert(first);
+            assert(second);
+            auto status = operation.record_mutation("mixed visibility mutation");
+            if (!status) {
+                return status;
+            }
+            operation.emit_event({"test.private", first.value(), "first private"});
+            operation.emit_event({"test.private", second.value(), "second private"});
+            operation.emit_event({"test.global", {}, "hidden global"});
+            operation.mark_replication_dirty();
+            operation.mark_save_dirty();
+            return core::Status::ok();
+        },
+    });
+    assert(registered);
+
+    save::SaveIdAllocator ids(100);
+    net::CommandEnvelope command{1, first_id.value(), "test.private_mutation", {}, 0};
+    assert(host.send_client_command(first_id.value(), command));
+    net::CommandExecutionContext context;
+    context.save_ids = &ids;
+    auto tick = host.tick(dispatcher, context);
+    assert(tick);
+    assert(tick.value().command_reports.size() == 1);
+    const auto& command_report = tick.value().command_reports.front();
+    assert(command_report.reserved_ids.size() == 2);
+    assert(command_report.replication_sequence == 1);
+
+    auto first_messages = host.drain_client_messages(first_id.value());
+    auto second_messages = host.drain_client_messages(second_id.value());
+    assert(first_messages);
+    assert(second_messages);
+    assert(first_messages.value().size() == 2);
+    assert(second_messages.value().size() == 1);
+
+    auto first_batch = net::replication_batch_from_transport(first_messages.value().back());
+    auto second_batch = net::replication_batch_from_transport(second_messages.value().front());
+    assert(first_batch);
+    assert(second_batch);
+    assert(first_batch.value().events.size() == 1);
+    assert(second_batch.value().events.size() == 1);
+    assert(first_batch.value().events.front().subject == core::SaveId::from_value(100));
+    assert(second_batch.value().events.front().subject == core::SaveId::from_value(101));
+    assert(first_batch.value().reserved_ids ==
+           std::vector<core::SaveId>{core::SaveId::from_value(100)});
+    assert(second_batch.value().reserved_ids ==
+           std::vector<core::SaveId>{core::SaveId::from_value(101)});
+
+    world::WorldState state;
+    assert(state.inventories().insert({core::SaveId::from_value(100), {}}));
+    assert(state.inventories().insert({core::SaveId::from_value(101), {}}));
+
+    const auto tick_deltas = world::materialize_replication_deltas_for_tick(state, tick.value());
+    auto delivery =
+        world::send_replication_delta_snapshots_for_tick(host, tick_deltas, tick.value(), 10);
+    assert(delivery);
+    assert(delivery.value().sent_message_count == 2);
+    auto first_delta_messages = host.drain_client_messages(first_id.value());
+    auto second_delta_messages = host.drain_client_messages(second_id.value());
+    assert(first_delta_messages);
+    assert(second_delta_messages);
+    assert(first_delta_messages.value().size() == 1);
+    assert(second_delta_messages.value().size() == 1);
+    auto delivered_first_snapshot =
+        world::replication_delta_snapshot_from_transport(first_delta_messages.value().front());
+    auto delivered_second_snapshot =
+        world::replication_delta_snapshot_from_transport(second_delta_messages.value().front());
+    assert(delivered_first_snapshot);
+    assert(delivered_second_snapshot);
+    assert(delivered_first_snapshot.value().inventories.size() == 1);
+    assert(delivered_second_snapshot.value().inventories.size() == 1);
+    assert(delivered_first_snapshot.value().inventories.front().owner_id ==
+           core::SaveId::from_value(100));
+    assert(delivered_second_snapshot.value().inventories.front().owner_id ==
+           core::SaveId::from_value(101));
+
+    net::ReplicationBatch complete_batch;
+    complete_batch.command_sequence = command_report.sequence;
+    complete_batch.command_type = command_report.command_type;
+    complete_batch.events = command_report.events;
+    complete_batch.reserved_ids = command_report.reserved_ids;
+    complete_batch.replication_sequence = command_report.replication_sequence;
+    complete_batch.source_client_id = command_report.client_id;
+    const auto complete_snapshot = world::materialize_replication_delta(state, complete_batch);
+    assert(complete_snapshot.inventories.size() == 2);
+    assert(complete_snapshot.plan.global_event_count == 1);
+
+    auto first_snapshot =
+        world::filter_replication_delta_snapshot(complete_snapshot, policy, first_id.value());
+    auto second_snapshot =
+        world::filter_replication_delta_snapshot(complete_snapshot, policy, second_id.value());
+    assert(first_snapshot);
+    assert(second_snapshot);
+    assert(first_snapshot.value().plan.event_count == 1);
+    assert(second_snapshot.value().plan.event_count == 1);
+    assert(first_snapshot.value().plan.global_event_count == 0);
+    assert(second_snapshot.value().plan.global_event_count == 0);
+    assert(first_snapshot.value().inventories.size() == 1);
+    assert(second_snapshot.value().inventories.size() == 1);
+    assert(first_snapshot.value().inventories.front().owner_id == core::SaveId::from_value(100));
+    assert(second_snapshot.value().inventories.front().owner_id == core::SaveId::from_value(101));
+
+    auto unsafe_snapshot = complete_snapshot;
+    unsafe_snapshot.inventories.front().owner_id = core::SaveId::from_value(999);
+    auto rejected_filter =
+        world::filter_replication_delta_snapshot(unsafe_snapshot, policy, first_id.value());
+    assert(!rejected_filter);
+    assert(rejected_filter.error().code == "replication_delta.recipient_filter_requires_resync");
+}
+
+} // namespace
+
+int main() {
+    test_two_clients_may_both_use_command_sequence_one();
+    test_mixed_visibility_filters_events_ids_and_typed_state();
+    return 0;
+}

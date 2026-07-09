@@ -1,0 +1,5 @@
+kind = "entity"
+id = "base:entities/hand_cart"
+display_name = "Hand Cart"
+persistent = "true"
+entity_kind = "cart"

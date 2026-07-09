@@ -1,0 +1,5 @@
+kind = "workpiece"
+id = "base:workpieces/clay_lump"
+display_name = "Clay Lump"
+grid = "8x8x8"
+material = "base:materials/clay"

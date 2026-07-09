@@ -1,0 +1,5 @@
+kind = "item"
+id = "base:items/raw_clay"
+display_name = "Raw Clay"
+stack_limit = "64"
+tags = "clay,crafting,unfired"

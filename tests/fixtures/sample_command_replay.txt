@@ -1,0 +1,9 @@
+heartstead.command_replay.v1
+version=1
+scenario=tool_replay
+world_seed=42
+command=1|7|100|100|debug.echo|hello%7Cworld
+expect=committed_world_mutation=false;event_count=0;last_stage=validated;reserved_id_count=0
+command=2|7|110|120|build.place_piece|prototype%3Dbase:build_pieces/wall_frame
+expect=committed_world_mutation=true;derived_update.0=RoomGraph;event_count=1;event_type.0=build_piece.placed;last_stage=committed;mutation.0=place build;replication_dirty=true;reserved_id.0=200;reserved_id_count=1;save_dirty=true
+end

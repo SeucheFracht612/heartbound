@@ -1,0 +1,6 @@
+heartstead.save_slot.v1
+slot_id|settlement_a
+display_name|Settlement A
+created_at_ms|100
+last_saved_at_ms|400
+end

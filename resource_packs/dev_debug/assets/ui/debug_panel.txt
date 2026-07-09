@@ -1,0 +1,1 @@
+Placeholder debug UI skin asset.

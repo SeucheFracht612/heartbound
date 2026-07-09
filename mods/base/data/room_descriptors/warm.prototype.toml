@@ -1,0 +1,7 @@
+kind = "room_descriptor"
+id = "base:room_descriptors/warm"
+display_name = "Warm"
+code = "warm"
+label = "Warm"
+severity = "positive"
+tags = "comfort,temperature"

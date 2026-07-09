@@ -1,0 +1,551 @@
+#include "engine/net/host_session.hpp"
+
+#include "engine/net/command_payload.hpp"
+#include "engine/net/transport_control.hpp"
+
+#include <charconv>
+#include <limits>
+#include <sstream>
+#include <string_view>
+#include <system_error>
+#include <utility>
+
+namespace heartstead::net {
+
+namespace {
+
+[[nodiscard]] HostSessionCommandReport
+make_transport_error_report(const TransportEnvelope& envelope, std::string code,
+                            std::string message) {
+    HostSessionCommandReport report;
+    report.client_id = envelope.sender;
+    report.sequence = envelope.message.sequence;
+    report.command_type = envelope.message.payload_type;
+    report.error_code = std::move(code);
+    report.error_message = std::move(message);
+    return report;
+}
+
+[[nodiscard]] HostSessionCommandReport
+make_host_command_report(core::NetId client_id, const CommandDispatchReport& dispatch_report) {
+    HostSessionCommandReport report;
+    report.client_id = client_id;
+    report.sequence = dispatch_report.sequence;
+    report.command_type = dispatch_report.command_type;
+    report.success = dispatch_report.succeeded;
+    report.committed_world_mutation = dispatch_report.committed_world_mutation;
+    report.events = dispatch_report.events;
+    report.reserved_ids = dispatch_report.reserved_ids;
+    report.operation_trace = dispatch_report.operation_trace;
+    if (dispatch_report.error.has_value()) {
+        report.error_code = dispatch_report.error->code;
+        report.error_message = dispatch_report.error->message;
+    }
+    return report;
+}
+
+[[nodiscard]] core::Result<std::uint64_t> parse_u64(std::string_view value,
+                                                    std::string_view field_name) {
+    std::uint64_t parsed = 0;
+    const auto* begin = value.data();
+    const auto* end = value.data() + value.size();
+    const auto [ptr, error] = std::from_chars(begin, end, parsed);
+    if (error != std::errc{} || ptr != end) {
+        return core::Result<std::uint64_t>::failure("host_session_result.invalid_number",
+                                                    "invalid command result number field: " +
+                                                        std::string(field_name));
+    }
+    return core::Result<std::uint64_t>::success(parsed);
+}
+
+[[nodiscard]] core::Result<std::uint32_t> parse_u32(std::string_view value,
+                                                    std::string_view field_name) {
+    auto parsed = parse_u64(value, field_name);
+    if (!parsed) {
+        return core::Result<std::uint32_t>::failure(parsed.error().code, parsed.error().message);
+    }
+    if (parsed.value() > std::numeric_limits<std::uint32_t>::max()) {
+        return core::Result<std::uint32_t>::failure(
+            "host_session_result.number_out_of_range",
+            "command result number field exceeds uint32 range: " + std::string(field_name));
+    }
+    return core::Result<std::uint32_t>::success(static_cast<std::uint32_t>(parsed.value()));
+}
+
+[[nodiscard]] core::Result<bool> parse_bool(std::string_view value, std::string_view field_name) {
+    if (value == "1") {
+        return core::Result<bool>::success(true);
+    }
+    if (value == "0") {
+        return core::Result<bool>::success(false);
+    }
+    return core::Result<bool>::failure("host_session_result.invalid_bool",
+                                       "invalid command result bool field: " +
+                                           std::string(field_name));
+}
+
+template <typename T> [[nodiscard]] core::Result<T> fail_from(const core::Error& error) {
+    return core::Result<T>::failure(error.code, error.message);
+}
+
+} // namespace
+
+HostSession::HostSession(HostSessionConfig config) : config_(std::move(config)) {}
+
+HostSessionState HostSession::state() const noexcept {
+    return state_;
+}
+
+bool HostSession::is_running() const noexcept {
+    return state_ == HostSessionState::running;
+}
+
+core::NetId HostSession::server_id() const noexcept {
+    if (transport_) {
+        return transport_->server_id();
+    }
+    return transport_host_server_id(config_.transport);
+}
+
+std::size_t HostSession::connected_client_count() const noexcept {
+    return transport_ ? transport_->connected_client_count() : 0;
+}
+
+const ReplicationRelevancePolicy& HostSession::replication_relevance_policy() const noexcept {
+    return config_.replication_relevance;
+}
+
+core::Status HostSession::start() {
+    if (is_running()) {
+        return core::Status::failure("host_session.already_running",
+                                     "host session is already running");
+    }
+
+    auto transport = create_transport_host(config_.transport);
+    if (!transport) {
+        return core::Status::failure(transport.error().code, transport.error().message);
+    }
+
+    transport_ = std::move(transport).value();
+    next_replication_sequence_ = 1;
+    state_ = HostSessionState::running;
+    return core::Status::ok();
+}
+
+core::Status HostSession::stop() {
+    if (!is_running()) {
+        return core::Status::failure("host_session.not_running", "host session is not running");
+    }
+
+    state_ = HostSessionState::stopped;
+    transport_.reset();
+    return core::Status::ok();
+}
+
+void HostSession::set_replication_relevance_policy(ReplicationRelevancePolicy policy) {
+    config_.replication_relevance = std::move(policy);
+}
+
+core::Result<core::NetId> HostSession::connect_client() {
+    auto running = require_running();
+    if (!running) {
+        return core::Result<core::NetId>::failure(running.error().code, running.error().message);
+    }
+    auto client = transport_->connect_client();
+    if (!client) {
+        return client;
+    }
+
+    const auto capabilities = transport_->capabilities();
+    const TransportServerWelcome welcome{
+        transport_control_protocol_version,
+        transport_->server_id(),
+        client.value(),
+        capabilities.max_payload_bytes,
+        capabilities.max_clients,
+        capabilities.supports_unreliable,
+        capabilities.enforces_reliable_command_order,
+    };
+    auto status = transport_->send_server_to_client(
+        client.value(), make_server_welcome_transport_message(welcome, 0));
+    if (!status) {
+        (void)transport_->disconnect_client(client.value());
+        return core::Result<core::NetId>::failure(status.error().code, status.error().message);
+    }
+
+    return client;
+}
+
+core::Status HostSession::disconnect_client(core::NetId client_id) {
+    auto running = require_running();
+    if (!running) {
+        return running;
+    }
+    const TransportServerDisconnect disconnect{
+        transport_control_protocol_version, transport_->server_id(),      client_id,
+        "host_session.disconnect",          "server disconnected client",
+    };
+    auto notice = transport_->send_server_to_client(
+        client_id, make_server_disconnect_transport_message(disconnect, 0));
+    if (!notice) {
+        return notice;
+    }
+    return transport_->disconnect_client(client_id);
+}
+
+core::Status HostSession::send_client_command(core::NetId client_id, CommandEnvelope envelope) {
+    auto running = require_running();
+    if (!running) {
+        return running;
+    }
+    if (!envelope.sender.is_valid()) {
+        envelope.sender = client_id;
+    }
+    if (envelope.sender != client_id) {
+        return core::Status::failure("host_session.sender_mismatch",
+                                     "command sender must match client connection");
+    }
+    return transport_->send_client_to_server(client_id, make_command_transport_message(envelope));
+}
+
+core::Status HostSession::send_replication_message(core::NetId client_id,
+                                                   TransportMessage message) {
+    auto running = require_running();
+    if (!running) {
+        return running;
+    }
+    if (message.kind != TransportMessageKind::replication) {
+        return core::Status::failure("host_session.not_replication_message",
+                                     "host session can only send replication messages through "
+                                     "send_replication_message");
+    }
+    return transport_->send_server_to_client(client_id, std::move(message));
+}
+
+core::Result<std::vector<TransportEnvelope>>
+HostSession::drain_client_messages(core::NetId client_id) {
+    auto running = require_running();
+    if (!running) {
+        return core::Result<std::vector<TransportEnvelope>>::failure(running.error().code,
+                                                                     running.error().message);
+    }
+    return transport_->drain_client_messages(client_id);
+}
+
+core::Result<HostSessionTickResult> HostSession::tick(const ServerCommandDispatcher& dispatcher,
+                                                      CommandExecutionContext context) {
+    auto running = require_running();
+    if (!running) {
+        return core::Result<HostSessionTickResult>::failure(running.error().code,
+                                                            running.error().message);
+    }
+
+    context.executor_role = CommandExecutorRole::authoritative_server;
+
+    HostSessionTickResult tick_result;
+    auto maintenance = transport_->poll_maintenance(context.server_time_ms);
+    if (!maintenance) {
+        return core::Result<HostSessionTickResult>::failure(maintenance.error().code,
+                                                            maintenance.error().message);
+    }
+    tick_result.transport_retransmission_count = maintenance.value().retransmission_count;
+    tick_result.transport_dropped_reliable_message_count =
+        maintenance.value().dropped_reliable_message_count;
+
+    auto messages = transport_->drain_server_messages();
+    tick_result.transport_message_count = static_cast<std::uint32_t>(messages.size());
+
+    for (const auto& message : messages) {
+        HostSessionCommandReport report;
+        if (message.message.kind != TransportMessageKind::command) {
+            report = make_transport_error_report(message, "transport.not_command_message",
+                                                 "host session expected a command message");
+        } else {
+            ++tick_result.command_message_count;
+            auto command = command_envelope_from_transport(message);
+            if (!command) {
+                report = make_transport_error_report(message, command.error().code,
+                                                     command.error().message);
+            } else {
+                report = make_host_command_report(
+                    message.sender, dispatcher.dispatch_report(command.value(), context));
+            }
+        }
+
+        auto sequence = assign_replication_sequence(report);
+        if (!sequence) {
+            return core::Result<HostSessionTickResult>::failure(sequence.error().code,
+                                                                sequence.error().message);
+        }
+
+        auto response = send_command_response(report);
+        if (!response) {
+            return core::Result<HostSessionTickResult>::failure(response.error().code,
+                                                                response.error().message);
+        }
+        ++tick_result.response_message_count;
+
+        auto replication = broadcast_replication(report, context.server_time_ms);
+        if (!replication) {
+            return core::Result<HostSessionTickResult>::failure(replication.error().code,
+                                                                replication.error().message);
+        }
+        auto relevance_report = std::move(replication).value();
+        tick_result.replication_message_count += relevance_report.relevant_client_count;
+        if (relevance_report.event_count > 0) {
+            tick_result.replication_relevance_reports.push_back(std::move(relevance_report));
+        }
+        tick_result.command_reports.push_back(std::move(report));
+    }
+
+    return core::Result<HostSessionTickResult>::success(std::move(tick_result));
+}
+
+core::Status HostSession::require_running() const {
+    if (!is_running()) {
+        return core::Status::failure("host_session.not_running", "host session is not running");
+    }
+    return core::Status::ok();
+}
+
+core::Status HostSession::assign_replication_sequence(HostSessionCommandReport& report) {
+    if (!report.success || !report.committed_world_mutation || report.events.empty()) {
+        return core::Status::ok();
+    }
+    if (next_replication_sequence_ == 0) {
+        return core::Status::failure(
+            "host_session.replication_sequence_exhausted",
+            "server replication stream exhausted its 64-bit sequence space");
+    }
+
+    report.replication_sequence = next_replication_sequence_;
+    next_replication_sequence_ =
+        next_replication_sequence_ == std::numeric_limits<std::uint64_t>::max()
+            ? 0
+            : next_replication_sequence_ + 1;
+    return core::Status::ok();
+}
+
+core::Status HostSession::send_command_response(const HostSessionCommandReport& report) {
+    const auto response_type = report.command_type.empty() ? std::string("command.result")
+                                                           : report.command_type + ".result";
+    return transport_->send_server_to_client(
+        report.client_id,
+        TransportMessage{TransportMessageKind::command_result, TransportChannel::reliable,
+                         report.sequence, response_type, host_session_result_payload(report), 0});
+}
+
+core::Result<ReplicationRelevanceReport>
+HostSession::broadcast_replication(const HostSessionCommandReport& report,
+                                   std::int64_t server_time_ms) {
+    ReplicationRelevanceReport relevance_report;
+    if (!report.success || !report.committed_world_mutation || report.events.empty()) {
+        return core::Result<ReplicationRelevanceReport>::success(std::move(relevance_report));
+    }
+
+    ReplicationBatch batch{
+        report.sequence,
+        report.command_type,
+        report.events,
+        report.reserved_ids,
+        report.replication_sequence,
+        report.client_id,
+    };
+    relevance_report = ReplicationRelevance::evaluate(config_.replication_relevance, batch,
+                                                      transport_->connected_client_ids());
+    for (const auto& decision : relevance_report.decisions) {
+        if (!decision.relevant) {
+            continue;
+        }
+        auto filtered = ReplicationRelevance::filter_for_client(
+            config_.replication_relevance, batch, decision.client_id);
+        if (filtered.events.empty()) {
+            continue;
+        }
+        auto status = transport_->send_server_to_client(
+            decision.client_id, make_replication_transport_message(filtered, server_time_ms));
+        if (!status) {
+            return core::Result<ReplicationRelevanceReport>::failure(status.error().code,
+                                                                     status.error().message);
+        }
+    }
+    return core::Result<ReplicationRelevanceReport>::success(std::move(relevance_report));
+}
+
+std::string_view host_session_state_name(HostSessionState state) noexcept {
+    switch (state) {
+    case HostSessionState::stopped:
+        return "stopped";
+    case HostSessionState::running:
+        return "running";
+    }
+    return "unknown";
+}
+
+std::string HostSessionCommandResultTextCodec::encode(const HostSessionCommandResult& result) {
+    CommandPayload payload;
+    (void)payload.set("status", result.success ? "ok" : "error");
+    (void)payload.set("sequence", std::to_string(result.sequence));
+    (void)payload.set("command_type", result.command_type);
+    (void)payload.set("committed", result.committed_world_mutation ? "1" : "0");
+    (void)payload.set("events", std::to_string(result.event_count));
+    (void)payload.set("reserved_ids", std::to_string(result.reserved_id_count));
+    if (!result.success) {
+        (void)payload.set("code", result.error_code);
+        (void)payload.set("message", result.error_message);
+    }
+    return CommandPayloadTextCodec::encode(payload);
+}
+
+core::Result<HostSessionCommandResult>
+HostSessionCommandResultTextCodec::decode(std::string_view text) {
+    auto payload = CommandPayloadTextCodec::decode(text);
+    if (!payload) {
+        return core::Result<HostSessionCommandResult>::failure(payload.error().code,
+                                                               payload.error().message);
+    }
+
+    auto status = payload.value().require("status");
+    auto sequence_value = payload.value().require("sequence");
+    auto committed_value = payload.value().require("committed");
+    auto event_count_value = payload.value().require("events");
+    auto reserved_id_count_value = payload.value().require("reserved_ids");
+    if (!status || !sequence_value || !committed_value || !event_count_value ||
+        !reserved_id_count_value) {
+        return core::Result<HostSessionCommandResult>::failure(
+            "host_session_result.missing_key", "command result payload is missing required fields");
+    }
+
+    HostSessionCommandResult result;
+    if (status.value() == "ok") {
+        result.success = true;
+    } else if (status.value() == "error") {
+        result.success = false;
+    } else {
+        return core::Result<HostSessionCommandResult>::failure(
+            "host_session_result.invalid_status", "command result status must be ok or error");
+    }
+
+    auto sequence = parse_u64(sequence_value.value(), "sequence");
+    auto committed = parse_bool(committed_value.value(), "committed");
+    auto event_count = parse_u32(event_count_value.value(), "events");
+    auto reserved_id_count = parse_u32(reserved_id_count_value.value(), "reserved_ids");
+    if (!sequence) {
+        return fail_from<HostSessionCommandResult>(sequence.error());
+    }
+    if (!committed) {
+        return fail_from<HostSessionCommandResult>(committed.error());
+    }
+    if (!event_count) {
+        return fail_from<HostSessionCommandResult>(event_count.error());
+    }
+    if (!reserved_id_count) {
+        return fail_from<HostSessionCommandResult>(reserved_id_count.error());
+    }
+
+    result.sequence = sequence.value();
+    const auto* command_type = payload.value().find("command_type");
+    if (command_type != nullptr) {
+        result.command_type = *command_type;
+    }
+    result.committed_world_mutation = committed.value();
+    result.event_count = event_count.value();
+    result.reserved_id_count = reserved_id_count.value();
+
+    if (!result.success) {
+        auto error_code = payload.value().require("code");
+        auto error_message = payload.value().require("message");
+        if (!error_code || !error_message) {
+            return core::Result<HostSessionCommandResult>::failure(
+                "host_session_result.missing_error",
+                "failed command result payload must include error code and message");
+        }
+        result.error_code = std::string(error_code.value());
+        result.error_message = std::string(error_message.value());
+    }
+
+    auto validation = validate_host_session_command_result(result);
+    if (!validation) {
+        return core::Result<HostSessionCommandResult>::failure(validation.error().code,
+                                                               validation.error().message);
+    }
+    return core::Result<HostSessionCommandResult>::success(std::move(result));
+}
+
+core::Status validate_host_session_command_result(const HostSessionCommandResult& result) noexcept {
+    if (!result.command_type.empty() && !is_valid_command_payload_key(result.command_type)) {
+        return core::Status::failure(
+            "host_session_result.invalid_command_type",
+            "command result command type must use a stable command payload key shape");
+    }
+    if (result.success) {
+        if (!result.error_code.empty() || !result.error_message.empty()) {
+            return core::Status::failure("host_session_result.unexpected_error",
+                                         "successful command result must not carry error fields");
+        }
+        return core::Status::ok();
+    }
+    if (result.error_code.empty() || !is_valid_command_payload_key(result.error_code)) {
+        return core::Status::failure("host_session_result.invalid_error_code",
+                                     "failed command result must carry a stable error code");
+    }
+    if (result.error_message.empty()) {
+        return core::Status::failure("host_session_result.missing_error_message",
+                                     "failed command result must carry an error message");
+    }
+    return core::Status::ok();
+}
+
+HostSessionCommandResult
+host_session_command_result_from_report(const HostSessionCommandReport& report) {
+    HostSessionCommandResult result;
+    result.sequence = report.sequence;
+    result.command_type = report.command_type;
+    result.success = report.success;
+    result.committed_world_mutation = report.committed_world_mutation;
+    result.event_count = static_cast<std::uint32_t>(report.events.size());
+    result.reserved_id_count = static_cast<std::uint32_t>(report.reserved_ids.size());
+    result.error_code = report.error_code;
+    result.error_message = report.error_message;
+    return result;
+}
+
+std::string host_session_result_payload(const HostSessionCommandReport& report) {
+    return HostSessionCommandResultTextCodec::encode(
+        host_session_command_result_from_report(report));
+}
+
+core::Result<HostSessionCommandResult>
+host_session_command_result_from_transport(const TransportEnvelope& envelope) {
+    if (envelope.message.kind != TransportMessageKind::command_result) {
+        return core::Result<HostSessionCommandResult>::failure(
+            "host_session_result.not_command_result", "transport message is not a command result");
+    }
+    if (envelope.message.channel != TransportChannel::reliable) {
+        return core::Result<HostSessionCommandResult>::failure(
+            "host_session_result.unreliable_command_result",
+            "command result must arrive on the reliable transport channel");
+    }
+
+    auto result = HostSessionCommandResultTextCodec::decode(envelope.message.payload);
+    if (!result) {
+        return result;
+    }
+    if (result.value().sequence != envelope.message.sequence) {
+        return core::Result<HostSessionCommandResult>::failure(
+            "host_session_result.sequence_mismatch",
+            "command result sequence does not match the transport envelope sequence");
+    }
+
+    const auto expected_payload_type = result.value().command_type.empty()
+                                           ? std::string("command.result")
+                                           : result.value().command_type + ".result";
+    if (envelope.message.payload_type != expected_payload_type) {
+        return core::Result<HostSessionCommandResult>::failure(
+            "host_session_result.payload_type_mismatch",
+            "command result payload type does not match the decoded command type");
+    }
+    return result;
+}
+
+} // namespace heartstead::net

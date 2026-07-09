@@ -1,0 +1,3 @@
+add_executable(heartstead_replay_inspector main.cpp)
+target_link_libraries(heartstead_replay_inspector PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_replay_inspector)

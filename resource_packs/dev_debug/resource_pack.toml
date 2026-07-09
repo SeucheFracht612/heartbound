@@ -1,0 +1,4 @@
+id = "dev_debug"
+name = "Heartstead Dev Debug Resource Pack"
+version = "0.0.1"
+description = "Debug presentation assets for development overlays and inspectors."

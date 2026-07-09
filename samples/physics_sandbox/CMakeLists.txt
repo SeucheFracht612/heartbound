@@ -1,0 +1,3 @@
+add_executable(heartstead_physics_sandbox main.cpp)
+target_link_libraries(heartstead_physics_sandbox PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_physics_sandbox)

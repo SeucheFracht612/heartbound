@@ -1,0 +1,251 @@
+add_library(heartstead_engine)
+add_library(Heartstead::Engine ALIAS heartstead_engine)
+
+target_sources(
+  heartstead_engine
+  PRIVATE
+    assets/asset_catalog.cpp
+    assets/asset_cooker.cpp
+    assets/cooked_asset_manifest.cpp
+    assets/cooked_asset_store.cpp
+    assets/resource_pack.cpp
+    assets/virtual_file_system.cpp
+    assemblies/assembly.cpp
+    assemblies/assembly_prototype.cpp
+    build/build_piece.cpp
+    build/build_piece_prototype.cpp
+    cargo/cargo.cpp
+    cargo/cargo_prototype.cpp
+    content/content_validation.cpp
+    core/assert.cpp
+    core/hash.cpp
+    core/ids.cpp
+    core/logging.cpp
+    debug/inspection.cpp
+    dirty/dirty_region.cpp
+    entities/entity.cpp
+    entities/entity_prototype.cpp
+    entities/physical_resource.cpp
+    items/item_stack.cpp
+    items/item_prototype.cpp
+    jobs/job_system.cpp
+    jobs/thread_pool/thread_pool_backend.cpp
+    math/vector.cpp
+    modding/generic_prototype_loader.cpp
+    modding/mod_fingerprint.cpp
+    modding/mod_discovery.cpp
+    modding/mod_lifecycle.cpp
+    modding/prototype_semantic_validation.cpp
+    modding/mod_validation.cpp
+    modding/prototype_registry.cpp
+    net/client_session.cpp
+    net/command_payload.cpp
+    net/host_session.cpp
+    net/replication.cpp
+    net/server_command.cpp
+    net/transport.cpp
+    net/transport_control.cpp
+    net/transport_packet.cpp
+    net/transport_reliability.cpp
+    networks/network_derivation.cpp
+    networks/spatial_network.cpp
+    platform/platform.cpp
+    physics/jolt/jolt_backend.cpp
+    physics/physics_world.cpp
+    player_profiles/map_discovery.cpp
+    player_profiles/player_profile.cpp
+    processes/process.cpp
+    processes/process_environment.cpp
+    processes/process_prototype.cpp
+    replay/command_replay.cpp
+    renderer/materials/material_asset_validation.cpp
+    renderer/materials/material_definition.cpp
+    renderer/materials/material_pipeline_layout.cpp
+    renderer/materials/material_prototype_loader.cpp
+    renderer/rhi/render_device.cpp
+    renderer/rhi/render_frame_plan.cpp
+    renderer/shaders/shader_compiler.cpp
+    renderer/vulkan/vulkan_backend.cpp
+    rooms/room_descriptor_prototype.cpp
+    rooms/room_extraction.cpp
+    rooms/room_graph.cpp
+    save/save_compatibility.cpp
+    save/save_binary_codec.cpp
+    save/save_database.cpp
+    save/save_metadata.cpp
+    save/save_migration.cpp
+    save/save_snapshot.cpp
+    save/save_slot.cpp
+    save/save_text_codec.cpp
+    scenarios/scenario.cpp
+    scenarios/scenario_prototype.cpp
+    scripting/luau/luau_backend.cpp
+    scripting/script_host_event.cpp
+    scripting/script_module_loader.cpp
+    scripting/script_runtime.cpp
+    server_logs/server_log.cpp
+    simulation/simulation_lod.cpp
+    simulation/world_time.cpp
+    workpieces/workpiece_codec.cpp
+    workpieces/workpiece_definition.cpp
+    workpieces/workpiece_grid.cpp
+    workpieces/workpiece_prototype.cpp
+    workpieces/workpiece_template.cpp
+    world/chunks/chunk_database.cpp
+    world/chunks/chunk_edit_delta_codec.cpp
+    world/meshing/chunk_mesher.cpp
+    world/operations/world_operation.cpp
+    world/replication_delta.cpp
+    world/replication_interest.cpp
+    world/regions/region_graph.cpp
+    world/simulation_subjects.cpp
+    world/streaming/chunk_streamer.cpp
+    world/world_commands.cpp
+    world/world_snapshot.cpp
+    world/world_state.cpp
+    world/voxels/voxel_chunk.cpp
+    world/voxels/voxel_palette.cpp
+    world/worldgen/terrain_generator.cpp
+  PUBLIC
+    FILE_SET HEADERS
+    BASE_DIRS ${PROJECT_SOURCE_DIR}
+    FILES
+      assets/asset_catalog.hpp
+      assets/asset_cooker.hpp
+      assets/cooked_asset_manifest.hpp
+      assets/cooked_asset_store.hpp
+      assets/resource_pack.hpp
+      assets/virtual_file_system.hpp
+      assemblies/assembly.hpp
+      assemblies/assembly_prototype.hpp
+      build/build_piece.hpp
+      build/build_piece_prototype.hpp
+      cargo/cargo.hpp
+      cargo/cargo_prototype.hpp
+      content/content_validation.hpp
+      core/assert.hpp
+      core/hash.hpp
+      core/ids.hpp
+      core/logging.hpp
+      core/result.hpp
+      debug/inspection.hpp
+      dirty/dirty_region.hpp
+      entities/entity.hpp
+      entities/entity_prototype.hpp
+      entities/physical_resource.hpp
+      items/item_stack.hpp
+      items/item_prototype.hpp
+      jobs/job_system.hpp
+      jobs/thread_pool/thread_pool_backend.hpp
+      math/vector.hpp
+      modding/generic_prototype.hpp
+      modding/generic_prototype_loader.hpp
+      modding/mod_fingerprint.hpp
+      modding/mod_diagnostic.hpp
+      modding/mod_discovery.hpp
+      modding/mod_lifecycle.hpp
+      modding/mod_manifest.hpp
+      modding/prototype_semantic_validation.hpp
+      modding/mod_validation.hpp
+      modding/prototype_registry.hpp
+      net/client_session.hpp
+      net/command_payload.hpp
+      net/host_session.hpp
+      net/replication.hpp
+      net/server_command.hpp
+      net/transport.hpp
+      net/transport_control.hpp
+      net/transport_packet.hpp
+      net/transport_reliability.hpp
+      networks/network_derivation.hpp
+      networks/spatial_network.hpp
+      platform/platform.hpp
+      physics/jolt/jolt_backend.hpp
+      physics/physics_world.hpp
+      player_profiles/map_discovery.hpp
+      player_profiles/player_profile.hpp
+      processes/process.hpp
+      processes/process_environment.hpp
+      processes/process_prototype.hpp
+      replay/command_replay.hpp
+      renderer/materials/material_asset_validation.hpp
+      renderer/materials/material_definition.hpp
+      renderer/materials/material_pipeline_layout.hpp
+      renderer/materials/material_prototype_loader.hpp
+      renderer/rhi/render_device.hpp
+      renderer/rhi/render_frame_plan.hpp
+      renderer/shaders/shader_compiler.hpp
+      renderer/vulkan/vulkan_backend.hpp
+      rooms/room_descriptor_prototype.hpp
+      rooms/room_extraction.hpp
+      rooms/room_graph.hpp
+      save/save_compatibility.hpp
+      save/save_binary_codec.hpp
+      save/save_database.hpp
+      save/save_identity.hpp
+      save/save_metadata.hpp
+      save/save_migration.hpp
+      save/save_snapshot.hpp
+      save/save_slot.hpp
+      save/save_text_codec.hpp
+      scenarios/scenario.hpp
+      scenarios/scenario_prototype.hpp
+      scripting/luau/luau_backend.hpp
+      scripting/script_host_event.hpp
+      scripting/script_module_loader.hpp
+      scripting/script_runtime.hpp
+      server_logs/server_log.hpp
+      simulation/simulation_lod.hpp
+      simulation/world_time.hpp
+      workpieces/workpiece_codec.hpp
+      workpieces/workpiece_definition.hpp
+      workpieces/workpiece_grid.hpp
+      workpieces/workpiece_prototype.hpp
+      workpieces/workpiece_template.hpp
+      world/chunks/chunk_database.hpp
+      world/chunks/chunk_edit_delta_codec.hpp
+      world/coords/world_coords.hpp
+      world/meshing/chunk_mesher.hpp
+      world/operations/world_operation.hpp
+      world/replication_delta.hpp
+      world/replication_interest.hpp
+      world/regions/region_graph.hpp
+      world/simulation_subjects.hpp
+      world/streaming/chunk_streamer.hpp
+      world/world_commands.hpp
+      world/world_snapshot.hpp
+      world/world_state.hpp
+      world/voxels/voxel_chunk.hpp
+      world/voxels/voxel_palette.hpp
+      world/worldgen/terrain_generator.hpp
+)
+
+target_include_directories(heartstead_engine PUBLIC ${PROJECT_SOURCE_DIR})
+target_link_libraries(heartstead_engine PUBLIC Threads::Threads)
+if(HEARTSTEAD_ENABLE_VULKAN AND Vulkan_FOUND)
+  target_link_libraries(heartstead_engine PRIVATE Vulkan::Vulkan)
+  target_compile_definitions(heartstead_engine PRIVATE HEARTSTEAD_HAS_VULKAN=1)
+else()
+  target_compile_definitions(heartstead_engine PRIVATE HEARTSTEAD_HAS_VULKAN=0)
+endif()
+if(HEARTSTEAD_ENABLE_X11_NATIVE AND X11_FOUND)
+  target_include_directories(heartstead_engine PRIVATE ${X11_INCLUDE_DIR})
+  target_link_libraries(heartstead_engine PRIVATE ${X11_LIBRARIES})
+  target_compile_definitions(heartstead_engine PRIVATE HEARTSTEAD_HAS_X11=1)
+  if(HEARTSTEAD_ENABLE_XRANDR AND X11_Xrandr_FOUND)
+    if(TARGET X11::Xrandr)
+      target_link_libraries(heartstead_engine PRIVATE X11::Xrandr)
+    else()
+      target_link_libraries(heartstead_engine PRIVATE ${X11_Xrandr_LIB})
+      target_include_directories(heartstead_engine PRIVATE ${X11_Xrandr_INCLUDE_PATH})
+    endif()
+    target_compile_definitions(heartstead_engine PRIVATE HEARTSTEAD_HAS_XRANDR=1)
+  else()
+    target_compile_definitions(heartstead_engine PRIVATE HEARTSTEAD_HAS_XRANDR=0)
+  endif()
+else()
+  target_compile_definitions(heartstead_engine PRIVATE HEARTSTEAD_HAS_X11=0)
+  target_compile_definitions(heartstead_engine PRIVATE HEARTSTEAD_HAS_XRANDR=0)
+endif()
+
+heartstead_configure_target(heartstead_engine)

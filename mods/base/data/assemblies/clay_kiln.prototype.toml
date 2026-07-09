@@ -1,0 +1,5 @@
+kind = "assembly"
+id = "base:assemblies/clay_kiln"
+display_name = "Clay Kiln"
+required_parts = "firebox:base:build_pieces/kiln_firebox,chimney:base:build_pieces/chimney"
+required_ports = "fuel_input,smoke_output"

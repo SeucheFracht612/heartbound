@@ -1,0 +1,382 @@
+#include "engine/world/world_snapshot.hpp"
+
+#include "engine/workpieces/workpiece_codec.hpp"
+#include "engine/world/chunks/chunk_edit_delta_codec.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <map>
+#include <set>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace heartstead::world {
+
+namespace {
+
+template <typename T, typename Less>
+[[nodiscard]] std::vector<const T*> sorted_records(std::vector<const T*> records, Less less) {
+    std::ranges::sort(records, less);
+    return records;
+}
+
+[[nodiscard]] core::Status track_unique_save_id(std::set<std::uint64_t>& ids, core::SaveId id,
+                                                std::string_view label) {
+    if (!id.is_valid()) {
+        return core::Status::failure("world_snapshot.invalid_save_id",
+                                     std::string(label) + " has an invalid save id");
+    }
+    if (!ids.insert(id.value()).second) {
+        return core::Status::failure("world_snapshot.duplicate_save_id",
+                                     std::string(label) + " duplicates save id " + id.to_string());
+    }
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status require_saved_object_id(const std::set<std::uint64_t>& ids,
+                                                   core::SaveId id, std::string_view label) {
+    if (!id.is_valid()) {
+        return core::Status::failure("world_snapshot.invalid_owner",
+                                     std::string(label) + " owner save id is invalid");
+    }
+    if (!ids.contains(id.value())) {
+        return core::Status::failure("world_snapshot.missing_owner",
+                                     std::string(label) + " references a missing owner save id " +
+                                         id.to_string());
+    }
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status require_build_piece_id(const std::set<std::uint64_t>& ids,
+                                                  core::SaveId id, std::string_view code,
+                                                  std::string_view message) {
+    if (!id.is_valid() || !ids.contains(id.value())) {
+        return core::Status::failure(std::string(code), std::string(message));
+    }
+    return core::Status::ok();
+}
+
+[[nodiscard]] std::uint64_t max_snapshot_save_id(const save::SaveSnapshot& snapshot) noexcept {
+    std::uint64_t max_id = 0;
+    const auto visit = [&max_id](core::SaveId id) {
+        if (id.value() > max_id) {
+            max_id = id.value();
+        }
+    };
+    for (const auto& build_piece : snapshot.build_pieces) {
+        visit(build_piece.object_id);
+    }
+    for (const auto& entity : snapshot.entities) {
+        visit(entity.save_id);
+    }
+    for (const auto& cargo : snapshot.cargo_records) {
+        visit(cargo.cargo_id);
+    }
+    for (const auto& assembly : snapshot.assemblies) {
+        visit(assembly.assembly_id);
+    }
+    return max_id;
+}
+
+[[nodiscard]] std::uint64_t max_snapshot_process_id(const save::SaveSnapshot& snapshot) noexcept {
+    std::uint64_t max_id = 0;
+    for (const auto& process : snapshot.processes) {
+        if (process.process_id.value() > max_id) {
+            max_id = process.process_id.value();
+        }
+    }
+    return max_id;
+}
+
+} // namespace
+
+core::Result<save::SaveSnapshot> WorldSnapshotBridge::export_snapshot(const WorldState& state) {
+    save::SaveSnapshot snapshot;
+    snapshot.metadata = state.metadata();
+
+    std::map<ChunkCoord, std::vector<const VoxelEditRecord*>> edits_by_chunk;
+    for (const auto& edit : state.chunks().edit_log()) {
+        edits_by_chunk[edit.chunk_coord].push_back(&edit);
+    }
+    for (const auto& [coord, edits] : edits_by_chunk) {
+        snapshot.chunk_edits.push_back(save::ChunkEditSaveRecord{
+            coord,
+            ChunkEditDeltaTextCodec::encode(coord, edits),
+        });
+    }
+
+    for (const auto* build_piece :
+         sorted_records(state.build_objects().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->object_id.value() < rhs->object_id.value();
+         })) {
+        snapshot.build_pieces.push_back(*build_piece);
+    }
+
+    for (const auto* entity :
+         sorted_records(state.entities().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->runtime_handle.value() < rhs->runtime_handle.value();
+         })) {
+        if (entity->persistent) {
+            snapshot.entities.push_back(save::EntitySaveRecord{
+                entity->save_id,
+                entity->prototype_id,
+                entity->kind,
+                entity->sleeping,
+                {},
+                entity->transform,
+            });
+        }
+    }
+
+    for (const auto* inventory :
+         sorted_records(state.inventories().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->owner_id.value() < rhs->owner_id.value();
+         })) {
+        snapshot.inventories.push_back(
+            save::InventorySaveRecord{inventory->owner_id, inventory->stacks});
+    }
+
+    for (const auto* cargo :
+         sorted_records(state.cargo().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->cargo_id.value() < rhs->cargo_id.value();
+         })) {
+        snapshot.cargo_records.push_back(*cargo);
+    }
+
+    for (const auto* workpiece :
+         sorted_records(state.workpieces().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->workpiece_id.value() < rhs->workpiece_id.value();
+         })) {
+        snapshot.workpieces.push_back(save::WorkpieceSaveRecord{
+            workpiece->workpiece_id,
+            workpiece->prototype_id,
+            workpiece->grid.shape(),
+            workpieces::WorkpieceGridTextCodec::encode(workpiece->grid),
+        });
+    }
+
+    for (const auto* assembly :
+         sorted_records(state.assemblies().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->assembly_id.value() < rhs->assembly_id.value();
+         })) {
+        snapshot.assemblies.push_back(*assembly);
+    }
+
+    for (const auto* process :
+         sorted_records(state.processes().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->process_id.value() < rhs->process_id.value();
+         })) {
+        snapshot.processes.push_back(*process);
+    }
+
+    for (const auto* mod_state :
+         sorted_records(state.mod_states().records(), [](const auto* lhs, const auto* rhs) {
+             if (lhs->mod_id == rhs->mod_id) {
+                 return lhs->state_key < rhs->state_key;
+             }
+             return lhs->mod_id < rhs->mod_id;
+         })) {
+        snapshot.mod_states.push_back(save::ModStateSaveRecord{
+            mod_state->mod_id, mod_state->state_key, mod_state->encoded_state});
+    }
+
+    return core::Result<save::SaveSnapshot>::success(std::move(snapshot));
+}
+
+core::Result<WorldState>
+WorldSnapshotBridge::import_validated_snapshot(const save::SaveSnapshot& snapshot,
+                                               const modding::PrototypeRegistry& prototypes,
+                                               WorldSnapshotLoadConfig config) {
+    const auto validation = save::SaveSnapshotValidator::validate(snapshot, prototypes);
+    if (!validation.valid()) {
+        const auto& first_issue = validation.issues.front();
+        return core::Result<WorldState>::failure(first_issue.code, first_issue.message);
+    }
+
+    return import_snapshot(snapshot, config);
+}
+
+core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSnapshot& snapshot,
+                                                              WorldSnapshotLoadConfig config) {
+    auto metadata_status = snapshot.metadata.validate();
+    if (!metadata_status) {
+        return core::Result<WorldState>::failure(metadata_status.error().code,
+                                                 metadata_status.error().message);
+    }
+
+    const auto next_save_id = std::max(config.next_save_id, max_snapshot_save_id(snapshot) + 1);
+    const auto next_process_id =
+        std::max(config.next_process_id, max_snapshot_process_id(snapshot) + 1);
+    WorldStateDesc desc;
+    desc.metadata = snapshot.metadata;
+    desc.next_save_id = next_save_id;
+    desc.next_runtime_handle = config.next_runtime_handle;
+    desc.next_entity_net_id = config.next_entity_net_id;
+    desc.next_process_id = next_process_id;
+    WorldState state(desc);
+
+    std::set<std::uint64_t> save_ids;
+    std::set<std::uint64_t> build_piece_ids;
+    std::set<ChunkCoord> chunk_edit_coords;
+
+    for (const auto& chunk : snapshot.chunk_edits) {
+        if (!chunk_edit_coords.insert(chunk.coord).second) {
+            return core::Result<WorldState>::failure(
+                "world_snapshot.duplicate_chunk_edit",
+                "snapshot contains duplicate chunk edit records for one chunk coordinate");
+        }
+        auto edits = ChunkEditDeltaTextCodec::decode(chunk.coord, chunk.encoded_edit_delta);
+        if (!edits) {
+            return core::Result<WorldState>::failure(edits.error().code, edits.error().message);
+        }
+        auto status = state.chunks().apply_saved_edits(edits.value(), state.dirty_regions());
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& build_piece : snapshot.build_pieces) {
+        auto status = track_unique_save_id(save_ids, build_piece.object_id, "build piece");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        build_piece_ids.insert(build_piece.object_id.value());
+        status = state.build_objects().insert(build_piece);
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& entity : snapshot.entities) {
+        auto status = track_unique_save_id(save_ids, entity.save_id, "entity");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        auto runtime_handle = state.runtime_handles().reserve();
+        if (!runtime_handle) {
+            return core::Result<WorldState>::failure(runtime_handle.error().code,
+                                                     runtime_handle.error().message);
+        }
+        entities::EntityRecord record;
+        record.runtime_handle = runtime_handle.value();
+        auto net_id = state.entity_net_ids().reserve();
+        if (!net_id) {
+            return core::Result<WorldState>::failure(net_id.error().code, net_id.error().message);
+        }
+        record.net_id = net_id.value();
+        record.save_id = entity.save_id;
+        record.prototype_id = entity.prototype_id;
+        record.kind = entity.kind;
+        record.transform = entity.transform;
+        record.persistent = true;
+        record.sleeping = entity.sleeping;
+        status = state.entities().insert(record);
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& cargo : snapshot.cargo_records) {
+        auto status = track_unique_save_id(save_ids, cargo.cargo_id, "cargo");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        status = state.cargo().insert(cargo);
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& workpiece : snapshot.workpieces) {
+        auto grid = workpieces::WorkpieceGridTextCodec::decode(workpiece.encoded_cells);
+        if (!grid) {
+            return core::Result<WorldState>::failure(grid.error().code, grid.error().message);
+        }
+        if (grid.value().shape() != workpiece.shape) {
+            return core::Result<WorldState>::failure(
+                "world_snapshot.workpiece_shape_mismatch",
+                "decoded workpiece grid shape does not match save record shape");
+        }
+        auto status = state.workpieces().insert(WorkpieceRecord{
+            workpiece.workpiece_id, workpiece.prototype_id, std::move(grid).value()});
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& assembly : snapshot.assemblies) {
+        auto status = track_unique_save_id(save_ids, assembly.assembly_id, "assembly");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        status = assembly.validate_record();
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        status = require_build_piece_id(build_piece_ids, assembly.root_build_piece_id,
+                                        "world_snapshot.missing_assembly_root",
+                                        "assembly root build piece is not present in snapshot");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        for (const auto& part : assembly.parts) {
+            status = require_build_piece_id(build_piece_ids, part.build_piece_id,
+                                            "world_snapshot.missing_assembly_part",
+                                            "assembly part build piece is not present in snapshot");
+            if (!status) {
+                return core::Result<WorldState>::failure(status.error().code,
+                                                         status.error().message);
+            }
+        }
+        for (const auto& port : assembly.ports) {
+            status = require_build_piece_id(
+                build_piece_ids, port.source_build_piece_id,
+                "world_snapshot.missing_assembly_port_source",
+                "assembly port source build piece is not present in snapshot");
+            if (!status) {
+                return core::Result<WorldState>::failure(status.error().code,
+                                                         status.error().message);
+            }
+        }
+        status = state.assemblies().insert(assembly);
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& inventory : snapshot.inventories) {
+        auto status = require_saved_object_id(save_ids, inventory.owner_id, "inventory");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        status = state.inventories().insert(InventoryRecord{inventory.owner_id, inventory.stacks});
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& process : snapshot.processes) {
+        auto status = require_saved_object_id(save_ids, process.owner_id, "process");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        status = state.processes().insert(process);
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    for (const auto& mod_state : snapshot.mod_states) {
+        auto status = state.mod_states().insert(
+            ModStateRecord{mod_state.mod_id, mod_state.state_key, mod_state.encoded_state});
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
+    return core::Result<WorldState>::success(std::move(state));
+}
+
+} // namespace heartstead::world

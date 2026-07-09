@@ -1,0 +1,5 @@
+heartstead.workpiece_grid.v1
+shape=4|4|4
+cell=1|1|1|7|255
+cell=2|1|1|7|255
+end

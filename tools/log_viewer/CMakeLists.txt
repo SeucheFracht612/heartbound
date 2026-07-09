@@ -1,0 +1,3 @@
+add_executable(heartstead_log_viewer main.cpp)
+target_link_libraries(heartstead_log_viewer PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_log_viewer)
