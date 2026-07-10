@@ -3,6 +3,8 @@
 #include "engine/net/client_session.hpp"
 #include "engine/net/host_session.hpp"
 #include "engine/save/save_text_codec.hpp"
+#include "engine/workpieces/workpiece_codec.hpp"
+#include "engine/workpieces/workpiece_state.hpp"
 #include "engine/world/world_state.hpp"
 
 #include <algorithm>
@@ -38,10 +40,14 @@ constexpr std::string_view snapshot_end_marker = "snapshot_end";
 
 void classify_subject(const WorldState& state, WorldReplicationDeltaSubjectPlan& subject) {
     subject.has_build_piece = state.build_objects().find(subject.subject_id) != nullptr;
-    subject.has_entity = state.entities().find_by_save_id(subject.subject_id) != nullptr;
+    subject.has_entity = state.entities().find_by_save_id(subject.subject_id) != nullptr ||
+                         state.physical_resources().find(subject.subject_id) != nullptr;
     subject.has_cargo = state.cargo().find(subject.subject_id) != nullptr;
     subject.has_assembly = state.assemblies().find(subject.subject_id) != nullptr;
     subject.has_inventory = state.inventories().find(subject.subject_id) != nullptr;
+    subject.has_workpiece =
+        state.workpieces().find(core::WorkpieceId::from_value(subject.subject_id.value())) !=
+        nullptr;
     subject.process_count =
         static_cast<std::uint32_t>(state.processes().find_by_owner(subject.subject_id).size());
 
@@ -51,13 +57,53 @@ void classify_subject(const WorldState& state, WorldReplicationDeltaSubjectPlan&
     subject.materialized_record_count += subject.has_cargo ? 1U : 0U;
     subject.materialized_record_count += subject.has_assembly ? 1U : 0U;
     subject.materialized_record_count += subject.has_inventory ? 1U : 0U;
+    subject.materialized_record_count += subject.has_workpiece ? 1U : 0U;
     subject.materialized_record_count += subject.process_count;
     subject.missing_subject = subject.materialized_record_count == 0;
+}
+
+[[nodiscard]] save::WorkpieceSaveRecord
+public_workpiece_save_record(const WorkpieceRecord& record) {
+    std::string encoded_server_state;
+    if (record.server_state.has_value()) {
+        auto public_state = *record.server_state;
+        for (std::size_t index = 0; index < public_state.hidden_flaw_mask.size(); ++index) {
+            public_state.hidden_flaw_mask[index] &= public_state.revealed_mask[index];
+        }
+        encoded_server_state =
+            workpieces::WorkpieceServerStateTextCodec::encode(public_state, record.grid.shape());
+    }
+    return {
+        record.workpiece_id,
+        record.prototype_id,
+        record.grid.shape(),
+        workpieces::WorkpieceGridTextCodec::encode(record.grid),
+        record.material_prototype_id,
+        std::move(encoded_server_state),
+        record.owner_session,
+        record.revision,
+        record.committed,
+    };
 }
 
 [[nodiscard]] save::EntitySaveRecord entity_save_record(const entities::EntityRecord& entity) {
     return save::EntitySaveRecord{
         entity.save_id, entity.prototype_id, entity.kind, entity.sleeping, {}, entity.transform,
+    };
+}
+
+[[nodiscard]] save::EntitySaveRecord
+physical_resource_save_record(const entities::PhysicalResourceRecord& resource) {
+    entities::Transform transform;
+    transform.position = resource.position;
+    return {
+        resource.resource_id,
+        resource.prototype_id,
+        entities::EntityKind::temporary_physics,
+        resource.state == entities::PhysicalResourceState::settled_sleeping ||
+            resource.state == entities::PhysicalResourceState::frozen_static,
+        entities::PhysicalResourceTextCodec::encode(resource),
+        transform,
     };
 }
 
@@ -223,17 +269,18 @@ sorted_processes_by_owner(const WorldState& state, core::SaveId owner_id) {
            << encode_bool(subject.has_build_piece) << '|' << encode_bool(subject.has_entity) << '|'
            << encode_bool(subject.has_cargo) << '|' << encode_bool(subject.has_assembly) << '|'
            << encode_bool(subject.has_inventory) << '|' << subject.process_count << '|'
-           << subject.materialized_record_count << '|' << encode_bool(subject.missing_subject);
+           << subject.materialized_record_count << '|' << encode_bool(subject.missing_subject)
+           << '|' << encode_bool(subject.has_workpiece);
     return output.str();
 }
 
 [[nodiscard]] core::Result<WorldReplicationDeltaSubjectPlan>
 parse_subject_plan(std::string_view value) {
     const auto parts = split(value, '|');
-    if (parts.size() != 11) {
+    if (parts.size() != 11 && parts.size() != 12) {
         return core::Result<WorldReplicationDeltaSubjectPlan>::failure(
             "replication_delta.invalid_subject",
-            "replication delta subject record must contain 11 fields");
+            "replication delta subject record must contain 11 or 12 fields");
     }
 
     auto subject_id = parse_u64(parts[0], "subject_id");
@@ -247,15 +294,17 @@ parse_subject_plan(std::string_view value) {
     auto process_count = parse_u32(parts[8], "subject_process_count");
     auto materialized_count = parse_u32(parts[9], "subject_materialized_record_count");
     auto missing = parse_bool(parts[10], "subject_missing");
+    auto has_workpiece = parts.size() == 12 ? parse_bool(parts[11], "subject_has_workpiece")
+                                            : core::Result<bool>::success(false);
     if (!subject_id || !event_count || !first_event_type || !has_build_piece || !has_entity ||
         !has_cargo || !has_assembly || !has_inventory || !process_count || !materialized_count ||
-        !missing) {
+        !missing || !has_workpiece) {
         return core::Result<WorldReplicationDeltaSubjectPlan>::failure(
             "replication_delta.invalid_subject",
             "replication delta subject record contains invalid fields");
     }
 
-    return core::Result<WorldReplicationDeltaSubjectPlan>::success(WorldReplicationDeltaSubjectPlan{
+    auto result = WorldReplicationDeltaSubjectPlan{
         core::SaveId::from_value(subject_id.value()),
         event_count.value(),
         std::move(first_event_type).value(),
@@ -267,7 +316,9 @@ parse_subject_plan(std::string_view value) {
         process_count.value(),
         materialized_count.value(),
         missing.value(),
-    });
+    };
+    result.has_workpiece = has_workpiece.value();
+    return core::Result<WorldReplicationDeltaSubjectPlan>::success(std::move(result));
 }
 
 [[nodiscard]] save::SaveSnapshot
@@ -282,6 +333,7 @@ save_snapshot_from_delta(const WorldReplicationDeltaSnapshot& snapshot) {
     result.entities = snapshot.entities;
     result.cargo_records = snapshot.cargo_records;
     result.inventories = snapshot.inventories;
+    result.workpieces = snapshot.workpieces;
     result.assemblies = snapshot.assemblies;
     result.processes = snapshot.processes;
     return result;
@@ -289,8 +341,7 @@ save_snapshot_from_delta(const WorldReplicationDeltaSnapshot& snapshot) {
 
 [[nodiscard]] core::Status apply_save_snapshot_to_delta(WorldReplicationDeltaSnapshot& target,
                                                         save::SaveSnapshot snapshot) {
-    if (!snapshot.chunk_edits.empty() || !snapshot.workpieces.empty() ||
-        !snapshot.mod_states.empty()) {
+    if (!snapshot.chunk_edits.empty() || !snapshot.mod_states.empty()) {
         return core::Status::failure(
             "replication_delta.unsupported_snapshot_section",
             "replication delta snapshot payload contains sections that are not delta-materialized");
@@ -300,6 +351,7 @@ save_snapshot_from_delta(const WorldReplicationDeltaSnapshot& snapshot) {
     target.entities = std::move(snapshot.entities);
     target.cargo_records = std::move(snapshot.cargo_records);
     target.inventories = std::move(snapshot.inventories);
+    target.workpieces = std::move(snapshot.workpieces);
     target.assemblies = std::move(snapshot.assemblies);
     target.processes = std::move(snapshot.processes);
     return core::Status::ok();
@@ -308,7 +360,8 @@ save_snapshot_from_delta(const WorldReplicationDeltaSnapshot& snapshot) {
 [[nodiscard]] std::uint32_t section_record_count(const WorldReplicationDeltaSnapshot& snapshot) {
     return static_cast<std::uint32_t>(snapshot.build_pieces.size() + snapshot.entities.size() +
                                       snapshot.cargo_records.size() + snapshot.inventories.size() +
-                                      snapshot.assemblies.size() + snapshot.processes.size());
+                                      snapshot.workpieces.size() + snapshot.assemblies.size() +
+                                      snapshot.processes.size());
 }
 
 [[nodiscard]] core::Status
@@ -423,6 +476,34 @@ validate_delta_snapshot_payload(const WorldReplicationDeltaSnapshot& snapshot) {
                                              record.owner_id.to_string());
         }
     }
+    for (const auto& record : snapshot.workpieces) {
+        auto grid = workpieces::WorkpieceGridTextCodec::decode(record.encoded_cells);
+        if (!grid || grid.value().shape() != record.shape) {
+            return core::Status::failure("replication_delta_apply.invalid_workpiece_grid",
+                                         "replication delta contains an invalid workpiece grid");
+        }
+        std::optional<workpieces::WorkpieceServerState> server_state;
+        if (!record.encoded_server_state.empty()) {
+            auto decoded = workpieces::WorkpieceServerStateTextCodec::decode(
+                record.encoded_server_state, record.shape);
+            if (!decoded) {
+                return core::Status::failure(decoded.error().code, decoded.error().message);
+            }
+            server_state = std::move(decoded).value();
+        }
+        auto workpiece_status =
+            WorkpieceRecord{record.workpiece_id,     record.prototype_id,
+                            std::move(grid).value(), record.material_prototype_id,
+                            std::move(server_state), record.owner_session,
+                            record.revision,         record.committed}
+                .validate();
+        if (!workpiece_status)
+            return workpiece_status;
+        status = track_unique_delta_save_id(
+            save_ids, core::SaveId::from_value(record.workpiece_id.value()), "workpiece");
+        if (!status)
+            return status;
+    }
     for (const auto& record : snapshot.processes) {
         status = record.validate();
         if (!status) {
@@ -438,25 +519,11 @@ validate_delta_snapshot_payload(const WorldReplicationDeltaSnapshot& snapshot) {
     return core::Status::ok();
 }
 
-[[nodiscard]] std::int64_t dirty_coord_component(double value) noexcept {
-    constexpr auto min_i64 = static_cast<double>(std::numeric_limits<std::int64_t>::min());
-    constexpr auto max_i64 = static_cast<double>(std::numeric_limits<std::int64_t>::max());
-    if (value <= min_i64) {
-        return std::numeric_limits<std::int64_t>::min();
-    }
-    if (value >= max_i64) {
-        return std::numeric_limits<std::int64_t>::max();
-    }
-    return static_cast<std::int64_t>(std::floor(value));
-}
-
 [[nodiscard]] dirty::DirtyRegionBounds
 build_piece_dirty_bounds(const build::BuildPieceRecord& record) noexcept {
-    const dirty::DirtyRegionCoord coord{
-        dirty_coord_component(record.transform.position.x),
-        dirty_coord_component(record.transform.position.y),
-        dirty_coord_component(record.transform.position.z),
-    };
+    const dirty::DirtyRegionCoord coord{record.transform.position.anchor.x,
+                                        record.transform.position.anchor.y,
+                                        record.transform.position.anchor.z};
     return dirty::DirtyRegionBounds::single(coord);
 }
 
@@ -613,6 +680,22 @@ void count_updated(WorldReplicationDeltaApplyReport& report, std::uint32_t& sect
 
 [[nodiscard]] core::Status upsert_entity(WorldState& state, const save::EntitySaveRecord& record,
                                          WorldReplicationDeltaApplyReport& report) {
+    if (record.encoded_state.starts_with(entities::physical_resource_state_magic)) {
+        auto decoded = entities::PhysicalResourceTextCodec::decode(
+            record.save_id, record.prototype_id, record.transform.position, record.encoded_state);
+        if (!decoded)
+            return core::Status::failure(decoded.error().code, decoded.error().message);
+        if (auto* existing = state.physical_resources().find(record.save_id); existing != nullptr) {
+            *existing = std::move(decoded).value();
+            count_updated(report, report.entities_updated);
+            return core::Status::ok();
+        }
+        auto status = state.physical_resources().insert(std::move(decoded).value());
+        if (!status)
+            return status;
+        count_inserted(report, report.entities_inserted);
+        return core::Status::ok();
+    }
     if (auto* existing = state.entities().find_by_save_id(record.save_id); existing != nullptr) {
         existing->prototype_id = record.prototype_id;
         existing->kind = record.kind;
@@ -730,6 +813,39 @@ void count_updated(WorldReplicationDeltaApplyReport& report, std::uint32_t& sect
     return core::Status::ok();
 }
 
+[[nodiscard]] core::Status upsert_workpiece(WorldState& state,
+                                            const save::WorkpieceSaveRecord& record,
+                                            WorldReplicationDeltaApplyReport& report) {
+    auto grid = workpieces::WorkpieceGridTextCodec::decode(record.encoded_cells);
+    if (!grid)
+        return core::Status::failure(grid.error().code, grid.error().message);
+    std::optional<workpieces::WorkpieceServerState> server_state;
+    if (!record.encoded_server_state.empty()) {
+        auto decoded = workpieces::WorkpieceServerStateTextCodec::decode(
+            record.encoded_server_state, record.shape);
+        if (!decoded)
+            return core::Status::failure(decoded.error().code, decoded.error().message);
+        server_state = std::move(decoded).value();
+    }
+    WorkpieceRecord materialized{record.workpiece_id,     record.prototype_id,
+                                 std::move(grid).value(), record.material_prototype_id,
+                                 std::move(server_state), record.owner_session,
+                                 record.revision,         record.committed};
+    auto status = materialized.validate();
+    if (!status)
+        return status;
+    if (auto* existing = state.workpieces().find(record.workpiece_id); existing != nullptr) {
+        *existing = std::move(materialized);
+        count_updated(report, report.workpieces_updated);
+        return core::Status::ok();
+    }
+    status = state.workpieces().insert(std::move(materialized));
+    if (!status)
+        return status;
+    count_inserted(report, report.workpieces_inserted);
+    return core::Status::ok();
+}
+
 [[nodiscard]] core::Status upsert_process(WorldState& state,
                                           const processes::ProcessInstance& record,
                                           WorldReplicationDeltaApplyReport& report) {
@@ -821,6 +937,8 @@ WorldReplicationDeltaSnapshot materialize_replication_delta(const WorldState& st
         if (subject.has_entity) {
             if (const auto* record = state.entities().find_by_save_id(subject.subject_id)) {
                 snapshot.entities.push_back(entity_save_record(*record));
+            } else if (const auto* resource = state.physical_resources().find(subject.subject_id)) {
+                snapshot.entities.push_back(physical_resource_save_record(*resource));
             }
         }
         if (subject.has_cargo) {
@@ -836,6 +954,12 @@ WorldReplicationDeltaSnapshot materialize_replication_delta(const WorldState& st
                 });
             }
         }
+        if (subject.has_workpiece) {
+            if (const auto* record = state.workpieces().find(
+                    core::WorkpieceId::from_value(subject.subject_id.value()))) {
+                snapshot.workpieces.push_back(public_workpiece_save_record(*record));
+            }
+        }
         if (subject.has_assembly) {
             if (const auto* record = state.assemblies().find(subject.subject_id)) {
                 snapshot.assemblies.push_back(*record);
@@ -849,9 +973,10 @@ WorldReplicationDeltaSnapshot materialize_replication_delta(const WorldState& st
     return snapshot;
 }
 
-core::Result<WorldReplicationDeltaSnapshot> filter_replication_delta_snapshot(
-    const WorldReplicationDeltaSnapshot& snapshot,
-    const net::ReplicationRelevancePolicy& policy, core::NetId recipient) {
+core::Result<WorldReplicationDeltaSnapshot>
+filter_replication_delta_snapshot(const WorldReplicationDeltaSnapshot& snapshot,
+                                  const net::ReplicationRelevancePolicy& policy,
+                                  core::NetId recipient) {
     auto status = validate_delta_snapshot_payload(snapshot);
     if (!status) {
         return core::Result<WorldReplicationDeltaSnapshot>::failure(status.error().code,
@@ -875,8 +1000,7 @@ core::Result<WorldReplicationDeltaSnapshot> filter_replication_delta_snapshot(
 
     std::set<std::uint64_t> visible_subjects;
     for (const auto& subject : snapshot.plan.subjects) {
-        if (!net::ReplicationRelevance::subject_is_visible(policy, recipient,
-                                                           subject.subject_id)) {
+        if (!net::ReplicationRelevance::subject_is_visible(policy, recipient, subject.subject_id)) {
             continue;
         }
         filtered.plan.subjects.push_back(subject);
@@ -885,8 +1009,7 @@ core::Result<WorldReplicationDeltaSnapshot> filter_replication_delta_snapshot(
         filtered.plan.materialized_record_count += subject.materialized_record_count;
         filtered.plan.missing_subject_count += subject.missing_subject ? 1U : 0U;
     }
-    filtered.plan.unique_subject_count =
-        static_cast<std::uint32_t>(filtered.plan.subjects.size());
+    filtered.plan.unique_subject_count = static_cast<std::uint32_t>(filtered.plan.subjects.size());
     filtered.plan.event_count =
         filtered.plan.global_event_count + filtered.plan.subject_event_count;
     filtered.plan.requires_snapshot_resync = filtered.plan.missing_subject_count > 0;
@@ -912,6 +1035,11 @@ core::Result<WorldReplicationDeltaSnapshot> filter_replication_delta_snapshot(
     for (const auto& record : snapshot.inventories) {
         if (visible(record.owner_id)) {
             filtered.inventories.push_back(record);
+        }
+    }
+    for (const auto& record : snapshot.workpieces) {
+        if (visible(core::SaveId::from_value(record.workpiece_id.value()))) {
+            filtered.workpieces.push_back(record);
         }
     }
     for (const auto& record : snapshot.assemblies) {
@@ -949,9 +1077,8 @@ materialize_replication_deltas_for_tick(const WorldState& state,
         WorldReplicationDeltaTickCommand entry;
         entry.client_id = command.client_id;
         entry.command_sequence = command.sequence;
-        entry.replication_sequence = command.replication_sequence != 0
-                                         ? command.replication_sequence
-                                         : command.sequence;
+        entry.replication_sequence =
+            command.replication_sequence != 0 ? command.replication_sequence : command.sequence;
         entry.command_type = command.command_type;
         entry.error_code = command.error_code;
         entry.error_message = command.error_message;
@@ -968,12 +1095,8 @@ materialize_replication_deltas_for_tick(const WorldState& state,
             entry.skip_reason = "no_events";
         } else {
             const net::ReplicationBatch batch{
-                command.sequence,
-                command.command_type,
-                command.events,
-                command.reserved_ids,
-                entry.replication_sequence,
-                command.client_id,
+                command.sequence,     command.command_type,       command.events,
+                command.reserved_ids, entry.replication_sequence, command.client_id,
             };
             entry.snapshot = materialize_replication_delta(state, batch);
             ++report.materialized_command_count;
@@ -1083,8 +1206,8 @@ core::Result<WorldReplicationDeltaDeliveryReport> send_replication_delta_snapsho
                     }
 
                     auto status = host.send_replication_message(
-                        decision.client_id, make_replication_delta_transport_message(
-                                                filtered.value(), server_time_ms));
+                        decision.client_id,
+                        make_replication_delta_transport_message(filtered.value(), server_time_ms));
                     if (!status) {
                         return core::Result<WorldReplicationDeltaDeliveryReport>::failure(
                             status.error().code, status.error().message);
@@ -1171,6 +1294,13 @@ apply_replication_delta(WorldState& state, const WorldReplicationDeltaSnapshot& 
                                                                            status.error().message);
         }
     }
+    for (const auto& record : snapshot.workpieces) {
+        status = upsert_workpiece(state, record, report);
+        if (!status) {
+            return core::Result<WorldReplicationDeltaApplyReport>::failure(status.error().code,
+                                                                           status.error().message);
+        }
+    }
     for (const auto& record : snapshot.processes) {
         status = upsert_process(state, record, report);
         if (!status) {
@@ -1245,8 +1375,7 @@ core::Result<WorldClientReplicationApplyReport> apply_client_replication_deltas(
         const auto source_identity_mismatch =
             snapshot.plan.source_client_id.is_valid() && batch.source_client_id.is_valid() &&
             snapshot.plan.source_client_id != batch.source_client_id;
-        if (snapshot.plan.command_sequence != batch.command_sequence ||
-            source_identity_mismatch) {
+        if (snapshot.plan.command_sequence != batch.command_sequence || source_identity_mismatch) {
             return core::Result<WorldClientReplicationApplyReport>::failure(
                 "world_client_replication.command_identity_mismatch",
                 "client replication delta command identity does not match queued event batch");

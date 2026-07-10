@@ -2,6 +2,7 @@
 
 #include "engine/core/hash.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -54,6 +55,47 @@ namespace {
         "region has no resource rule that resolves to a voxel palette entry: " + region.id);
 }
 
+[[nodiscard]] std::uint64_t cell_noise(std::uint64_t seed, std::int64_t x, std::int64_t y,
+                                       std::int64_t z, std::string_view salt) noexcept {
+    return mix(seed ^ mix(coordinate_bits(x)) ^ mix(coordinate_bits(y) << 1U) ^
+               mix(coordinate_bits(z) << 2U) ^ mix(stable_string_hash(salt)));
+}
+
+[[nodiscard]] bool placement_is_external(std::string_view placement) noexcept {
+    return placement.contains("object") || placement.contains("entity") ||
+           placement.contains("resource_site") || placement.contains("large_static");
+}
+
+[[nodiscard]] GeneratedWorldFeatureKind feature_kind(std::string_view placement) noexcept {
+    if (placement.contains("block_entity"))
+        return GeneratedWorldFeatureKind::block_entity;
+    if (placement.contains("large_static"))
+        return GeneratedWorldFeatureKind::large_static_object;
+    if (placement.contains("resource_site"))
+        return GeneratedWorldFeatureKind::resource_site;
+    if (placement.contains("object"))
+        return GeneratedWorldFeatureKind::surface_object;
+    return GeneratedWorldFeatureKind::rich_block;
+}
+
+[[nodiscard]] bool rule_depth_matches(std::string_view placement, std::int64_t depth) noexcept {
+    if (placement.contains("surface"))
+        return depth <= 1;
+    if (placement.contains("deep"))
+        return depth >= 16;
+    return depth >= 0;
+}
+
+[[nodiscard]] bool rule_selected(const RegionResourceRule& rule,
+                                 const TerrainGenerationConfig& config, std::int64_t x,
+                                 std::int64_t y, std::int64_t z) noexcept {
+    const auto abundance = std::clamp(rule.abundance, 0.0, 1.0);
+    const auto threshold = static_cast<std::uint64_t>(
+        abundance *
+        static_cast<double>(std::min<std::uint16_t>(config.feature_frequency_per_mille, 1000)));
+    return cell_noise(config.world_seed, x, y, z, rule.prototype_id.value()) % 1000U < threshold;
+}
+
 } // namespace
 
 core::Result<VoxelChunk> DeterministicTerrainGenerator::generate_chunk(
@@ -66,6 +108,11 @@ core::Result<VoxelChunk> DeterministicTerrainGenerator::generate_chunk(
     if (palette.empty()) {
         return core::Result<VoxelChunk>::failure("terrain_generator.empty_palette",
                                                  "terrain generation requires a voxel palette");
+    }
+    if (config.cave_frequency_per_mille > 1000 || config.feature_frequency_per_mille > 1000) {
+        return core::Result<VoxelChunk>::failure(
+            "terrain_generator.invalid_frequency",
+            "worldgen cave and feature frequencies must be 0..1000 per mille");
     }
 
     const auto* region = regions.find(config.region_id);
@@ -100,8 +147,29 @@ core::Result<VoxelChunk> DeterministicTerrainGenerator::generate_chunk(
             for (std::uint16_t x = 0; x < VoxelChunk::edge_length; ++x) {
                 const auto global_x = chunk_origin.value().x + static_cast<std::int64_t>(x);
                 const auto surface_y = surface_height_at(config, global_x, global_z);
-                cells.push_back(global_y <= surface_y ? terrain_cell.value()
-                                                      : VoxelCell{VoxelPalette::air_type, 255});
+                if (global_y > surface_y) {
+                    cells.push_back(VoxelCell{VoxelPalette::air_type, 255});
+                    continue;
+                }
+                const auto depth = surface_y - global_y;
+                if (config.enable_caves && depth >= config.cave_min_depth &&
+                    cell_noise(config.world_seed, global_x, global_y, global_z, "cave") % 1000U <
+                        config.cave_frequency_per_mille) {
+                    cells.push_back(VoxelCell{VoxelPalette::air_type, 0});
+                    continue;
+                }
+                auto selected = terrain_cell.value();
+                for (const auto& rule : region->resource_rules) {
+                    if (placement_is_external(rule.placement) ||
+                        !rule_depth_matches(rule.placement, depth) ||
+                        !rule_selected(rule, config, global_x, global_y, global_z)) {
+                        continue;
+                    }
+                    if (auto feature_cell = palette.cell_for(rule.prototype_id); feature_cell) {
+                        selected = feature_cell.value();
+                    }
+                }
+                cells.push_back(selected);
             }
         }
     }
@@ -112,6 +180,44 @@ core::Result<VoxelChunk> DeterministicTerrainGenerator::generate_chunk(
         return core::Result<VoxelChunk>::failure(status.error().code, status.error().message);
     }
     return core::Result<VoxelChunk>::success(std::move(chunk));
+}
+
+core::Result<GeneratedChunk> DeterministicTerrainGenerator::generate_chunk_with_features(
+    ChunkCoord coord, const TerrainGenerationConfig& config, const RegionGraph& regions,
+    const VoxelPalette& palette) {
+    auto chunk = generate_chunk(coord, config, regions, palette);
+    if (!chunk) {
+        return core::Result<GeneratedChunk>::failure(chunk.error().code, chunk.error().message);
+    }
+    const auto* region = regions.find(config.region_id);
+    auto origin = chunk_local_to_block(coord, {0, 0, 0});
+    if (region == nullptr || !origin) {
+        return core::Result<GeneratedChunk>::failure(
+            "terrain_generator.feature_context_missing",
+            "worldgen feature pass requires a valid region and chunk origin");
+    }
+    GeneratedChunk result{std::move(chunk).value(), {}};
+    for (const auto& rule : region->resource_rules) {
+        if (!placement_is_external(rule.placement))
+            continue;
+        for (std::uint16_t z = 0; z < VoxelChunk::edge_length; ++z) {
+            for (std::uint16_t x = 0; x < VoxelChunk::edge_length; ++x) {
+                const auto global_x = origin.value().x + x;
+                const auto global_z = origin.value().z + z;
+                const auto global_y = surface_height_at(config, global_x, global_z) + 1;
+                if (!rule_selected(rule, config, global_x, global_y, global_z))
+                    continue;
+                result.features.push_back({
+                    rule.prototype_id,
+                    feature_kind(rule.placement),
+                    {global_x, global_y, global_z},
+                    cell_noise(config.world_seed, global_x, global_y, global_z, rule.placement),
+                    rule.placement,
+                });
+            }
+        }
+    }
+    return core::Result<GeneratedChunk>::success(std::move(result));
 }
 
 std::int64_t DeterministicTerrainGenerator::surface_height_at(const TerrainGenerationConfig& config,

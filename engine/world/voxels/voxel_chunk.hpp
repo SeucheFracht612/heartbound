@@ -12,6 +12,8 @@ namespace heartstead::world {
 struct VoxelCell {
     std::uint16_t type = 0;
     std::uint8_t light = 0;
+    std::uint16_t state_bits = 0;
+    std::uint32_t metadata_handle = 0;
 
     [[nodiscard]] static constexpr VoxelCell air() noexcept {
         return VoxelCell{};

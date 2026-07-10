@@ -1633,6 +1633,37 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
         VkPipelineVertexInputStateCreateInfo vertex_input{};
         vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+        VkVertexInputBindingDescription vertex_binding{};
+        std::vector<VkVertexInputAttributeDescription> vertex_attributes;
+        if (!desc.vertex_attributes.empty()) {
+            vertex_binding.binding = 0;
+            vertex_binding.stride = desc.vertex_stride;
+            vertex_binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+            vertex_attributes.reserve(desc.vertex_attributes.size());
+            for (const auto& attribute : desc.vertex_attributes) {
+                VkFormat format = VK_FORMAT_R32G32B32_SFLOAT;
+                switch (attribute.format) {
+                case rhi::RenderVertexAttributeFormat::float2:
+                    format = VK_FORMAT_R32G32_SFLOAT;
+                    break;
+                case rhi::RenderVertexAttributeFormat::float3:
+                    format = VK_FORMAT_R32G32B32_SFLOAT;
+                    break;
+                case rhi::RenderVertexAttributeFormat::uint16:
+                    format = VK_FORMAT_R16_UINT;
+                    break;
+                case rhi::RenderVertexAttributeFormat::uint8:
+                    format = VK_FORMAT_R8_UINT;
+                    break;
+                }
+                vertex_attributes.push_back({attribute.location, 0, format, attribute.byte_offset});
+            }
+            vertex_input.vertexBindingDescriptionCount = 1;
+            vertex_input.pVertexBindingDescriptions = &vertex_binding;
+            vertex_input.vertexAttributeDescriptionCount =
+                static_cast<std::uint32_t>(vertex_attributes.size());
+            vertex_input.pVertexAttributeDescriptions = vertex_attributes.data();
+        }
 
         VkPipelineInputAssemblyStateCreateInfo input_assembly{};
         input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;

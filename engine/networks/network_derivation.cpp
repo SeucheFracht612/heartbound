@@ -38,27 +38,9 @@ struct DerivedNodeRef {
     return lhs.x == rhs.x && lhs.y == rhs.y && lhs.z == rhs.z;
 }
 
-[[nodiscard]] std::int64_t coord_component(double value) noexcept {
-    constexpr auto min_i64 = static_cast<double>(std::numeric_limits<std::int64_t>::min());
-    constexpr auto max_i64_exclusive = -min_i64;
-    if (!std::isfinite(value)) {
-        return 0;
-    }
-    if (value <= min_i64) {
-        return std::numeric_limits<std::int64_t>::min();
-    }
-    if (value >= max_i64_exclusive) {
-        return std::numeric_limits<std::int64_t>::max();
-    }
-    return static_cast<std::int64_t>(std::floor(value));
-}
-
 [[nodiscard]] NetworkCoord coord_from_transform(const build::Transform& transform) noexcept {
-    return {
-        coord_component(transform.position.x),
-        coord_component(transform.position.y),
-        coord_component(transform.position.z),
-    };
+    return {transform.position.anchor.x, transform.position.anchor.y,
+            transform.position.anchor.z};
 }
 
 [[nodiscard]] std::uint64_t make_stable_hash(std::string_view domain, DerivedNodeSource source,

@@ -12,12 +12,27 @@
 
 namespace heartstead::assets {
 
+struct AssetRecord;
+
+enum class ShaderExtensionPoint : std::uint8_t {
+    material_template,
+    foliage,
+    water,
+    ore_glow,
+    post_processing,
+    fog_weather,
+    debug_overlay,
+    sky,
+};
+
 struct ResourcePackManifest {
     std::string id;
     std::string name;
     std::string version;
     std::string description;
     std::filesystem::path root;
+    std::vector<ShaderExtensionPoint> shader_extensions;
+    bool gameplay_content = false;
 };
 
 struct ResourcePackDiscoveryResult {
@@ -57,5 +72,16 @@ class ResourcePackLoadPlanner {
          std::uint32_t priority_base = default_resource_pack_priority_base,
          std::uint32_t priority_step = default_resource_pack_priority_step);
 };
+
+class ResourcePackPolicy {
+  public:
+    [[nodiscard]] static core::Status validate_manifest(const ResourcePackManifest& manifest);
+    [[nodiscard]] static core::Status validate_override(const ResourcePackManifest& manifest,
+                                                        const AssetRecord& asset);
+};
+
+[[nodiscard]] std::string_view shader_extension_point_name(ShaderExtensionPoint point) noexcept;
+[[nodiscard]] core::Result<ShaderExtensionPoint>
+shader_extension_point_from_name(std::string_view name);
 
 } // namespace heartstead::assets

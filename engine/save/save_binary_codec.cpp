@@ -13,8 +13,11 @@ namespace heartstead::save {
 namespace {
 
 constexpr std::string_view magic = "HSTDSAVE";
-constexpr std::uint32_t binary_version = 6;
+constexpr std::uint32_t binary_version = 12;
 constexpr std::uint32_t minimum_supported_binary_version = 2;
+constexpr std::size_t max_binary_save_bytes = 512U * 1024U * 1024U;
+constexpr std::uint32_t max_binary_string_bytes = 16U * 1024U * 1024U;
+constexpr std::uint32_t max_binary_collection_entries = 1'000'000U;
 
 class BinaryWriter {
   public:
@@ -186,6 +189,11 @@ class BinaryReader {
         if (!size) {
             return core::Result<std::string>::failure(size.error().code, size.error().message);
         }
+        if (size.value() > max_binary_string_bytes) {
+            return core::Result<std::string>::failure(
+                "save_binary.string_too_large",
+                "binary save string exceeds the configured safety limit: " + std::string(label));
+        }
         if (remaining() < size.value()) {
             return failure<std::string>(label);
         }
@@ -193,6 +201,20 @@ class BinaryReader {
         std::string result(reinterpret_cast<const char*>(bytes_.data() + offset_), size.value());
         offset_ += size.value();
         return core::Result<std::string>::success(std::move(result));
+    }
+
+    [[nodiscard]] core::Result<std::uint32_t> read_count(std::string_view label) {
+        auto count = read_u32(label);
+        if (!count) {
+            return count;
+        }
+        if (count.value() > max_binary_collection_entries) {
+            return core::Result<std::uint32_t>::failure(
+                "save_binary.collection_too_large",
+                "binary save collection exceeds the configured safety limit: " +
+                    std::string(label));
+        }
+        return count;
     }
 
   private:
@@ -344,7 +366,7 @@ void write_string_list(BinaryWriter& writer, const std::vector<std::string>& val
 
 [[nodiscard]] core::Result<std::vector<std::string>> read_string_list(BinaryReader& reader,
                                                                       std::string_view label) {
-    auto count = reader.read_u32(label);
+    auto count = reader.read_count(label);
     if (!count) {
         return core::Result<std::vector<std::string>>::failure(count.error().code,
                                                                count.error().message);
@@ -363,9 +385,12 @@ void write_string_list(BinaryWriter& writer, const std::vector<std::string>& val
 }
 
 void write_transform(BinaryWriter& writer, const build::Transform& transform) {
-    writer.write_double(transform.position.x);
-    writer.write_double(transform.position.y);
-    writer.write_double(transform.position.z);
+    writer.write_i64(transform.position.anchor.x);
+    writer.write_i64(transform.position.anchor.y);
+    writer.write_i64(transform.position.anchor.z);
+    writer.write_double(transform.position.local_offset.x);
+    writer.write_double(transform.position.local_offset.y);
+    writer.write_double(transform.position.local_offset.z);
     writer.write_double(transform.rotation_degrees.x);
     writer.write_double(transform.rotation_degrees.y);
     writer.write_double(transform.rotation_degrees.z);
@@ -374,39 +399,61 @@ void write_transform(BinaryWriter& writer, const build::Transform& transform) {
     writer.write_double(transform.scale.z);
 }
 
-void write_vec3(BinaryWriter& writer, math::Vec3d value) {
-    writer.write_double(value.x);
-    writer.write_double(value.y);
-    writer.write_double(value.z);
+void write_world_position(BinaryWriter& writer, const world::WorldPosition& value) {
+    writer.write_i64(value.anchor.x);
+    writer.write_i64(value.anchor.y);
+    writer.write_i64(value.anchor.z);
+    writer.write_double(value.local_offset.x);
+    writer.write_double(value.local_offset.y);
+    writer.write_double(value.local_offset.z);
 }
 
-[[nodiscard]] core::Result<math::Vec3d> read_vec3(BinaryReader& reader, std::string_view label) {
+[[nodiscard]] core::Result<world::WorldPosition>
+read_legacy_world_position(BinaryReader& reader, std::string_view label) {
     auto x = reader.read_double(std::string(label) + "_x");
     auto y = reader.read_double(std::string(label) + "_y");
     auto z = reader.read_double(std::string(label) + "_z");
     if (!x || !y || !z) {
-        return core::Result<math::Vec3d>::failure("save_binary.invalid_vec3",
-                                                  "binary save has invalid vec3 fields");
+        return core::Result<world::WorldPosition>::failure(
+            "save_binary.invalid_world_position",
+            "binary save has invalid legacy world position fields");
     }
-    return core::Result<math::Vec3d>::success({x.value(), y.value(), z.value()});
+    return world::WorldPosition::from_legacy_global({x.value(), y.value(), z.value()});
 }
 
-[[nodiscard]] core::Result<build::Transform> read_transform(BinaryReader& reader) {
+[[nodiscard]] core::Result<world::WorldPosition> read_world_position(BinaryReader& reader,
+                                                                     std::string_view label) {
+    auto ax = reader.read_i64(std::string(label) + "_anchor_x");
+    auto ay = reader.read_i64(std::string(label) + "_anchor_y");
+    auto az = reader.read_i64(std::string(label) + "_anchor_z");
+    auto lx = reader.read_double(std::string(label) + "_local_x");
+    auto ly = reader.read_double(std::string(label) + "_local_y");
+    auto lz = reader.read_double(std::string(label) + "_local_z");
+    if (!ax || !ay || !az || !lx || !ly || !lz) {
+        return core::Result<world::WorldPosition>::failure(
+            "save_binary.invalid_world_position",
+            "binary save has invalid anchored world position fields");
+    }
+    return world::WorldPosition::from_anchor({ax.value(), ay.value(), az.value()},
+                                             {lx.value(), ly.value(), lz.value()});
+}
+
+[[nodiscard]] core::Result<build::Transform> read_transform(BinaryReader& reader,
+                                                            std::uint32_t version) {
     build::Transform transform;
-    auto px = reader.read_double("position_x");
-    auto py = reader.read_double("position_y");
-    auto pz = reader.read_double("position_z");
+    auto position = version >= 7 ? read_world_position(reader, "position")
+                                 : read_legacy_world_position(reader, "position");
     auto rx = reader.read_double("rotation_x");
     auto ry = reader.read_double("rotation_y");
     auto rz = reader.read_double("rotation_z");
     auto sx = reader.read_double("scale_x");
     auto sy = reader.read_double("scale_y");
     auto sz = reader.read_double("scale_z");
-    if (!px || !py || !pz || !rx || !ry || !rz || !sx || !sy || !sz) {
+    if (!position || !rx || !ry || !rz || !sx || !sy || !sz) {
         return core::Result<build::Transform>::failure("save_binary.invalid_transform",
                                                        "binary save has invalid transform fields");
     }
-    transform.position = {px.value(), py.value(), pz.value()};
+    transform.position = position.value();
     transform.rotation_degrees = {rx.value(), ry.value(), rz.value()};
     transform.scale = {sx.value(), sy.value(), sz.value()};
     return core::Result<build::Transform>::success(transform);
@@ -425,7 +472,7 @@ void write_build_sockets(BinaryWriter& writer, const std::vector<build::BuildSoc
 
 [[nodiscard]] core::Result<std::vector<build::BuildSocket>>
 read_build_sockets(BinaryReader& reader) {
-    auto count = reader.read_u32("build_sockets");
+    auto count = reader.read_count("build_sockets");
     if (!count) {
         return core::Result<std::vector<build::BuildSocket>>::failure(count.error().code,
                                                                       count.error().message);
@@ -459,7 +506,7 @@ void write_build_ports(BinaryWriter& writer, const std::vector<build::BuildNetwo
 
 [[nodiscard]] core::Result<std::vector<build::BuildNetworkPort>>
 read_build_ports(BinaryReader& reader) {
-    auto count = reader.read_u32("build_ports");
+    auto count = reader.read_count("build_ports");
     if (!count) {
         return core::Result<std::vector<build::BuildNetworkPort>>::failure(count.error().code,
                                                                            count.error().message);
@@ -491,7 +538,7 @@ void write_item_stacks(BinaryWriter& writer, const std::vector<items::ItemStack>
 }
 
 [[nodiscard]] core::Result<std::vector<items::ItemStack>> read_item_stacks(BinaryReader& reader) {
-    auto count = reader.read_u32("item_stacks");
+    auto count = reader.read_count("item_stacks");
     if (!count) {
         return core::Result<std::vector<items::ItemStack>>::failure(count.error().code,
                                                                     count.error().message);
@@ -523,7 +570,7 @@ void write_process_slots(BinaryWriter& writer, const std::vector<processes::Proc
 
 [[nodiscard]] core::Result<std::vector<processes::ProcessSlot>>
 read_process_slots(BinaryReader& reader) {
-    auto count = reader.read_u32("process_slots");
+    auto count = reader.read_count("process_slots");
     if (!count) {
         return core::Result<std::vector<processes::ProcessSlot>>::failure(count.error().code,
                                                                           count.error().message);
@@ -554,7 +601,7 @@ void write_assembly_parts(BinaryWriter& writer,
 
 [[nodiscard]] core::Result<std::vector<assemblies::AssemblyPart>>
 read_assembly_parts(BinaryReader& reader) {
-    auto count = reader.read_u32("assembly_parts");
+    auto count = reader.read_count("assembly_parts");
     if (!count) {
         return core::Result<std::vector<assemblies::AssemblyPart>>::failure(count.error().code,
                                                                             count.error().message);
@@ -590,7 +637,7 @@ void write_assembly_ports(BinaryWriter& writer,
 
 [[nodiscard]] core::Result<std::vector<assemblies::AssemblyPort>>
 read_assembly_ports(BinaryReader& reader) {
-    auto count = reader.read_u32("assembly_ports");
+    auto count = reader.read_count("assembly_ports");
     if (!count) {
         return core::Result<std::vector<assemblies::AssemblyPort>>::failure(count.error().code,
                                                                             count.error().message);
@@ -612,6 +659,32 @@ read_assembly_ports(BinaryReader& reader) {
                                                  capacity.value()});
     }
     return core::Result<std::vector<assemblies::AssemblyPort>>::success(std::move(ports));
+}
+
+void write_process_ids(BinaryWriter& writer, const std::vector<core::ProcessId>& values) {
+    writer.write_count(values.size(), "assembly_process_slots");
+    for (const auto value : values)
+        writer.write_u64(value.value());
+}
+
+[[nodiscard]] core::Result<std::vector<core::ProcessId>> read_process_ids(BinaryReader& reader) {
+    auto count = reader.read_count("assembly_process_slots");
+    if (!count) {
+        return core::Result<std::vector<core::ProcessId>>::failure(count.error().code,
+                                                                   count.error().message);
+    }
+    std::vector<core::ProcessId> result;
+    result.reserve(count.value());
+    for (std::uint32_t index = 0; index < count.value(); ++index) {
+        auto value = reader.read_u64("assembly_process_slot");
+        if (!value || value.value() == 0) {
+            return core::Result<std::vector<core::ProcessId>>::failure(
+                "save_binary.invalid_assembly_process_slot",
+                "binary assembly contains an invalid process slot id");
+        }
+        result.push_back(core::ProcessId::from_value(value.value()));
+    }
+    return core::Result<std::vector<core::ProcessId>>::success(std::move(result));
 }
 
 void write_metadata(BinaryWriter& writer, const SaveMetadata& metadata) {
@@ -649,7 +722,7 @@ void write_metadata(BinaryWriter& writer, const SaveMetadata& metadata) {
         }
         metadata.world_time = world_time.value();
     }
-    auto mod_count = reader.read_u32("enabled_mods");
+    auto mod_count = reader.read_count("enabled_mods");
     if (!mod_count) {
         return core::Result<SaveMetadata>::failure("save_binary.invalid_metadata",
                                                    "binary save has invalid metadata fields");
@@ -679,6 +752,45 @@ void write_metadata(BinaryWriter& writer, const SaveMetadata& metadata) {
     return core::Result<SaveMetadata>::success(std::move(metadata));
 }
 
+void write_voxel_palette(BinaryWriter& writer, const world::VoxelPaletteManifest& manifest) {
+    writer.write_count(manifest.entries.size(), "voxel_palette");
+    for (const auto& entry : manifest.entries) {
+        writer.write_u16(entry.type);
+        write_prototype_id(writer, entry.prototype_id);
+    }
+}
+
+[[nodiscard]] core::Result<world::VoxelPaletteManifest> read_voxel_palette(BinaryReader& reader) {
+    auto count = reader.read_count("voxel_palette_count");
+    if (!count) {
+        return core::Result<world::VoxelPaletteManifest>::failure(count.error().code,
+                                                                  count.error().message);
+    }
+    if (count.value() > std::numeric_limits<std::uint16_t>::max()) {
+        return core::Result<world::VoxelPaletteManifest>::failure(
+            "save_binary.voxel_palette_too_large",
+            "binary voxel palette cannot contain more than 65535 entries");
+    }
+    world::VoxelPaletteManifest manifest;
+    manifest.entries.reserve(count.value());
+    for (std::uint32_t index = 0; index < count.value(); ++index) {
+        auto type = reader.read_u16("voxel_palette_type");
+        auto prototype = read_prototype_id(reader, "voxel_palette_prototype");
+        if (!type || !prototype) {
+            return core::Result<world::VoxelPaletteManifest>::failure(
+                "save_binary.invalid_voxel_palette",
+                "binary save has an invalid voxel palette entry");
+        }
+        manifest.entries.push_back({type.value(), prototype.value()});
+    }
+    auto status = manifest.validate();
+    if (!status) {
+        return core::Result<world::VoxelPaletteManifest>::failure(status.error().code,
+                                                                  status.error().message);
+    }
+    return core::Result<world::VoxelPaletteManifest>::success(std::move(manifest));
+}
+
 [[nodiscard]] core::Result<std::int64_t>
 read_chunk_coord_component(BinaryReader& reader, std::uint32_t version, std::string_view label) {
     if (version >= 5) {
@@ -692,10 +804,28 @@ read_chunk_coord_component(BinaryReader& reader, std::uint32_t version, std::str
     return core::Result<std::int64_t>::success(legacy.value());
 }
 
+[[nodiscard]] core::Result<simulation::WorldTick>
+read_process_tick(BinaryReader& reader, std::uint32_t file_version, std::string_view label) {
+    if (file_version >= 9) {
+        return reader.read_u64(label);
+    }
+    auto legacy = reader.read_i64(label);
+    if (!legacy) {
+        return core::Result<simulation::WorldTick>::failure(legacy.error().code,
+                                                            legacy.error().message);
+    }
+    if (legacy.value() < 0) {
+        return core::Result<simulation::WorldTick>::failure(
+            "save_binary.invalid_process_time", "legacy process time cannot be negative");
+    }
+    return core::Result<simulation::WorldTick>::success(
+        static_cast<simulation::WorldTick>(legacy.value()));
+}
+
 template <typename T>
 [[nodiscard]] core::Result<std::uint32_t> read_count(BinaryReader& reader, std::string_view label) {
     (void)sizeof(T);
-    return reader.read_u32(label);
+    return reader.read_count(label);
 }
 
 } // namespace
@@ -707,6 +837,7 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
     }
     writer.write_u32(binary_version);
     write_metadata(writer, snapshot.metadata);
+    write_voxel_palette(writer, snapshot.voxel_palette);
 
     writer.write_count(snapshot.chunk_edits.size(), "chunk_edits");
     for (const auto& chunk : snapshot.chunk_edits) {
@@ -748,7 +879,7 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
     for (const auto& cargo_record : snapshot.cargo_records) {
         writer.write_u64(cargo_record.cargo_id.value());
         write_prototype_id(writer, cargo_record.prototype_id);
-        write_vec3(writer, cargo_record.position);
+        write_world_position(writer, cargo_record.position);
         writer.write_u64(cargo_record.mass_grams);
         writer.write_u64(cargo_record.volume_milliliters);
         writer.write_i32(cargo_record.stability_per_mille);
@@ -764,6 +895,11 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_u16(workpiece.shape.height);
         writer.write_u16(workpiece.shape.depth);
         writer.write_string(workpiece.encoded_cells);
+        writer.write_string(workpiece.material_prototype_id.value());
+        writer.write_string(workpiece.encoded_server_state);
+        writer.write_u64(workpiece.owner_session.value());
+        writer.write_u64(workpiece.revision);
+        writer.write_bool(workpiece.committed);
     }
 
     writer.write_count(snapshot.assemblies.size(), "assemblies");
@@ -774,6 +910,14 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_bool(assembly.operating);
         write_assembly_parts(writer, assembly.parts);
         write_assembly_ports(writer, assembly.ports);
+        writer.write_string(assemblies::assembly_state_name(
+            assembly.operating ? assemblies::AssemblyState::operating : assembly.state));
+        writer.write_u32(assembly.current_stage);
+        writer.write_u64(assembly.revision);
+        write_string_list(writer, assembly.capabilities);
+        write_process_ids(writer, assembly.process_slots);
+        writer.write_string(assembly.failure_reason);
+        writer.write_string(assembly.custom_state);
     }
 
     writer.write_count(snapshot.processes.size(), "processes");
@@ -781,14 +925,28 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_u64(process.process_id.value());
         writer.write_u64(process.owner_id.value());
         write_prototype_id(writer, process.prototype_id);
-        writer.write_i64(process.start_time_ms);
-        writer.write_i64(process.last_update_time_ms);
-        writer.write_i64(process.required_effective_work_ms);
-        writer.write_i64(process.accumulated_effective_work_ms);
+        writer.write_u64(process.started_at);
+        writer.write_u64(process.last_eval);
+        writer.write_u64(process.required_work_ticks);
+        writer.write_u64(process.accrued_work_ticks);
         writer.write_u8(process_state_id(process.state));
         writer.write_string(process.interruption_reason);
         write_process_slots(writer, process.input_slots);
         write_process_slots(writer, process.output_slots);
+        writer.write_bool(process.output_claimed);
+        writer.write_string(process.condition_function_id);
+        writer.write_u8(static_cast<std::uint8_t>(process.interruption_policy));
+    }
+
+    writer.write_count(snapshot.fires.size(), "fires");
+    for (const auto& fire : snapshot.fires) {
+        writer.write_u64(fire.fire_id.value());
+        write_prototype_id(writer, fire.prototype_id);
+        writer.write_u8(static_cast<std::uint8_t>(fire.state));
+        writer.write_u64(fire.fuel_buffer_ticks);
+        writer.write_u64(fire.last_eval);
+        writer.write_u64(fire.embers_until);
+        writer.write_bool(fire.weather_exposed);
     }
 
     writer.write_count(snapshot.mod_states.size(), "mod_states");
@@ -798,10 +956,25 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_string(mod_state.encoded_state);
     }
 
+    writer.write_count(snapshot.missing_prototypes.size(), "missing_prototypes");
+    for (const auto& missing : snapshot.missing_prototypes) {
+        writer.write_u8(static_cast<std::uint8_t>(missing.kind));
+        writer.write_u64(missing.stable_id);
+        write_prototype_id(writer, missing.original_prototype_id);
+        write_world_position(writer, missing.position);
+        writer.write_u64(missing.owner_id.value());
+        writer.write_string(missing.saved_blob);
+        writer.write_string(missing.warning);
+    }
+
     return std::move(writer).take();
 }
 
 core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() > max_binary_save_bytes) {
+        return core::Result<SaveSnapshot>::failure(
+            "save_binary.file_too_large", "binary save exceeds the configured safety limit");
+    }
     BinaryReader reader(bytes);
     for (const auto expected : magic) {
         auto actual = reader.read_u8("magic");
@@ -829,6 +1002,14 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         return core::Result<SaveSnapshot>::failure(metadata.error().code, metadata.error().message);
     }
     snapshot.metadata = std::move(metadata).value();
+    if (version.value() >= 7) {
+        auto palette = read_voxel_palette(reader);
+        if (!palette) {
+            return core::Result<SaveSnapshot>::failure(palette.error().code,
+                                                       palette.error().message);
+        }
+        snapshot.voxel_palette = std::move(palette).value();
+    }
 
     auto chunk_count = read_count<ChunkEditSaveRecord>(reader, "chunk_edits");
     if (!chunk_count) {
@@ -858,7 +1039,7 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
     for (std::uint32_t index = 0; index < build_count.value(); ++index) {
         auto id = reader.read_u64("build_id");
         auto prototype = read_prototype_id(reader, "build_prototype");
-        auto transform = read_transform(reader);
+        auto transform = read_transform(reader, version.value());
         auto state = read_construction_state(reader);
         auto sockets = read_build_sockets(reader);
         auto ports = read_build_ports(reader);
@@ -893,7 +1074,7 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         auto kind = read_entity_kind(reader);
         build::Transform transform;
         if (version.value() >= 3) {
-            auto parsed_transform = read_transform(reader);
+            auto parsed_transform = read_transform(reader, version.value());
             if (!parsed_transform) {
                 return core::Result<SaveSnapshot>::failure(parsed_transform.error().code,
                                                            parsed_transform.error().message);
@@ -938,9 +1119,11 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         cargo::CargoRecord record;
         auto id = reader.read_u64("cargo_id");
         auto prototype = read_prototype_id(reader, "cargo_prototype");
-        math::Vec3d position;
+        world::WorldPosition position;
         if (version.value() >= 4) {
-            auto parsed_position = read_vec3(reader, "cargo_position");
+            auto parsed_position = version.value() >= 7
+                                       ? read_world_position(reader, "cargo_position")
+                                       : read_legacy_world_position(reader, "cargo_position");
             if (!parsed_position) {
                 return core::Result<SaveSnapshot>::failure(parsed_position.error().code,
                                                            parsed_position.error().message);
@@ -980,6 +1163,37 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         auto height = reader.read_u16("workpiece_height");
         auto depth = reader.read_u16("workpiece_depth");
         auto cells = reader.read_string("workpiece_cells");
+        core::PrototypeId material;
+        std::string server_state;
+        core::NetId owner;
+        std::uint64_t revision = 1;
+        bool committed = false;
+        if (version.value() >= 11) {
+            auto encoded_material = reader.read_string("workpiece_material");
+            auto encoded_server_state = reader.read_string("workpiece_server_state");
+            auto parsed_owner = reader.read_u64("workpiece_owner");
+            auto parsed_revision = reader.read_u64("workpiece_revision");
+            auto parsed_committed = reader.read_bool("workpiece_committed");
+            if (!encoded_material || !encoded_server_state || !parsed_owner || !parsed_revision ||
+                !parsed_committed) {
+                return core::Result<SaveSnapshot>::failure(
+                    "save_binary.invalid_workpiece",
+                    "binary save has invalid rich workpiece fields");
+            }
+            if (!encoded_material.value().empty()) {
+                auto parsed_material = core::PrototypeId::parse(encoded_material.value());
+                if (!parsed_material) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_binary.invalid_workpiece",
+                        "binary workpiece material prototype id is invalid");
+                }
+                material = *parsed_material;
+            }
+            server_state = std::move(encoded_server_state).value();
+            owner = core::NetId::from_value(parsed_owner.value());
+            revision = parsed_revision.value();
+            committed = parsed_committed.value();
+        }
         if (!id || !prototype || !width || !height || !depth || !cells) {
             return core::Result<SaveSnapshot>::failure("save_binary.invalid_workpiece",
                                                        "binary save has invalid workpiece record");
@@ -987,7 +1201,12 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         snapshot.workpieces.push_back({core::WorkpieceId::from_value(id.value()),
                                        prototype.value(),
                                        {width.value(), height.value(), depth.value()},
-                                       std::move(cells).value()});
+                                       std::move(cells).value(),
+                                       material,
+                                       std::move(server_state),
+                                       owner,
+                                       revision,
+                                       committed});
     }
 
     auto assembly_count = read_count<assemblies::AssemblyRecord>(reader, "assemblies");
@@ -1007,10 +1226,43 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
             return core::Result<SaveSnapshot>::failure("save_binary.invalid_assembly",
                                                        "binary save has invalid assembly record");
         }
-        snapshot.assemblies.push_back({core::SaveId::from_value(id.value()),
-                                       core::SaveId::from_value(root.value()), prototype.value(),
-                                       std::move(parts).value(), std::move(ports).value(),
-                                       operating.value()});
+        assemblies::AssemblyRecord record;
+        record.assembly_id = core::SaveId::from_value(id.value());
+        record.root_build_piece_id = core::SaveId::from_value(root.value());
+        record.prototype_id = prototype.value();
+        record.parts = std::move(parts).value();
+        record.ports = std::move(ports).value();
+        record.operating = operating.value();
+        record.state = operating.value() ? assemblies::AssemblyState::operating
+                                         : assemblies::AssemblyState::ready;
+        if (version.value() >= 12) {
+            auto state_name = reader.read_string("assembly_state");
+            auto stage = reader.read_u32("assembly_current_stage");
+            auto revision = reader.read_u64("assembly_revision");
+            auto capabilities = read_string_list(reader, "assembly_capabilities");
+            auto process_slots = read_process_ids(reader);
+            auto failure = reader.read_string("assembly_failure_reason");
+            auto custom = reader.read_string("assembly_custom_state");
+            if (!state_name || !stage || !revision || !capabilities || !process_slots || !failure ||
+                !custom) {
+                return core::Result<SaveSnapshot>::failure(
+                    "save_binary.invalid_assembly",
+                    "binary save has invalid assembly state-machine fields");
+            }
+            auto state = assemblies::parse_assembly_state(state_name.value());
+            if (!state) {
+                return core::Result<SaveSnapshot>::failure(state.error().code,
+                                                           state.error().message);
+            }
+            record.state = state.value();
+            record.current_stage = stage.value();
+            record.revision = revision.value();
+            record.capabilities = std::move(capabilities).value();
+            record.process_slots = std::move(process_slots).value();
+            record.failure_reason = std::move(failure).value();
+            record.custom_state = std::move(custom).value();
+        }
+        snapshot.assemblies.push_back(std::move(record));
     }
 
     auto process_count = read_count<processes::ProcessInstance>(reader, "processes");
@@ -1024,31 +1276,73 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         auto id = reader.read_u64("process_id");
         auto owner = reader.read_u64("process_owner");
         auto prototype = read_prototype_id(reader, "process_prototype");
-        auto start = reader.read_i64("process_start");
-        auto last = reader.read_i64("process_last");
-        auto required = reader.read_i64("process_required");
-        auto accumulated = reader.read_i64("process_accumulated");
+        auto start = read_process_tick(reader, version.value(), "process_start");
+        auto last = read_process_tick(reader, version.value(), "process_last");
+        auto required = read_process_tick(reader, version.value(), "process_required");
+        auto accumulated = read_process_tick(reader, version.value(), "process_accumulated");
         auto state = read_process_state(reader);
         auto interruption = reader.read_string("process_interruption");
         auto inputs = read_process_slots(reader);
         auto outputs = read_process_slots(reader);
+        auto output_claimed = version.value() >= 9 ? reader.read_bool("process_output_claimed")
+                                                   : core::Result<bool>::success(false);
+        auto condition = version.value() >= 9 ? reader.read_string("process_condition_function")
+                                              : core::Result<std::string>::success({});
+        auto interruption_policy = version.value() >= 9
+                                       ? reader.read_u8("process_interruption_policy")
+                                       : core::Result<std::uint8_t>::success(0);
         if (!id || !owner || !prototype || !start || !last || !required || !accumulated || !state ||
-            !interruption || !inputs || !outputs) {
+            !interruption || !inputs || !outputs || !output_claimed || !condition ||
+            !interruption_policy ||
+            interruption_policy.value() >
+                static_cast<std::uint8_t>(processes::ProcessInterruptionPolicy::fail)) {
             return core::Result<SaveSnapshot>::failure("save_binary.invalid_process",
                                                        "binary save has invalid process record");
         }
         process.process_id = core::ProcessId::from_value(id.value());
         process.owner_id = core::SaveId::from_value(owner.value());
         process.prototype_id = prototype.value();
-        process.start_time_ms = start.value();
-        process.last_update_time_ms = last.value();
-        process.required_effective_work_ms = required.value();
-        process.accumulated_effective_work_ms = accumulated.value();
+        process.started_at = start.value();
+        process.last_eval = last.value();
+        process.required_work_ticks = required.value();
+        process.accrued_work_ticks = accumulated.value();
         process.state = state.value();
         process.interruption_reason = std::move(interruption).value();
         process.input_slots = std::move(inputs).value();
         process.output_slots = std::move(outputs).value();
+        process.output_claimed = output_claimed.value();
+        process.condition_function_id = std::move(condition).value();
+        process.interruption_policy =
+            static_cast<processes::ProcessInterruptionPolicy>(interruption_policy.value());
         snapshot.processes.push_back(std::move(process));
+    }
+
+    if (version.value() >= 10) {
+        auto fire_count = read_count<simulation::FireInstance>(reader, "fires");
+        if (!fire_count) {
+            return core::Result<SaveSnapshot>::failure(fire_count.error().code,
+                                                       fire_count.error().message);
+        }
+        snapshot.fires.reserve(fire_count.value());
+        for (std::uint32_t index = 0; index < fire_count.value(); ++index) {
+            auto id = reader.read_u64("fire_id");
+            auto prototype = read_prototype_id(reader, "fire_prototype");
+            auto state = reader.read_u8("fire_state");
+            auto fuel = reader.read_u64("fire_fuel");
+            auto last_eval = reader.read_u64("fire_last_eval");
+            auto embers_until = reader.read_u64("fire_embers_until");
+            auto exposed = reader.read_bool("fire_weather_exposed");
+            if (!id || !prototype || !state ||
+                state.value() > static_cast<std::uint8_t>(simulation::FireState::out) || !fuel ||
+                !last_eval || !embers_until || !exposed) {
+                return core::Result<SaveSnapshot>::failure(
+                    "save_binary.invalid_fire", "binary save has an invalid fire record");
+            }
+            snapshot.fires.push_back({core::SaveId::from_value(id.value()), prototype.value(),
+                                      static_cast<simulation::FireState>(state.value()),
+                                      fuel.value(), last_eval.value(), embers_until.value(),
+                                      exposed.value()});
+        }
     }
 
     auto mod_state_count = read_count<ModStateSaveRecord>(reader, "mod_states");
@@ -1067,6 +1361,36 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         }
         snapshot.mod_states.push_back(
             {std::move(mod_id).value(), std::move(key).value(), std::move(state).value()});
+    }
+
+    if (version.value() >= 8) {
+        auto missing_count =
+            read_count<world::MissingPrototypeObject>(reader, "missing_prototypes");
+        if (!missing_count) {
+            return core::Result<SaveSnapshot>::failure(missing_count.error().code,
+                                                       missing_count.error().message);
+        }
+        snapshot.missing_prototypes.reserve(missing_count.value());
+        for (std::uint32_t index = 0; index < missing_count.value(); ++index) {
+            auto kind = reader.read_u8("missing_prototype_kind");
+            auto stable_id = reader.read_u64("missing_prototype_id");
+            auto prototype = read_prototype_id(reader, "missing_prototype_original_id");
+            auto position = read_world_position(reader, "missing_prototype_position");
+            auto owner = reader.read_u64("missing_prototype_owner");
+            auto blob = reader.read_string("missing_prototype_blob");
+            auto warning = reader.read_string("missing_prototype_warning");
+            if (!kind ||
+                kind.value() > static_cast<std::uint8_t>(world::MissingPrototypeKind::fire) ||
+                !stable_id || !prototype || !position || !owner || !blob || !warning) {
+                return core::Result<SaveSnapshot>::failure(
+                    "save_binary.invalid_missing_prototype",
+                    "binary save has an invalid missing prototype placeholder");
+            }
+            snapshot.missing_prototypes.push_back(
+                {static_cast<world::MissingPrototypeKind>(kind.value()), stable_id.value(),
+                 prototype.value(), position.value(), core::SaveId::from_value(owner.value()),
+                 std::move(blob).value(), std::move(warning).value()});
+        }
     }
 
     if (!reader.eof()) {

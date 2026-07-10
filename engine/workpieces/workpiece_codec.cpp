@@ -14,7 +14,8 @@ namespace heartstead::workpieces {
 
 namespace {
 
-constexpr std::string_view magic = "heartstead.workpiece_grid.v1";
+constexpr std::string_view magic_v1 = "heartstead.workpiece_grid.v1";
+constexpr std::string_view magic_v2 = "heartstead.workpiece_grid.v2";
 
 [[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter) {
     std::vector<std::string_view> result;
@@ -98,9 +99,9 @@ constexpr std::string_view magic = "heartstead.workpiece_grid.v1";
         WorkpieceGridShape{width.value(), height.value(), depth.value()});
 }
 
-[[nodiscard]] core::Status apply_cell(WorkpieceGrid& grid, std::string_view value) {
+[[nodiscard]] core::Status apply_cell(WorkpieceGrid& grid, std::string_view value, bool legacy) {
     const auto parts = split(value, '|');
-    if (parts.size() != 5) {
+    if (parts.size() != (legacy ? 5U : 7U)) {
         return core::Status::failure("workpiece_codec.invalid_cell",
                                      "cell must contain x, y, z, material, occupancy");
     }
@@ -110,6 +111,9 @@ constexpr std::string_view magic = "heartstead.workpiece_grid.v1";
     auto z = parse_u16(parts[2], "z");
     auto material = parse_u16(parts[3], "material");
     auto occupancy = parse_u8(parts[4], "occupancy");
+    auto pattern =
+        legacy ? core::Result<std::uint16_t>::success(0) : parse_u16(parts[5], "pattern_id");
+    auto flags = legacy ? core::Result<std::uint8_t>::success(0) : parse_u8(parts[6], "flags");
     if (!x) {
         return core::Status::failure(x.error().code, x.error().message);
     }
@@ -122,13 +126,14 @@ constexpr std::string_view magic = "heartstead.workpiece_grid.v1";
     if (!material) {
         return core::Status::failure(material.error().code, material.error().message);
     }
-    if (!occupancy) {
+    if (!occupancy || !pattern || !flags) {
         return core::Status::failure(occupancy.error().code, occupancy.error().message);
     }
 
-    return grid.apply(WorkpieceOperation{WorkpieceOperationKind::set_cell,
-                                         {x.value(), y.value(), z.value()},
-                                         {material.value(), occupancy.value()}});
+    return grid.apply(
+        WorkpieceOperation{WorkpieceOperationKind::set_cell,
+                           {x.value(), y.value(), z.value()},
+                           {material.value(), occupancy.value(), pattern.value(), flags.value()}});
 }
 
 } // namespace
@@ -136,7 +141,7 @@ constexpr std::string_view magic = "heartstead.workpiece_grid.v1";
 std::string WorkpieceGridTextCodec::encode(const WorkpieceGrid& grid) {
     std::ostringstream output;
     const auto shape = grid.shape();
-    output << magic << '\n';
+    output << magic_v2 << '\n';
     output << "shape=" << shape.width << '|' << shape.height << '|' << shape.depth << '\n';
 
     for (std::uint16_t z = 0; z < shape.depth; ++z) {
@@ -145,7 +150,9 @@ std::string WorkpieceGridTextCodec::encode(const WorkpieceGrid& grid) {
                 auto cell = grid.get({x, y, z});
                 if (cell && cell.value().is_occupied()) {
                     output << "cell=" << x << '|' << y << '|' << z << '|' << cell.value().material
-                           << '|' << static_cast<unsigned int>(cell.value().occupancy) << '\n';
+                           << '|' << static_cast<unsigned int>(cell.value().occupancy) << '|'
+                           << cell.value().pattern_id << '|'
+                           << static_cast<unsigned int>(cell.value().flags) << '\n';
                 }
             }
         }
@@ -157,6 +164,7 @@ std::string WorkpieceGridTextCodec::encode(const WorkpieceGrid& grid) {
 
 core::Result<WorkpieceGrid> WorkpieceGridTextCodec::decode(std::string_view text) {
     bool saw_magic = false;
+    bool legacy = false;
     bool saw_end = false;
     std::optional<WorkpieceGrid> grid;
 
@@ -171,11 +179,12 @@ core::Result<WorkpieceGrid> WorkpieceGridTextCodec::decode(std::string_view text
         }
 
         if (!saw_magic) {
-            if (line != magic) {
+            if (line != magic_v1 && line != magic_v2) {
                 return core::Result<WorkpieceGrid>::failure(
                     "workpiece_codec.invalid_magic",
                     "workpiece grid does not start with expected magic");
             }
+            legacy = line == magic_v1;
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
@@ -208,7 +217,7 @@ core::Result<WorkpieceGrid> WorkpieceGridTextCodec::decode(std::string_view text
                         "workpiece_codec.cell_before_shape",
                         "cell records must appear after the shape record");
                 }
-                auto status = apply_cell(*grid, value);
+                auto status = apply_cell(*grid, value, legacy);
                 if (!status) {
                     return core::Result<WorkpieceGrid>::failure(status.error().code,
                                                                 status.error().message);

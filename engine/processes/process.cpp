@@ -12,18 +12,19 @@ namespace {
     return std::clamp(rate, std::int64_t{0}, std::int64_t{10000});
 }
 
-[[nodiscard]] std::int64_t scaled_delta(std::int64_t delta_ms,
-                                        std::int64_t rate_per_mille) noexcept {
-    if (delta_ms <= 0 || rate_per_mille <= 0) {
+[[nodiscard]] simulation::WorldTick scaled_delta(simulation::WorldTick delta_ticks,
+                                                 std::int64_t rate_per_mille) noexcept {
+    if (delta_ticks == 0 || rate_per_mille <= 0) {
         return 0;
     }
 
-    constexpr auto max = std::numeric_limits<std::int64_t>::max();
-    if (delta_ms > max / rate_per_mille) {
+    constexpr auto max = std::numeric_limits<simulation::WorldTick>::max();
+    const auto rate = static_cast<simulation::WorldTick>(rate_per_mille);
+    if (delta_ticks > max / rate) {
         return max;
     }
 
-    return (delta_ms * rate_per_mille) / 1000;
+    return (delta_ticks * rate) / 1000U;
 }
 
 } // namespace
@@ -45,7 +46,7 @@ core::Status ProcessDefinition::validate() const {
         return core::Status::failure("process_definition.invalid_prototype",
                                      "process definition prototype id must be valid");
     }
-    if (default_required_work_ms <= 0) {
+    if (default_required_work_ticks == 0) {
         return core::Status::failure("process_definition.invalid_required_work",
                                      "default process work must be positive");
     }
@@ -86,35 +87,44 @@ core::Status ProcessInstance::validate() const {
         return core::Status::failure("process.invalid_prototype",
                                      "process prototype id must be valid");
     }
-    if (required_effective_work_ms <= 0) {
+    if (required_work_ticks == 0) {
         return core::Status::failure("process.invalid_required_work",
                                      "required process work must be positive");
     }
-    if (accumulated_effective_work_ms < 0 ||
-        accumulated_effective_work_ms > required_effective_work_ms) {
+    if (accrued_work_ticks > required_work_ticks) {
         return core::Status::failure("process.invalid_accumulated_work",
                                      "process accumulated work is outside the valid range");
     }
-    if (last_update_time_ms < start_time_ms) {
+    if (last_eval < started_at) {
         return core::Status::failure("process.invalid_time",
                                      "process last update time cannot predate start time");
     }
     if (!is_known_process_state(state)) {
         return core::Status::failure("process.invalid_state", "process state is unknown");
     }
-    if (state == ProcessState::complete &&
-        accumulated_effective_work_ms != required_effective_work_ms) {
+    if (state == ProcessState::complete && accrued_work_ticks != required_work_ticks) {
         return core::Status::failure("process.invalid_complete_work",
                                      "complete processes must have all required work accumulated");
     }
-    if (state != ProcessState::complete &&
-        accumulated_effective_work_ms == required_effective_work_ms) {
+    if (state != ProcessState::complete && accrued_work_ticks == required_work_ticks) {
         return core::Status::failure("process.invalid_incomplete_work",
                                      "processes with all work accumulated must be complete");
     }
     if (state != ProcessState::interrupted && !interruption_reason.empty()) {
         return core::Status::failure("process.invalid_interruption_reason",
                                      "only interrupted processes may keep an interruption reason");
+    }
+    if (!is_known_interruption_policy(interruption_policy)) {
+        return core::Status::failure("process.invalid_interruption_policy",
+                                     "process interruption policy is unknown");
+    }
+    if (!condition_function_id.empty() && !core::is_valid_local_id(condition_function_id)) {
+        return core::Status::failure("process.invalid_condition_function",
+                                     "process condition function id is invalid");
+    }
+    if (output_claimed && state != ProcessState::complete) {
+        return core::Status::failure("process.invalid_output_claim",
+                                     "only a complete process may have claimed output");
     }
     for (const auto& slot : input_slots) {
         auto status = slot.validate();
@@ -135,15 +145,15 @@ bool ProcessInstance::is_complete() const noexcept {
     return state == ProcessState::complete;
 }
 
-std::int64_t ProcessInstance::remaining_effective_work_ms() const noexcept {
-    return std::max(std::int64_t{0}, required_effective_work_ms - accumulated_effective_work_ms);
+simulation::WorldTick ProcessInstance::remaining_work_ticks() const noexcept {
+    return accrued_work_ticks >= required_work_ticks ? 0 : required_work_ticks - accrued_work_ticks;
 }
 
 core::Result<ProcessInstance> ProcessRuntime::create(core::ProcessId process_id,
                                                      core::SaveId owner_id,
                                                      core::PrototypeId prototype_id,
-                                                     std::int64_t now_ms,
-                                                     std::int64_t required_effective_work_ms) {
+                                                     simulation::WorldTick world_time,
+                                                     simulation::WorldTick required_work_ticks) {
     if (!process_id.is_valid()) {
         return core::Result<ProcessInstance>::failure("process.invalid_id",
                                                       "process id must be valid");
@@ -156,7 +166,7 @@ core::Result<ProcessInstance> ProcessRuntime::create(core::ProcessId process_id,
         return core::Result<ProcessInstance>::failure("process.invalid_prototype",
                                                       "process prototype id must be valid");
     }
-    if (required_effective_work_ms <= 0) {
+    if (required_work_ticks == 0) {
         return core::Result<ProcessInstance>::failure("process.invalid_required_work",
                                                       "required process work must be positive");
     }
@@ -165,9 +175,9 @@ core::Result<ProcessInstance> ProcessRuntime::create(core::ProcessId process_id,
     instance.process_id = process_id;
     instance.owner_id = owner_id;
     instance.prototype_id = std::move(prototype_id);
-    instance.start_time_ms = now_ms;
-    instance.last_update_time_ms = now_ms;
-    instance.required_effective_work_ms = required_effective_work_ms;
+    instance.started_at = world_time;
+    instance.last_eval = world_time;
+    instance.required_work_ticks = required_work_ticks;
     auto status = instance.validate();
     if (!status) {
         return core::Result<ProcessInstance>::failure(status.error().code, status.error().message);
@@ -178,54 +188,64 @@ core::Result<ProcessInstance> ProcessRuntime::create(core::ProcessId process_id,
 core::Result<ProcessInstance> ProcessRuntime::create(core::ProcessId process_id,
                                                      core::SaveId owner_id,
                                                      const ProcessDefinition& definition,
-                                                     std::int64_t now_ms) {
+                                                     simulation::WorldTick world_time) {
     auto status = definition.validate();
     if (!status) {
         return core::Result<ProcessInstance>::failure(status.error().code, status.error().message);
     }
-    return create(process_id, owner_id, definition.prototype_id, now_ms,
-                  definition.default_required_work_ms);
+    return create(process_id, owner_id, definition.prototype_id, world_time,
+                  definition.default_required_work_ticks);
 }
 
-core::Status ProcessRuntime::advance(ProcessInstance& instance, std::int64_t now_ms,
+core::Status ProcessRuntime::advance(ProcessInstance& instance, simulation::WorldTick world_time,
                                      ProcessModifiers modifiers) {
     if (instance.state == ProcessState::complete || instance.state == ProcessState::interrupted) {
         return core::Status::ok();
     }
 
-    if (now_ms < instance.last_update_time_ms) {
+    if (world_time < instance.last_eval) {
         return core::Status::failure("process.time_reversed", "process time cannot move backward");
     }
 
-    const auto delta_ms = now_ms - instance.last_update_time_ms;
-    const auto effective_delta = scaled_delta(delta_ms, modifiers.effective_rate_per_mille());
-    const auto applied_delta = std::min(instance.remaining_effective_work_ms(), effective_delta);
-    instance.accumulated_effective_work_ms += applied_delta;
-    instance.last_update_time_ms = now_ms;
+    const auto delta_ticks = world_time - instance.last_eval;
+    const auto effective_delta = scaled_delta(delta_ticks, modifiers.effective_rate_per_mille());
+    const auto applied_delta = std::min(instance.remaining_work_ticks(), effective_delta);
+    instance.accrued_work_ticks += applied_delta;
+    instance.last_eval = world_time;
 
-    if (instance.accumulated_effective_work_ms >= instance.required_effective_work_ms) {
+    if (instance.accrued_work_ticks >= instance.required_work_ticks) {
         instance.state = ProcessState::complete;
     }
 
     return core::Status::ok();
 }
 
+core::Status ProcessRuntime::evaluate(ProcessInstance& instance, simulation::WorldTick world_time,
+                                      ProcessModifiers modifiers,
+                                      ProcessEvaluationTrigger trigger) {
+    (void)trigger;
+    return advance(instance, world_time, modifiers);
+}
+
 void ProcessRuntime::interrupt(ProcessInstance& instance, std::string reason) {
     if (instance.state == ProcessState::complete) {
         return;
+    }
+    if (instance.interruption_policy == ProcessInterruptionPolicy::reset) {
+        instance.accrued_work_ticks = 0;
     }
     instance.state = ProcessState::interrupted;
     instance.interruption_reason = std::move(reason);
 }
 
-core::Status ProcessRuntime::resume(ProcessInstance& instance, std::int64_t now_ms) {
-    if (now_ms < instance.last_update_time_ms) {
+core::Status ProcessRuntime::resume(ProcessInstance& instance, simulation::WorldTick world_time) {
+    if (world_time < instance.last_eval) {
         return core::Status::failure("process.time_reversed", "process time cannot move backward");
     }
     if (instance.state == ProcessState::interrupted) {
         instance.state = ProcessState::running;
         instance.interruption_reason.clear();
-        instance.last_update_time_ms = now_ms;
+        instance.last_eval = world_time;
     }
     return core::Status::ok();
 }
@@ -253,6 +273,16 @@ bool is_known_process_state(ProcessState state) noexcept {
     case ProcessState::running:
     case ProcessState::interrupted:
     case ProcessState::complete:
+        return true;
+    }
+    return false;
+}
+
+bool is_known_interruption_policy(ProcessInterruptionPolicy policy) noexcept {
+    switch (policy) {
+    case ProcessInterruptionPolicy::pause:
+    case ProcessInterruptionPolicy::reset:
+    case ProcessInterruptionPolicy::fail:
         return true;
     }
     return false;

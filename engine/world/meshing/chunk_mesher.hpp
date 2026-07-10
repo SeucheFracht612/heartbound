@@ -2,6 +2,7 @@
 
 #include "engine/core/result.hpp"
 #include "engine/math/vector.hpp"
+#include "engine/world/blocks/block_model.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 
 #include <cstddef>
@@ -9,6 +10,9 @@
 #include <vector>
 
 namespace heartstead::world {
+
+class ChunkDatabase;
+class VoxelPalette;
 
 enum class ChunkMeshFaceDirection {
     negative_x,
@@ -26,6 +30,16 @@ struct ChunkMeshVertex {
     float v = 0.0F;
     std::uint16_t voxel_type = 0;
     std::uint8_t light = 0;
+    std::uint16_t state_bits = 0;
+};
+
+struct RichBlockMeshInstance {
+    core::PrototypeId block_model_id;
+    VoxelCoord owning_cell{};
+    math::Bounds3f local_render_bounds{};
+    std::uint16_t voxel_type = 0;
+    std::uint16_t state_bits = 0;
+    std::uint32_t metadata_handle = 0;
 };
 
 struct ChunkMesh {
@@ -33,15 +47,27 @@ struct ChunkMesh {
     math::Bounds3f local_bounds{};
     std::vector<ChunkMeshVertex> vertices;
     std::vector<std::uint32_t> indices;
+    std::vector<RichBlockMeshInstance> rich_instances;
     std::size_t face_count = 0;
+    std::uint16_t required_halo_radius = 0;
+    std::uint16_t provided_halo_radius = 0;
 
     [[nodiscard]] bool empty() const noexcept;
     [[nodiscard]] core::Status validate() const;
 };
 
+struct ChunkMeshingContext {
+    const VoxelChunk& chunk;
+    const VoxelPalette* palette = nullptr;
+    const ChunkDatabase* chunks = nullptr;
+    std::uint16_t available_halo_radius = 1;
+};
+
 class ChunkMesher {
   public:
     [[nodiscard]] static core::Result<ChunkMesh> build_surface_mesh(const VoxelChunk& chunk);
+    [[nodiscard]] static core::Result<ChunkMesh>
+    build_surface_mesh(const ChunkMeshingContext& context);
 };
 
 [[nodiscard]] math::Vec3f chunk_mesh_face_normal(ChunkMeshFaceDirection direction) noexcept;

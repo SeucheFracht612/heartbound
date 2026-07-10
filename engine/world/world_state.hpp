@@ -7,23 +7,30 @@
 #include "engine/core/result.hpp"
 #include "engine/dirty/dirty_region.hpp"
 #include "engine/entities/entity.hpp"
+#include "engine/entities/physical_resource.hpp"
 #include "engine/items/item_stack.hpp"
 #include "engine/networks/network_derivation.hpp"
 #include "engine/networks/spatial_network.hpp"
 #include "engine/processes/process.hpp"
 #include "engine/rooms/room_graph.hpp"
 #include "engine/save/save_metadata.hpp"
+#include "engine/simulation/fire.hpp"
 #include "engine/simulation/world_time.hpp"
 #include "engine/workpieces/workpiece_grid.hpp"
+#include "engine/workpieces/workpiece_state.hpp"
 #include "engine/world/chunks/chunk_database.hpp"
+#include "engine/world/missing_prototype.hpp"
 #include "engine/world/regions/region_graph.hpp"
+#include "engine/world/voxels/voxel_palette.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace heartstead::world {
@@ -32,6 +39,22 @@ struct WorkpieceRecord {
     core::WorkpieceId workpiece_id;
     core::PrototypeId prototype_id;
     workpieces::WorkpieceGrid grid;
+    core::PrototypeId material_prototype_id;
+    std::optional<workpieces::WorkpieceServerState> server_state;
+    core::NetId owner_session;
+    std::uint64_t revision = 1;
+    bool committed = false;
+
+    WorkpieceRecord(core::WorkpieceId id, core::PrototypeId prototype,
+                    workpieces::WorkpieceGrid value)
+        : workpiece_id(id), prototype_id(std::move(prototype)), grid(std::move(value)) {}
+    WorkpieceRecord(core::WorkpieceId id, core::PrototypeId prototype,
+                    workpieces::WorkpieceGrid value, core::PrototypeId material,
+                    std::optional<workpieces::WorkpieceServerState> state, core::NetId owner,
+                    std::uint64_t record_revision, bool is_committed)
+        : workpiece_id(id), prototype_id(std::move(prototype)), grid(std::move(value)),
+          material_prototype_id(std::move(material)), server_state(std::move(state)),
+          owner_session(owner), revision(record_revision), committed(is_committed) {}
 
     [[nodiscard]] core::Status validate() const;
 };
@@ -130,6 +153,18 @@ class WorkpieceDatabase {
     std::unordered_map<std::uint64_t, WorkpieceRecord> records_;
 };
 
+class PhysicalResourceDatabase {
+  public:
+    [[nodiscard]] core::Status insert(entities::PhysicalResourceRecord record);
+    [[nodiscard]] entities::PhysicalResourceRecord* find(core::SaveId id) noexcept;
+    [[nodiscard]] const entities::PhysicalResourceRecord* find(core::SaveId id) const noexcept;
+    [[nodiscard]] std::vector<const entities::PhysicalResourceRecord*> records() const;
+    [[nodiscard]] std::size_t count() const noexcept;
+
+  private:
+    std::unordered_map<std::uint64_t, entities::PhysicalResourceRecord> records_;
+};
+
 class AssemblyDatabase {
   public:
     [[nodiscard]] core::Status insert(assemblies::AssemblyRecord record);
@@ -153,10 +188,14 @@ class ProcessDatabase {
     [[nodiscard]] std::vector<const processes::ProcessInstance*>
     find_by_owner(core::SaveId owner_id) const;
     [[nodiscard]] std::vector<const processes::ProcessInstance*> records() const;
-    [[nodiscard]] core::Result<std::size_t> advance_all(std::int64_t now_ms,
+    [[nodiscard]] core::Result<std::size_t> advance_all(simulation::WorldTick world_time,
                                                         processes::ProcessModifiers modifiers);
-    [[nodiscard]] core::Result<std::size_t> advance_all(std::int64_t now_ms,
+    [[nodiscard]] core::Result<std::size_t> advance_all(simulation::WorldTick world_time,
                                                         const ProcessModifierResolver& resolver);
+    [[nodiscard]] core::Result<std::size_t>
+    evaluate_owner(core::SaveId owner_id, simulation::WorldTick world_time,
+                   processes::ProcessEvaluationTrigger trigger,
+                   const ProcessModifierResolver& resolver);
     [[nodiscard]] std::size_t count() const noexcept;
 
   private:
@@ -190,8 +229,21 @@ class ModStateDatabase {
     std::unordered_map<std::string, ModStateRecord> records_;
 };
 
+class FireDatabase {
+  public:
+    [[nodiscard]] core::Status insert(simulation::FireInstance fire);
+    [[nodiscard]] simulation::FireInstance* find(core::SaveId id) noexcept;
+    [[nodiscard]] const simulation::FireInstance* find(core::SaveId id) const noexcept;
+    [[nodiscard]] std::vector<const simulation::FireInstance*> records() const;
+    [[nodiscard]] std::size_t count() const noexcept;
+
+  private:
+    std::unordered_map<std::uint64_t, simulation::FireInstance> records_;
+};
+
 struct WorldStateDesc {
     save::SaveMetadata metadata;
+    VoxelPaletteManifest voxel_palette{};
     std::uint64_t next_save_id = 1;
     std::uint64_t next_runtime_handle = 1;
     std::uint64_t next_entity_net_id = 1'000'000;
@@ -209,11 +261,14 @@ struct WorldStateStats {
     std::size_t cargo_count = 0;
     std::size_t inventory_count = 0;
     std::size_t workpiece_count = 0;
+    std::size_t physical_resource_count = 0;
     std::size_t assembly_count = 0;
     std::size_t process_count = 0;
     std::size_t room_count = 0;
     std::size_t network_count = 0;
     std::size_t mod_state_count = 0;
+    std::size_t missing_prototype_count = 0;
+    std::size_t fire_count = 0;
 };
 
 class WorldState {
@@ -221,6 +276,7 @@ class WorldState {
     explicit WorldState(WorldStateDesc desc = {});
 
     [[nodiscard]] const save::SaveMetadata& metadata() const noexcept;
+    [[nodiscard]] const VoxelPaletteManifest& voxel_palette_manifest() const noexcept;
     [[nodiscard]] simulation::WorldTick world_time() const noexcept;
     [[nodiscard]] core::Status advance_world_time(simulation::WorldTick delta) noexcept;
     [[nodiscard]] core::Status
@@ -250,6 +306,8 @@ class WorldState {
     [[nodiscard]] const InventoryDatabase& inventories() const noexcept;
     [[nodiscard]] WorkpieceDatabase& workpieces() noexcept;
     [[nodiscard]] const WorkpieceDatabase& workpieces() const noexcept;
+    [[nodiscard]] PhysicalResourceDatabase& physical_resources() noexcept;
+    [[nodiscard]] const PhysicalResourceDatabase& physical_resources() const noexcept;
     [[nodiscard]] AssemblyDatabase& assemblies() noexcept;
     [[nodiscard]] const AssemblyDatabase& assemblies() const noexcept;
     [[nodiscard]] ProcessDatabase& processes() noexcept;
@@ -260,12 +318,17 @@ class WorldState {
     [[nodiscard]] const NetworkDatabase& networks() const noexcept;
     [[nodiscard]] ModStateDatabase& mod_states() noexcept;
     [[nodiscard]] const ModStateDatabase& mod_states() const noexcept;
+    [[nodiscard]] std::vector<MissingPrototypeObject>& missing_prototypes() noexcept;
+    [[nodiscard]] const std::vector<MissingPrototypeObject>& missing_prototypes() const noexcept;
+    [[nodiscard]] FireDatabase& fires() noexcept;
+    [[nodiscard]] const FireDatabase& fires() const noexcept;
 
     [[nodiscard]] bool contains_saved_object(core::SaveId id) const noexcept;
     [[nodiscard]] WorldStateStats stats() const noexcept;
 
   private:
     save::SaveMetadata metadata_;
+    VoxelPaletteManifest voxel_palette_manifest_;
     save::SaveIdAllocator save_ids_;
     entities::RuntimeHandleAllocator runtime_handles_;
     entities::EntityNetIdAllocator entity_net_ids_;
@@ -278,11 +341,14 @@ class WorldState {
     CargoDatabase cargo_;
     InventoryDatabase inventories_;
     WorkpieceDatabase workpieces_;
+    PhysicalResourceDatabase physical_resources_;
     AssemblyDatabase assemblies_;
     ProcessDatabase processes_;
     rooms::RoomGraph rooms_;
     NetworkDatabase networks_;
     ModStateDatabase mod_states_;
+    std::vector<MissingPrototypeObject> missing_prototypes_;
+    FireDatabase fires_;
 };
 
 } // namespace heartstead::world

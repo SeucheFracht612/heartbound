@@ -22,6 +22,7 @@ target_sources(
     core/ids.cpp
     core/logging.cpp
     debug/inspection.cpp
+    debug/debug_overlay.cpp
     dirty/dirty_region.cpp
     entities/entity.cpp
     entities/entity_prototype.cpp
@@ -66,6 +67,7 @@ target_sources(
     renderer/rhi/render_frame_plan.cpp
     renderer/shaders/shader_compiler.cpp
     renderer/vulkan/vulkan_backend.cpp
+    renderer/world_render_list.cpp
     rooms/room_descriptor_prototype.cpp
     rooms/room_extraction.cpp
     rooms/room_graph.cpp
@@ -74,6 +76,7 @@ target_sources(
     save/save_database.cpp
     save/save_metadata.cpp
     save/save_migration.cpp
+    save/missing_prototype_recovery.cpp
     save/save_snapshot.cpp
     save/save_slot.cpp
     save/save_text_codec.cpp
@@ -84,20 +87,30 @@ target_sources(
     scripting/script_module_loader.cpp
     scripting/script_runtime.cpp
     server_logs/server_log.cpp
+    server/authoritative_server.cpp
+    server/admin_service.cpp
     simulation/simulation_lod.cpp
+    simulation/fire.cpp
+    simulation/fire_prototype.cpp
     simulation/world_time.cpp
     workpieces/workpiece_codec.cpp
+    workpieces/material_crafting.cpp
+    workpieces/pattern_library.cpp
     workpieces/workpiece_definition.cpp
     workpieces/workpiece_grid.cpp
     workpieces/workpiece_prototype.cpp
     workpieces/workpiece_template.cpp
+    workpieces/workpiece_state.cpp
+    world/blocks/block_model.cpp
     world/chunks/chunk_database.cpp
     world/chunks/chunk_edit_delta_codec.cpp
     world/meshing/chunk_mesher.cpp
+    world/missing_prototype.cpp
     world/operations/world_operation.cpp
     world/replication_delta.cpp
     world/replication_interest.cpp
     world/regions/region_graph.cpp
+    world/regions/chunk_region_file.cpp
     world/simulation_subjects.cpp
     world/streaming/chunk_streamer.cpp
     world/world_commands.cpp
@@ -129,6 +142,7 @@ target_sources(
       core/logging.hpp
       core/result.hpp
       debug/inspection.hpp
+      debug/debug_overlay.hpp
       dirty/dirty_region.hpp
       entities/entity.hpp
       entities/entity_prototype.hpp
@@ -176,6 +190,7 @@ target_sources(
       renderer/rhi/render_frame_plan.hpp
       renderer/shaders/shader_compiler.hpp
       renderer/vulkan/vulkan_backend.hpp
+      renderer/world_render_list.hpp
       rooms/room_descriptor_prototype.hpp
       rooms/room_extraction.hpp
       rooms/room_graph.hpp
@@ -185,6 +200,7 @@ target_sources(
       save/save_identity.hpp
       save/save_metadata.hpp
       save/save_migration.hpp
+      save/missing_prototype_recovery.hpp
       save/save_snapshot.hpp
       save/save_slot.hpp
       save/save_text_codec.hpp
@@ -195,21 +211,32 @@ target_sources(
       scripting/script_module_loader.hpp
       scripting/script_runtime.hpp
       server_logs/server_log.hpp
+      server/authoritative_server.hpp
+      server/admin_service.hpp
       simulation/simulation_lod.hpp
+      simulation/fire.hpp
+      simulation/fire_prototype.hpp
       simulation/world_time.hpp
       workpieces/workpiece_codec.hpp
+      workpieces/material_crafting.hpp
+      workpieces/pattern_library.hpp
       workpieces/workpiece_definition.hpp
       workpieces/workpiece_grid.hpp
       workpieces/workpiece_prototype.hpp
       workpieces/workpiece_template.hpp
+      workpieces/workpiece_state.hpp
+      world/blocks/block_model.hpp
       world/chunks/chunk_database.hpp
       world/chunks/chunk_edit_delta_codec.hpp
       world/coords/world_coords.hpp
+      world/coords/world_position.hpp
       world/meshing/chunk_mesher.hpp
+      world/missing_prototype.hpp
       world/operations/world_operation.hpp
       world/replication_delta.hpp
       world/replication_interest.hpp
       world/regions/region_graph.hpp
+      world/regions/chunk_region_file.hpp
       world/simulation_subjects.hpp
       world/streaming/chunk_streamer.hpp
       world/world_commands.hpp

@@ -38,6 +38,7 @@ struct WorldReplicationDeltaSubjectPlan {
     std::uint32_t process_count = 0;
     std::uint32_t materialized_record_count = 0;
     bool missing_subject = false;
+    bool has_workpiece = false;
 };
 
 struct WorldReplicationDeltaPlan {
@@ -63,6 +64,7 @@ struct WorldReplicationDeltaSnapshot {
     std::vector<save::EntitySaveRecord> entities;
     std::vector<cargo::CargoRecord> cargo_records;
     std::vector<save::InventorySaveRecord> inventories;
+    std::vector<save::WorkpieceSaveRecord> workpieces;
     std::vector<assemblies::AssemblyRecord> assemblies;
     std::vector<processes::ProcessInstance> processes;
 };
@@ -136,6 +138,8 @@ struct WorldReplicationDeltaApplyReport {
     std::uint32_t cargo_updated = 0;
     std::uint32_t inventories_inserted = 0;
     std::uint32_t inventories_updated = 0;
+    std::uint32_t workpieces_inserted = 0;
+    std::uint32_t workpieces_updated = 0;
     std::uint32_t assemblies_inserted = 0;
     std::uint32_t assemblies_updated = 0;
     std::uint32_t processes_inserted = 0;

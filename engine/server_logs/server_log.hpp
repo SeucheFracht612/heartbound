@@ -9,6 +9,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -52,6 +53,13 @@ struct ServerLogFilter {
 
 struct ServerLogConfig {
     std::uintmax_t rotate_after_bytes = 16U * 1024U * 1024U;
+    bool rotate_daily = true;
+};
+
+class ServerLogArchiveCodec {
+  public:
+    [[nodiscard]] static std::vector<std::uint8_t> encode(std::string_view text);
+    [[nodiscard]] static core::Result<std::string> decode(std::span<const std::uint8_t> bytes);
 };
 
 class ServerLogLineCodec {
@@ -69,6 +77,8 @@ class FileServerLog {
     [[nodiscard]] core::Status append(ServerLogCategory category, ServerLogEntry entry);
     [[nodiscard]] core::Result<std::vector<ServerLogEntry>>
     query_current(ServerLogCategory category, const ServerLogFilter& filter = {}) const;
+    [[nodiscard]] core::Result<std::vector<ServerLogEntry>>
+    query_all(ServerLogCategory category, const ServerLogFilter& filter = {}) const;
 
     [[nodiscard]] core::Status append_join(const player_profiles::PlayerUuid& player_uuid,
                                            std::string display_name, std::string address_hash,
@@ -86,12 +96,14 @@ class FileServerLog {
 
   private:
     [[nodiscard]] core::Status rotate_if_needed(ServerLogCategory category,
-                                                std::size_t incoming_bytes);
+                                                std::size_t incoming_bytes,
+                                                std::string_view incoming_day);
 
     std::filesystem::path server_root_;
     ServerLogConfig config_;
     mutable std::mutex mutex_;
     std::uint64_t rotation_sequence_ = 1;
+    std::map<ServerLogCategory, std::string> current_days_;
 };
 
 [[nodiscard]] std::string utc_now_iso8601();

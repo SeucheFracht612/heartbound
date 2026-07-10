@@ -60,6 +60,18 @@ struct NetworkPort {
     core::SaveId source_build_piece_id;
 };
 
+struct LogisticsRouteEffects {
+    bool reachable = false;
+    std::uint32_t edge_count = 0;
+    std::uint32_t cart_speed_per_mille = 0;
+    std::uint32_t animal_stamina_cost_per_mille = 1000;
+    std::uint32_t pathfinding_reliability_per_mille = 0;
+    std::uint32_t travel_safety_per_mille = 0;
+    std::uint32_t corpse_recovery_per_mille = 0;
+    std::uint32_t weather_resistance_per_mille = 0;
+    std::uint32_t bottleneck_capacity = 0;
+};
+
 class SpatialNetwork {
   public:
     explicit SpatialNetwork(NetworkKind kind);
@@ -75,6 +87,8 @@ class SpatialNetwork {
     [[nodiscard]] std::vector<const NetworkNode*> nodes() const;
     [[nodiscard]] std::vector<NetworkNodeId> neighbors(NetworkNodeId node_id) const;
     [[nodiscard]] bool can_reach(NetworkNodeId start, NetworkNodeId goal) const;
+    [[nodiscard]] LogisticsRouteEffects route_effects(NetworkNodeId start,
+                                                      NetworkNodeId goal) const;
     [[nodiscard]] std::size_t node_count() const noexcept;
     [[nodiscard]] std::size_t edge_count() const noexcept;
     [[nodiscard]] std::size_t blocked_edge_count() const noexcept;

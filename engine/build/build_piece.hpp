@@ -4,6 +4,7 @@
 #include "engine/core/result.hpp"
 #include "engine/math/vector.hpp"
 #include "engine/networks/spatial_network.hpp"
+#include "engine/world/coords/world_position.hpp"
 
 #include <cstdint>
 #include <string>
@@ -12,7 +13,7 @@
 namespace heartstead::build {
 
 using Vec3 = math::Vec3d;
-using Transform = math::Transform3d;
+using Transform = world::WorldTransform;
 
 struct BuildSocket {
     std::string name;

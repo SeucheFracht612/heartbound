@@ -4,9 +4,11 @@
 #include "engine/renderer/vulkan/vulkan_backend.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <limits>
 #include <ranges>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -775,6 +777,36 @@ core::Status validate_render_graphics_pipeline_shape(const RenderGraphicsPipelin
         return core::Status::failure("renderer.invalid_fragment_entry_point",
                                      "graphics pipeline fragment entry point is invalid");
     }
+    if ((desc.vertex_stride == 0) != desc.vertex_attributes.empty()) {
+        return core::Status::failure(
+            "renderer.invalid_vertex_layout",
+            "graphics vertex stride and attributes must either both be present or both absent");
+    }
+    std::set<std::uint32_t> locations;
+    for (const auto& attribute : desc.vertex_attributes) {
+        std::uint32_t byte_size = 0;
+        switch (attribute.format) {
+        case RenderVertexAttributeFormat::float2:
+            byte_size = 8;
+            break;
+        case RenderVertexAttributeFormat::float3:
+            byte_size = 12;
+            break;
+        case RenderVertexAttributeFormat::uint16:
+            byte_size = 2;
+            break;
+        case RenderVertexAttributeFormat::uint8:
+            byte_size = 1;
+            break;
+        }
+        if (!locations.insert(attribute.location).second ||
+            attribute.byte_offset > desc.vertex_stride ||
+            byte_size > desc.vertex_stride - attribute.byte_offset) {
+            return core::Status::failure(
+                "renderer.invalid_vertex_attribute",
+                "graphics vertex attributes require unique locations within the stride");
+        }
+    }
     return core::Status::ok();
 }
 
@@ -830,6 +862,11 @@ core::Status validate_render_mesh_bindings_shape(std::span<const RenderMeshBindi
         if (draw.instance_count == 0) {
             return core::Status::failure("renderer.invalid_instance_count",
                                          "mesh draw instance count must be non-zero");
+        }
+        if (!std::isfinite(draw.camera_relative_x) || !std::isfinite(draw.camera_relative_y) ||
+            !std::isfinite(draw.camera_relative_z)) {
+            return core::Status::failure("renderer.invalid_camera_relative_translation",
+                                         "mesh draw camera-relative translation must be finite");
         }
     }
     return core::Status::ok();

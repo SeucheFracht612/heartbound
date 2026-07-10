@@ -16,10 +16,13 @@ struct PrototypeKinds {
     static constexpr std::string_view cargo = "cargo";
     static constexpr std::string_view entity = "entity";
     static constexpr std::string_view voxel = "voxel";
+    static constexpr std::string_view block_model = "block_model";
     static constexpr std::string_view build_piece = "build_piece";
     static constexpr std::string_view assembly = "assembly";
     static constexpr std::string_view workpiece = "workpiece";
+    static constexpr std::string_view pattern = "pattern";
     static constexpr std::string_view process = "process";
+    static constexpr std::string_view fire = "fire";
     static constexpr std::string_view room_descriptor = "room_descriptor";
     static constexpr std::string_view material = "material";
     static constexpr std::string_view scenario = "scenario";

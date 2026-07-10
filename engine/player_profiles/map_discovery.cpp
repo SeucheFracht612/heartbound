@@ -236,6 +236,23 @@ std::size_t MapDiscovery::discovered_count() const noexcept {
     return result;
 }
 
+std::size_t MapDiscovery::clear_layer(std::string_view layer_id) {
+    std::size_t removed = 0;
+    for (auto it = regions_.begin(); it != regions_.end();) {
+        if (it->first.layer_id == layer_id) {
+            it = regions_.erase(it);
+            ++removed;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+void MapDiscovery::clear() noexcept {
+    regions_.clear();
+}
+
 std::string MapDiscoveryTextCodec::encode(const MapDiscovery& discovery) {
     std::ostringstream output;
     output << magic << '\n';

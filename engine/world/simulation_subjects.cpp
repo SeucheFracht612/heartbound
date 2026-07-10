@@ -19,27 +19,9 @@ namespace heartstead::world {
 
 namespace {
 
-[[nodiscard]] std::int64_t coord_component(double value) noexcept {
-    constexpr auto min_i64 = static_cast<double>(std::numeric_limits<std::int64_t>::min());
-    constexpr auto max_i64_exclusive = -min_i64;
-    if (!std::isfinite(value)) {
-        return 0;
-    }
-    if (value <= min_i64) {
-        return std::numeric_limits<std::int64_t>::min();
-    }
-    if (value >= max_i64_exclusive) {
-        return std::numeric_limits<std::int64_t>::max();
-    }
-    return static_cast<std::int64_t>(std::floor(value));
-}
-
-[[nodiscard]] simulation::SimulationCoord coord_from_position(math::Vec3d position) noexcept {
-    return {
-        coord_component(position.x),
-        coord_component(position.y),
-        coord_component(position.z),
-    };
+[[nodiscard]] simulation::SimulationCoord
+coord_from_position(const WorldPosition& position) noexcept {
+    return position.anchor;
 }
 
 [[nodiscard]] simulation::SimulationCoord

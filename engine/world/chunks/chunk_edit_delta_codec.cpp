@@ -12,7 +12,8 @@ namespace heartstead::world {
 
 namespace {
 
-constexpr std::string_view chunk_delta_magic = "heartstead.chunk_edit_delta.v1";
+constexpr std::string_view chunk_delta_magic_v1 = "heartstead.chunk_edit_delta.v1";
+constexpr std::string_view chunk_delta_magic_v2 = "heartstead.chunk_edit_delta.v2";
 
 [[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter) {
     std::vector<std::string_view> result;
@@ -71,18 +72,35 @@ constexpr std::string_view chunk_delta_magic = "heartstead.chunk_edit_delta.v1";
     return core::Result<std::uint8_t>::success(static_cast<std::uint8_t>(parsed.value()));
 }
 
+[[nodiscard]] core::Result<std::uint32_t> parse_u32(std::string_view value,
+                                                    std::string_view field_name) {
+    auto parsed = parse_i64(value, field_name);
+    if (!parsed) {
+        return core::Result<std::uint32_t>::failure(parsed.error().code, parsed.error().message);
+    }
+    if (parsed.value() < 0 ||
+        static_cast<std::uint64_t>(parsed.value()) > std::numeric_limits<std::uint32_t>::max()) {
+        return core::Result<std::uint32_t>::failure("world_snapshot.number_out_of_range",
+                                                    "numeric chunk delta field is out of range: " +
+                                                        std::string(field_name));
+    }
+    return core::Result<std::uint32_t>::success(static_cast<std::uint32_t>(parsed.value()));
+}
+
 } // namespace
 
 std::string ChunkEditDeltaTextCodec::encode(ChunkCoord coord,
                                             const std::vector<const VoxelEditRecord*>& edits) {
     std::ostringstream output;
-    output << chunk_delta_magic << '\n';
+    output << chunk_delta_magic_v2 << '\n';
     output << "coord=" << coord.x << '|' << coord.y << '|' << coord.z << '\n';
     for (const auto* edit : edits) {
         output << "edit=" << edit->voxel_coord.x << '|' << edit->voxel_coord.y << '|'
                << edit->voxel_coord.z << '|' << edit->previous.type << '|'
-               << static_cast<unsigned int>(edit->previous.light) << '|' << edit->next.type << '|'
-               << static_cast<unsigned int>(edit->next.light) << '\n';
+               << static_cast<unsigned int>(edit->previous.light) << '|'
+               << edit->previous.state_bits << '|' << edit->previous.metadata_handle << '|'
+               << edit->next.type << '|' << static_cast<unsigned int>(edit->next.light) << '|'
+               << edit->next.state_bits << '|' << edit->next.metadata_handle << '\n';
     }
     output << "end\n";
     return output.str();
@@ -91,6 +109,7 @@ std::string ChunkEditDeltaTextCodec::encode(ChunkCoord coord,
 core::Result<std::vector<VoxelEditRecord>>
 ChunkEditDeltaTextCodec::decode(ChunkCoord expected_coord, std::string_view text) {
     bool saw_magic = false;
+    bool legacy_v1 = false;
     bool saw_coord = false;
     bool saw_end = false;
     ChunkCoord actual_coord;
@@ -107,11 +126,12 @@ ChunkEditDeltaTextCodec::decode(ChunkCoord expected_coord, std::string_view text
         }
 
         if (!saw_magic) {
-            if (line != chunk_delta_magic) {
+            if (line != chunk_delta_magic_v1 && line != chunk_delta_magic_v2) {
                 return core::Result<std::vector<VoxelEditRecord>>::failure(
                     "world_snapshot.invalid_chunk_delta_magic",
                     "chunk delta does not start with expected magic");
             }
+            legacy_v1 = line == chunk_delta_magic_v1;
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
@@ -155,7 +175,8 @@ ChunkEditDeltaTextCodec::decode(ChunkCoord expected_coord, std::string_view text
                         "chunk delta edit records must appear after coord");
                 }
                 const auto parts = split(value, '|');
-                if (parts.size() != 7) {
+                const auto expected_parts = legacy_v1 ? std::size_t{7} : std::size_t{11};
+                if (parts.size() != expected_parts) {
                     return core::Result<std::vector<VoxelEditRecord>>::failure(
                         "world_snapshot.invalid_chunk_delta_edit",
                         "chunk delta edit must contain voxel coord and previous/next cells");
@@ -165,10 +186,20 @@ ChunkEditDeltaTextCodec::decode(ChunkCoord expected_coord, std::string_view text
                 auto z = parse_u16(parts[2], "voxel_z");
                 auto previous_type = parse_u16(parts[3], "previous_type");
                 auto previous_light = parse_u8(parts[4], "previous_light");
-                auto next_type = parse_u16(parts[5], "next_type");
-                auto next_light = parse_u8(parts[6], "next_light");
-                if (!x || !y || !z || !previous_type || !previous_light || !next_type ||
-                    !next_light) {
+                auto previous_state = legacy_v1 ? core::Result<std::uint16_t>::success(0)
+                                                : parse_u16(parts[5], "previous_state");
+                auto previous_metadata = legacy_v1 ? core::Result<std::uint32_t>::success(0)
+                                                   : parse_u32(parts[6], "previous_metadata");
+                const auto next_offset = legacy_v1 ? std::size_t{5} : std::size_t{7};
+                auto next_type = parse_u16(parts[next_offset], "next_type");
+                auto next_light = parse_u8(parts[next_offset + 1], "next_light");
+                auto next_state = legacy_v1 ? core::Result<std::uint16_t>::success(0)
+                                            : parse_u16(parts[next_offset + 2], "next_state");
+                auto next_metadata = legacy_v1 ? core::Result<std::uint32_t>::success(0)
+                                               : parse_u32(parts[next_offset + 3], "next_metadata");
+                if (!x || !y || !z || !previous_type || !previous_light || !previous_state ||
+                    !previous_metadata || !next_type || !next_light || !next_state ||
+                    !next_metadata) {
                     return core::Result<std::vector<VoxelEditRecord>>::failure(
                         "world_snapshot.invalid_chunk_delta_edit",
                         "chunk delta edit contains invalid fields");
@@ -182,8 +213,10 @@ ChunkEditDeltaTextCodec::decode(ChunkCoord expected_coord, std::string_view text
                 edits.push_back(VoxelEditRecord{
                     actual_coord,
                     {x.value(), y.value(), z.value()},
-                    {previous_type.value(), previous_light.value()},
-                    {next_type.value(), next_light.value()},
+                    {previous_type.value(), previous_light.value(), previous_state.value(),
+                     previous_metadata.value()},
+                    {next_type.value(), next_light.value(), next_state.value(),
+                     next_metadata.value()},
                 });
             } else {
                 return core::Result<std::vector<VoxelEditRecord>>::failure(

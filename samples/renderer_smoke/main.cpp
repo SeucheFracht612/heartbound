@@ -4,10 +4,12 @@
 #include "engine/renderer/materials/material_pipeline_layout.hpp"
 #include "engine/renderer/rhi/render_device.hpp"
 #include "engine/renderer/rhi/render_frame_plan.hpp"
+#include "engine/renderer/world_render_list.hpp"
 #include "engine/world/meshing/chunk_mesher.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -281,15 +283,28 @@ int main() {
         core::log(core::LogLevel::error, fragment_shader_module.error().message);
         return 1;
     }
-    auto graphics_pipeline =
-        device.value()->create_graphics_pipeline(renderer::rhi::RenderGraphicsPipelineDesc{
-            vertex_shader_module.value().handle,
-            fragment_shader_module.value().handle,
-            debug_material.id,
-            "main",
-            "main",
-            "minimal_graphics_pipeline",
-        });
+    renderer::rhi::RenderGraphicsPipelineDesc graphics_desc{vertex_shader_module.value().handle,
+                                                            fragment_shader_module.value().handle,
+                                                            debug_material.id,
+                                                            "main",
+                                                            "main",
+                                                            "minimal_graphics_pipeline"};
+    graphics_desc.vertex_stride = sizeof(world::ChunkMeshVertex);
+    graphics_desc.vertex_attributes = {
+        {0, offsetof(world::ChunkMeshVertex, position),
+         renderer::rhi::RenderVertexAttributeFormat::float3},
+        {1, offsetof(world::ChunkMeshVertex, normal),
+         renderer::rhi::RenderVertexAttributeFormat::float3},
+        {2, offsetof(world::ChunkMeshVertex, u),
+         renderer::rhi::RenderVertexAttributeFormat::float2},
+        {3, offsetof(world::ChunkMeshVertex, voxel_type),
+         renderer::rhi::RenderVertexAttributeFormat::uint16},
+        {4, offsetof(world::ChunkMeshVertex, light),
+         renderer::rhi::RenderVertexAttributeFormat::uint8},
+        {5, offsetof(world::ChunkMeshVertex, state_bits),
+         renderer::rhi::RenderVertexAttributeFormat::uint16},
+    };
+    auto graphics_pipeline = device.value()->create_graphics_pipeline(graphics_desc);
     if (!graphics_pipeline) {
         core::log(core::LogLevel::error, graphics_pipeline.error().message);
         return 1;
@@ -323,7 +338,7 @@ int main() {
         return 1;
     }
 
-    const renderer::rhi::RenderMeshBinding chunk_draw{
+    renderer::rhi::RenderMeshBinding chunk_draw{
         vertex_upload.value().handle,
         index_upload.value().handle,
         debug_material.id,
@@ -332,6 +347,15 @@ int main() {
         1,
         "debug_chunk_draw",
     };
+    world::WorldPosition chunk_position;
+    chunk_position.anchor = {debug_chunk.coord().x * world::VoxelChunk::edge_length,
+                             debug_chunk.coord().y * world::VoxelChunk::edge_length,
+                             debug_chunk.coord().z * world::VoxelChunk::edge_length};
+    auto anchor_status = renderer::anchor_mesh_draw(chunk_draw, chunk_position, {{0, 0, 0}});
+    if (!anchor_status) {
+        core::log(core::LogLevel::error, anchor_status.error().message);
+        return 1;
+    }
     auto draw_stats =
         device.value()->bind_mesh_draws(std::span<const renderer::rhi::RenderMeshBinding>{
             &chunk_draw,

@@ -92,8 +92,10 @@ ContentValidation::validate(const std::filesystem::path& mods_root,
     report.registry = std::move(mod_report.registry);
     append_diagnostics_move(report.diagnostics, std::move(mod_report.diagnostics));
 
-    for (const auto& mod : report.mods) {
-        index_assets(report, mod.root / "assets", mod.id, assets::AssetSourceKind::mod, mod.id, 0);
+    for (std::size_t index = 0; index < report.mods.size(); ++index) {
+        const auto& mod = report.mods[index];
+        index_assets(report, mod.root / "assets", mod.id, assets::AssetSourceKind::mod, mod.id,
+                     static_cast<std::uint32_t>(index + 1));
     }
 
     assets::ResourcePackDiscoverer resource_pack_discoverer;
@@ -114,6 +116,16 @@ ContentValidation::validate(const std::filesystem::path& mods_root,
         index_assets(report, entry.manifest.root / "assets", entry.manifest.id,
                      assets::AssetSourceKind::resource_pack, entry.manifest.id,
                      entry.asset_priority);
+        for (const auto* asset : report.asset_catalog.records()) {
+            if (asset->source_kind != assets::AssetSourceKind::resource_pack ||
+                asset->source_id != entry.manifest.id) {
+                continue;
+            }
+            auto status = assets::ResourcePackPolicy::validate_override(entry.manifest, *asset);
+            if (!status) {
+                add_error(report, asset->source_path, status.error().code, status.error().message);
+            }
+        }
     }
 
     for (const auto* prototype :

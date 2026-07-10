@@ -28,13 +28,15 @@ struct WorkpieceCellCoord {
 struct WorkpieceCell {
     std::uint16_t material = 0;
     std::uint8_t occupancy = 0;
+    std::uint16_t pattern_id = 0;
+    std::uint8_t flags = 0;
 
     [[nodiscard]] static constexpr WorkpieceCell empty() noexcept {
         return WorkpieceCell{};
     }
 
     [[nodiscard]] static constexpr WorkpieceCell solid(std::uint16_t material_id) noexcept {
-        return WorkpieceCell{material_id, 255};
+        return WorkpieceCell{material_id, 255, 0, 0};
     }
 
     [[nodiscard]] constexpr bool is_occupied() const noexcept {
@@ -64,6 +66,7 @@ class WorkpieceGrid {
     [[nodiscard]] core::Result<WorkpieceCell> get(WorkpieceCellCoord coord) const;
     [[nodiscard]] std::size_t occupied_count() const noexcept;
     [[nodiscard]] const std::vector<WorkpieceOperation>& history() const noexcept;
+    [[nodiscard]] std::uint64_t mesh_revision() const noexcept;
 
     [[nodiscard]] core::Status apply(const WorkpieceOperation& operation);
 
@@ -77,6 +80,18 @@ class WorkpieceGrid {
     std::vector<WorkpieceCell> cells_;
     std::vector<WorkpieceOperation> history_;
     std::size_t occupied_count_ = 0;
+    std::uint64_t mesh_revision_ = 0;
 };
+
+enum class WorkpieceCellFlag : std::uint8_t {
+    smoothed = 1U << 0U,
+    decorated = 1U << 1U,
+    revealed = 1U << 2U,
+};
+
+[[nodiscard]] constexpr bool has_workpiece_cell_flag(WorkpieceCell cell,
+                                                     WorkpieceCellFlag flag) noexcept {
+    return (cell.flags & static_cast<std::uint8_t>(flag)) != 0;
+}
 
 } // namespace heartstead::workpieces

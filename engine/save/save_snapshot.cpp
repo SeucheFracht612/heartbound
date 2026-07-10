@@ -1,6 +1,8 @@
 #include "engine/save/save_snapshot.hpp"
 
+#include "engine/entities/physical_resource.hpp"
 #include "engine/workpieces/workpiece_codec.hpp"
+#include "engine/workpieces/workpiece_state.hpp"
 #include "engine/world/chunks/chunk_edit_delta_codec.hpp"
 
 #include <set>
@@ -86,11 +88,22 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
     std::set<std::uint64_t> inventory_owner_ids;
     std::set<std::uint64_t> workpiece_ids;
     std::set<std::uint64_t> process_ids;
+    std::set<std::uint64_t> fire_ids;
     std::set<world::ChunkCoord> chunk_edit_coords;
     std::set<std::pair<std::string, std::string>> mod_state_keys;
+    std::set<std::pair<world::MissingPrototypeKind, std::uint64_t>> missing_prototype_keys;
     std::vector<std::pair<std::string, core::SaveId>> owner_refs;
 
     add_status_issue(validation, snapshot.metadata.validate());
+    add_status_issue(validation, snapshot.voxel_palette.validate());
+
+    for (const auto& missing : snapshot.missing_prototypes) {
+        add_status_issue(validation, missing.validate());
+        if (!missing_prototype_keys.emplace(missing.kind, missing.stable_id).second) {
+            add_issue(validation, "save_snapshot.duplicate_missing_prototype",
+                      "duplicate missing prototype placeholder");
+        }
+    }
 
     for (const auto& chunk : snapshot.chunk_edits) {
         if (!chunk_edit_coords.insert(chunk.coord).second) {
@@ -109,6 +122,14 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
         }
     }
 
+    for (const auto& fire : snapshot.fires) {
+        add_status_issue(validation, fire.validate_record());
+        if (!fire_ids.insert(fire.fire_id.value()).second) {
+            add_issue(validation, "save_snapshot.duplicate_fire", "duplicate fire id");
+        }
+        require_kind(validation, prototypes, fire.prototype_id, modding::PrototypeKinds::fire);
+    }
+
     for (const auto& build_piece : snapshot.build_pieces) {
         add_status_issue(validation, build_piece.validate());
         validate_save_id_unique(validation, save_ids, build_piece.object_id, "build piece");
@@ -123,6 +144,17 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
         add_status_issue(validation, entity.validate());
         validate_save_id_unique(validation, save_ids, entity.save_id, "entity");
         require_kind(validation, prototypes, entity.prototype_id, modding::PrototypeKinds::entity);
+        if (entity.encoded_state.starts_with(entities::physical_resource_state_magic)) {
+            auto resource = entities::PhysicalResourceTextCodec::decode(
+                entity.save_id, entity.prototype_id, entity.transform.position,
+                entity.encoded_state);
+            if (!resource) {
+                add_issue(validation, resource.error().code, resource.error().message);
+            } else {
+                require_kind(validation, prototypes, resource.value().cargo_prototype_id,
+                             modding::PrototypeKinds::cargo);
+            }
+        }
     }
 
     for (const auto& inventory : snapshot.inventories) {
@@ -175,6 +207,19 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
                 add_issue(validation, "save_snapshot.workpiece_shape_mismatch",
                           "decoded workpiece grid shape does not match save record shape");
             }
+        }
+        if (workpiece.revision == 0) {
+            add_issue(validation, "save_snapshot.invalid_workpiece_revision",
+                      "workpiece revision must be non-zero");
+        }
+        if (!workpiece.encoded_server_state.empty()) {
+            auto server_state = workpieces::WorkpieceServerStateTextCodec::decode(
+                workpiece.encoded_server_state, workpiece.shape);
+            if (!server_state) {
+                add_issue(validation, server_state.error().code, server_state.error().message);
+            }
+            require_kind(validation, prototypes, workpiece.material_prototype_id,
+                         modding::PrototypeKinds::material);
         }
         require_kind(validation, prototypes, workpiece.prototype_id,
                      modding::PrototypeKinds::workpiece);

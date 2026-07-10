@@ -8,7 +8,10 @@
 #include "engine/net/command_payload.hpp"
 #include "engine/processes/process_environment.hpp"
 #include "engine/processes/process_prototype.hpp"
+#include "engine/workpieces/pattern_library.hpp"
 #include "engine/workpieces/workpiece_grid.hpp"
+#include "engine/workpieces/workpiece_state.hpp"
+#include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/world_state.hpp"
 
 #include <algorithm>
@@ -16,6 +19,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -46,6 +50,11 @@ struct WorkpieceEditCommandPayload {
     workpieces::WorkpieceOperation operation;
 };
 
+struct WorkpieceFinishCommandPayload {
+    core::WorkpieceId workpiece_id;
+    std::optional<core::PrototypeId> requested_pattern;
+};
+
 struct InventoryTransferCommandPayload {
     InventoryTransferRequest request;
 };
@@ -57,9 +66,13 @@ struct ProcessStartCommandPayload {
 
 struct ProcessAdvanceAllCommandPayload {};
 
+struct SleepCommandPayload {
+    std::uint64_t hours = 0;
+};
+
 struct CargoCreateCommandPayload {
     core::PrototypeId prototype_id;
-    cargo::Vec3 position;
+    WorldPosition position;
 };
 
 struct EntitySpawnCommandPayload {
@@ -76,6 +89,27 @@ struct AssemblyCreateCommandPayload {
     core::PrototypeId prototype_id;
     core::SaveId root_build_piece_id;
     std::vector<AssemblyPartCommandPayload> parts;
+};
+
+struct AssemblyBlueprintCommandPayload {
+    core::PrototypeId prototype_id;
+    core::SaveId root_build_piece_id;
+};
+
+struct AssemblyPlacePartCommandPayload {
+    core::SaveId assembly_id;
+    std::string part_name;
+    core::SaveId build_piece_id;
+};
+
+struct AssemblyAdvanceCommandPayload {
+    core::SaveId assembly_id;
+};
+
+struct AssemblyTransitionCommandPayload {
+    core::SaveId assembly_id;
+    assemblies::AssemblyState state = assemblies::AssemblyState::ready;
+    std::string reason;
 };
 
 [[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter) {
@@ -260,33 +294,44 @@ parse_workpiece_cell_coord(std::string_view value) {
 
 [[nodiscard]] core::Result<VoxelCell> parse_voxel_cell(std::string_view value) {
     const auto parts = split(value, '|');
-    if (parts.size() != 2) {
+    if (parts.size() != 2 && parts.size() != 4) {
         return core::Result<VoxelCell>::failure("world_command.invalid_voxel_cell",
-                                                "voxel cell must contain type|light");
+                                                "voxel cell must contain type|light and optional "
+                                                "state|metadata");
     }
     auto type = parse_u16(parts[0], "voxel_type");
     auto light = parse_u8(parts[1], "voxel_light");
-    if (!type || !light) {
+    auto state = parts.size() == 4 ? parse_u16(parts[2], "voxel_state")
+                                   : core::Result<std::uint16_t>::success(0);
+    auto metadata = parts.size() == 4 ? parse_u32(parts[3], "voxel_metadata")
+                                      : core::Result<std::uint32_t>::success(0);
+    if (!type || !light || !state || !metadata) {
         return core::Result<VoxelCell>::failure("world_command.invalid_voxel_cell",
                                                 "voxel cell contains invalid numbers");
     }
-    return core::Result<VoxelCell>::success({type.value(), light.value()});
+    return core::Result<VoxelCell>::success(
+        {type.value(), light.value(), state.value(), metadata.value()});
 }
 
 [[nodiscard]] core::Result<workpieces::WorkpieceCell> parse_workpiece_cell(std::string_view value) {
     const auto parts = split(value, '|');
-    if (parts.size() != 2) {
+    if (parts.size() != 2 && parts.size() != 4) {
         return core::Result<workpieces::WorkpieceCell>::failure(
             "world_command.invalid_workpiece_cell",
             "workpiece cell must contain material|occupancy");
     }
     auto material = parse_u16(parts[0], "workpiece_material");
     auto occupancy = parse_u8(parts[1], "workpiece_occupancy");
-    if (!material || !occupancy) {
+    auto pattern = parts.size() == 4 ? parse_u16(parts[2], "workpiece_pattern")
+                                     : core::Result<std::uint16_t>::success(0);
+    auto flags = parts.size() == 4 ? parse_u8(parts[3], "workpiece_flags")
+                                   : core::Result<std::uint8_t>::success(0);
+    if (!material || !occupancy || !pattern || !flags) {
         return core::Result<workpieces::WorkpieceCell>::failure(
             "world_command.invalid_workpiece_cell", "workpiece cell contains invalid numbers");
     }
-    return core::Result<workpieces::WorkpieceCell>::success({material.value(), occupancy.value()});
+    return core::Result<workpieces::WorkpieceCell>::success(
+        {material.value(), occupancy.value(), pattern.value(), flags.value()});
 }
 
 [[nodiscard]] core::Result<workpieces::WorkpieceOperationKind>
@@ -322,6 +367,42 @@ parse_workpiece_operation_kind(std::string_view value) {
                                                   std::string(name) + " contains invalid numbers");
     }
     return core::Result<build::Vec3>::success({x.value(), y.value(), z.value()});
+}
+
+[[nodiscard]] core::Result<WorldPosition> parse_world_position(const net::CommandPayload& fields) {
+    const auto* legacy = fields.find("position");
+    const auto* anchor = fields.find("position_anchor");
+    const auto* local = fields.find("position_local");
+    if ((anchor == nullptr) != (local == nullptr)) {
+        return core::Result<WorldPosition>::failure(
+            "world_command.incomplete_position",
+            "anchored positions require both position_anchor and position_local");
+    }
+    if (legacy != nullptr && anchor != nullptr) {
+        return core::Result<WorldPosition>::failure(
+            "world_command.ambiguous_position",
+            "command cannot contain both legacy and anchored positions");
+    }
+    if (anchor != nullptr) {
+        auto parsed_anchor = parse_chunk_coord(*anchor);
+        auto parsed_local = parse_vec3(*local, "position_local");
+        if (!parsed_anchor || !parsed_local) {
+            return core::Result<WorldPosition>::failure(
+                "world_command.invalid_position", "anchored position contains invalid fields");
+        }
+        return WorldPosition::from_anchor(
+            {parsed_anchor.value().x, parsed_anchor.value().y, parsed_anchor.value().z},
+            parsed_local.value());
+    }
+    if (legacy != nullptr) {
+        auto parsed = parse_vec3(*legacy, "position");
+        if (!parsed) {
+            return core::Result<WorldPosition>::failure(parsed.error().code,
+                                                        parsed.error().message);
+        }
+        return WorldPosition::from_legacy_global(parsed.value());
+    }
+    return core::Result<WorldPosition>::success({});
 }
 
 [[nodiscard]] core::Result<VoxelCommandPayload> parse_voxel_payload(std::string_view payload) {
@@ -377,14 +458,12 @@ parse_build_piece_payload(std::string_view payload) {
     }
 
     build::Transform transform;
-    if (const auto* found = decoded_fields.find("position"); found != nullptr) {
-        auto position = parse_vec3(*found, "position");
-        if (!position) {
-            return core::Result<BuildPieceCommandPayload>::failure(position.error().code,
-                                                                   position.error().message);
-        }
-        transform.position = position.value();
+    auto position = parse_world_position(decoded_fields);
+    if (!position) {
+        return core::Result<BuildPieceCommandPayload>::failure(position.error().code,
+                                                               position.error().message);
     }
+    transform.position = position.value();
     if (const auto* found = decoded_fields.find("rotation"); found != nullptr) {
         auto rotation = parse_vec3(*found, "rotation");
         if (!rotation) {
@@ -479,6 +558,37 @@ parse_workpiece_edit_payload(std::string_view payload) {
     return core::Result<WorkpieceEditCommandPayload>::success(
         {core::WorkpieceId::from_value(workpiece_id.value()),
          {operation_kind.value(), coord.value(), cell}});
+}
+
+[[nodiscard]] core::Result<WorkpieceFinishCommandPayload>
+parse_workpiece_finish_payload(std::string_view payload) {
+    auto fields = net::CommandPayloadTextCodec::decode(payload);
+    if (!fields) {
+        return core::Result<WorkpieceFinishCommandPayload>::failure(fields.error().code,
+                                                                    fields.error().message);
+    }
+    auto workpiece_value = fields.value().require("workpiece_id");
+    if (!workpiece_value) {
+        return core::Result<WorkpieceFinishCommandPayload>::failure(
+            workpiece_value.error().code, workpiece_value.error().message);
+    }
+    auto workpiece_id = parse_positive_u64(workpiece_value.value(), "workpiece_id");
+    if (!workpiece_id) {
+        return core::Result<WorkpieceFinishCommandPayload>::failure(workpiece_id.error().code,
+                                                                    workpiece_id.error().message);
+    }
+    std::optional<core::PrototypeId> requested_pattern;
+    if (const auto* value = fields.value().find("pattern"); value != nullptr) {
+        auto parsed = core::PrototypeId::parse(*value);
+        if (!parsed) {
+            return core::Result<WorkpieceFinishCommandPayload>::failure(
+                "world_command.invalid_workpiece_pattern",
+                "workpiece finish pattern is not a valid prototype id");
+        }
+        requested_pattern = parsed.value();
+    }
+    return core::Result<WorkpieceFinishCommandPayload>::success(
+        {core::WorkpieceId::from_value(workpiece_id.value()), std::move(requested_pattern)});
 }
 
 [[nodiscard]] core::Result<InventoryTransferCommandPayload>
@@ -581,6 +691,25 @@ parse_process_advance_all_payload(std::string_view payload) {
         "process advance modifiers are resolved from authoritative world state");
 }
 
+[[nodiscard]] core::Result<SleepCommandPayload> parse_sleep_payload(std::string_view payload) {
+    auto fields = net::CommandPayloadTextCodec::decode(payload);
+    if (!fields) {
+        return core::Result<SleepCommandPayload>::failure(fields.error().code,
+                                                          fields.error().message);
+    }
+    auto encoded_hours = fields.value().require("hours");
+    if (!encoded_hours) {
+        return core::Result<SleepCommandPayload>::failure(encoded_hours.error().code,
+                                                          encoded_hours.error().message);
+    }
+    auto hours = parse_u64(encoded_hours.value(), "sleep_hours");
+    if (!hours || hours.value() == 0 || hours.value() > 24) {
+        return core::Result<SleepCommandPayload>::failure("world_command.invalid_sleep_hours",
+                                                          "sleep time skip must be in 1..24 hours");
+    }
+    return core::Result<SleepCommandPayload>::success({hours.value()});
+}
+
 [[nodiscard]] core::Result<CargoCreateCommandPayload>
 parse_cargo_create_payload(std::string_view payload) {
     auto fields = net::CommandPayloadTextCodec::decode(payload);
@@ -600,21 +729,14 @@ parse_cargo_create_payload(std::string_view payload) {
                                                                 "cargo prototype id is invalid");
     }
 
-    cargo::Vec3 position;
-    if (const auto* found = fields.value().find("position"); found != nullptr) {
-        auto parsed_position = parse_vec3(*found, "position");
-        if (!parsed_position) {
-            return core::Result<CargoCreateCommandPayload>::failure(
-                parsed_position.error().code, parsed_position.error().message);
-        }
-        position = parsed_position.value();
-    }
-    if (!position.is_finite()) {
+    auto position = parse_world_position(fields.value());
+    if (!position || !position.value().is_valid()) {
         return core::Result<CargoCreateCommandPayload>::failure("world_command.invalid_position",
                                                                 "cargo position must be finite");
     }
 
-    return core::Result<CargoCreateCommandPayload>::success({prototype_id.value(), position});
+    return core::Result<CargoCreateCommandPayload>::success(
+        {prototype_id.value(), position.value()});
 }
 
 [[nodiscard]] core::Result<EntitySpawnCommandPayload>
@@ -638,14 +760,12 @@ parse_entity_spawn_payload(std::string_view payload) {
     }
 
     entities::Transform transform;
-    if (const auto* found = decoded_fields.find("position"); found != nullptr) {
-        auto position = parse_vec3(*found, "position");
-        if (!position) {
-            return core::Result<EntitySpawnCommandPayload>::failure(position.error().code,
-                                                                    position.error().message);
-        }
-        transform.position = position.value();
+    auto position = parse_world_position(decoded_fields);
+    if (!position) {
+        return core::Result<EntitySpawnCommandPayload>::failure(position.error().code,
+                                                                position.error().message);
     }
+    transform.position = position.value();
     if (const auto* found = decoded_fields.find("rotation"); found != nullptr) {
         auto rotation = parse_vec3(*found, "rotation");
         if (!rotation) {
@@ -744,6 +864,90 @@ parse_assembly_create_payload(std::string_view payload) {
          std::move(parts).value()});
 }
 
+[[nodiscard]] core::Result<AssemblyBlueprintCommandPayload>
+parse_assembly_blueprint_payload(std::string_view payload) {
+    auto fields = net::CommandPayloadTextCodec::decode(payload);
+    if (!fields)
+        return core::Result<AssemblyBlueprintCommandPayload>::failure(fields.error().code,
+                                                                      fields.error().message);
+    auto prototype = fields.value().require("prototype");
+    auto root = fields.value().require("root");
+    if (!prototype || !root)
+        return core::Result<AssemblyBlueprintCommandPayload>::failure(
+            "command_payload.missing_required_key",
+            "assembly blueprint requires prototype and root");
+    auto prototype_id = core::PrototypeId::parse(prototype.value());
+    auto root_id = parse_positive_u64(root.value(), "root");
+    if (!prototype_id || !root_id)
+        return core::Result<AssemblyBlueprintCommandPayload>::failure(
+            "world_command.invalid_assembly_blueprint", "assembly blueprint contains invalid ids");
+    return core::Result<AssemblyBlueprintCommandPayload>::success(
+        {prototype_id.value(), core::SaveId::from_value(root_id.value())});
+}
+
+[[nodiscard]] core::Result<AssemblyPlacePartCommandPayload>
+parse_assembly_place_part_payload(std::string_view payload) {
+    auto fields = net::CommandPayloadTextCodec::decode(payload);
+    if (!fields)
+        return core::Result<AssemblyPlacePartCommandPayload>::failure(fields.error().code,
+                                                                      fields.error().message);
+    auto assembly = fields.value().require("assembly");
+    auto name = fields.value().require("name");
+    auto build_piece = fields.value().require("build_piece");
+    if (!assembly || !name || !build_piece || !core::is_valid_local_id(name.value()))
+        return core::Result<AssemblyPlacePartCommandPayload>::failure(
+            "world_command.invalid_assembly_part", "assembly part placement fields are invalid");
+    auto assembly_id = parse_positive_u64(assembly.value(), "assembly");
+    auto build_id = parse_positive_u64(build_piece.value(), "build_piece");
+    if (!assembly_id || !build_id)
+        return core::Result<AssemblyPlacePartCommandPayload>::failure(
+            "world_command.invalid_assembly_part", "assembly part placement ids are invalid");
+    return core::Result<AssemblyPlacePartCommandPayload>::success(
+        {core::SaveId::from_value(assembly_id.value()), std::string(name.value()),
+         core::SaveId::from_value(build_id.value())});
+}
+
+[[nodiscard]] core::Result<AssemblyAdvanceCommandPayload>
+parse_assembly_advance_payload(std::string_view payload) {
+    auto fields = net::CommandPayloadTextCodec::decode(payload);
+    if (!fields)
+        return core::Result<AssemblyAdvanceCommandPayload>::failure(fields.error().code,
+                                                                    fields.error().message);
+    auto assembly = fields.value().require("assembly");
+    if (!assembly)
+        return core::Result<AssemblyAdvanceCommandPayload>::failure(assembly.error().code,
+                                                                    assembly.error().message);
+    auto parsed = parse_positive_u64(assembly.value(), "assembly");
+    if (!parsed)
+        return core::Result<AssemblyAdvanceCommandPayload>::failure(parsed.error().code,
+                                                                    parsed.error().message);
+    return core::Result<AssemblyAdvanceCommandPayload>::success(
+        {core::SaveId::from_value(parsed.value())});
+}
+
+[[nodiscard]] core::Result<AssemblyTransitionCommandPayload>
+parse_assembly_transition_payload(std::string_view payload) {
+    auto fields = net::CommandPayloadTextCodec::decode(payload);
+    if (!fields)
+        return core::Result<AssemblyTransitionCommandPayload>::failure(fields.error().code,
+                                                                       fields.error().message);
+    auto assembly = fields.value().require("assembly");
+    auto state = fields.value().require("state");
+    if (!assembly || !state)
+        return core::Result<AssemblyTransitionCommandPayload>::failure(
+            "command_payload.missing_required_key",
+            "assembly transition requires assembly and state");
+    auto assembly_id = parse_positive_u64(assembly.value(), "assembly");
+    auto parsed_state = assemblies::parse_assembly_state(state.value());
+    if (!assembly_id || !parsed_state)
+        return core::Result<AssemblyTransitionCommandPayload>::failure(
+            "world_command.invalid_assembly_transition", "assembly transition fields are invalid");
+    const auto* reason = fields.value().find("reason");
+    return core::Result<AssemblyTransitionCommandPayload>::success(
+        {core::SaveId::from_value(assembly_id.value()), parsed_state.value(),
+         reason != nullptr ? *reason : std::string{}});
+}
+
 [[nodiscard]] core::Status
 require_authoritative_world(const net::CommandExecutionContext& context) {
     if (context.world_state == nullptr) {
@@ -753,28 +957,11 @@ require_authoritative_world(const net::CommandExecutionContext& context) {
     return core::Status::ok();
 }
 
-[[nodiscard]] std::int64_t dirty_coord_component(double value) noexcept {
-    constexpr auto min_i64 = static_cast<double>(std::numeric_limits<std::int64_t>::min());
-    constexpr auto max_i64_exclusive = -min_i64;
-    if (!std::isfinite(value)) {
-        return 0;
-    }
-    if (value <= min_i64) {
-        return std::numeric_limits<std::int64_t>::min();
-    }
-    if (value >= max_i64_exclusive) {
-        return std::numeric_limits<std::int64_t>::max();
-    }
-    return static_cast<std::int64_t>(std::floor(value));
-}
-
 [[nodiscard]] dirty::DirtyRegionBounds
 build_piece_dirty_bounds(const build::BuildPieceRecord& record) noexcept {
-    const dirty::DirtyRegionCoord coord{
-        dirty_coord_component(record.transform.position.x),
-        dirty_coord_component(record.transform.position.y),
-        dirty_coord_component(record.transform.position.z),
-    };
+    const dirty::DirtyRegionCoord coord{record.transform.position.anchor.x,
+                                        record.transform.position.anchor.y,
+                                        record.transform.position.anchor.z};
     return dirty::DirtyRegionBounds::single(coord);
 }
 
@@ -831,6 +1018,8 @@ build_assembly_record(WorldState& state, const AssemblyCreateCommandPayload& pay
     record.assembly_id = assembly_id;
     record.root_build_piece_id = payload.root_build_piece_id;
     record.prototype_id = payload.prototype_id;
+    record.state = assemblies::AssemblyState::ready;
+    record.capabilities = definition.capabilities;
     record.ports.reserve(definition.required_ports.size());
     record.parts.reserve(payload.parts.size());
 
@@ -987,9 +1176,37 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
             "authoritative voxel edits require the target chunk to be loaded first");
     }
 
-    auto status = context.world_state->chunks().set(payload.value().chunk, payload.value().voxel,
-                                                    payload.value().cell,
-                                                    context.world_state->dirty_regions());
+    auto cell = payload.value().cell;
+    if (context.voxel_palette != nullptr) {
+        if (cell.type == VoxelPalette::air_type) {
+            if (cell.state_bits != 0 || cell.metadata_handle != 0) {
+                return core::Status::failure(
+                    "world_command.invalid_air_state",
+                    "air cells cannot retain block state or sparse metadata handles");
+            }
+            cell.light = 0;
+        } else {
+            const auto* definition = context.voxel_palette->find_by_type(cell.type);
+            if (definition == nullptr) {
+                return core::Status::failure("world_command.unknown_voxel_type",
+                                             "voxel type is not present in the resolved palette");
+            }
+            if (definition->metadata_required && cell.metadata_handle == 0) {
+                return core::Status::failure(
+                    "world_command.missing_voxel_metadata",
+                    "voxel prototype requires a non-zero sparse metadata handle");
+            }
+            cell.light = definition->light_emission;
+        }
+    }
+
+    auto status =
+        context.voxel_palette != nullptr
+            ? context.world_state->chunks().set(payload.value().chunk, payload.value().voxel, cell,
+                                                context.world_state->dirty_regions(),
+                                                *context.voxel_palette)
+            : context.world_state->chunks().set(payload.value().chunk, payload.value().voxel, cell,
+                                                context.world_state->dirty_regions());
     if (!status) {
         return status;
     }
@@ -1129,18 +1346,108 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
         return core::Status::failure("world_command.missing_workpiece",
                                      "workpiece id is not present in world state");
     }
+    if (record->committed) {
+        return core::Status::failure("world_command.workpiece_committed",
+                                     "committed workpieces cannot be edited");
+    }
+    if (record->owner_session.is_valid() && record->owner_session != envelope.sender) {
+        return core::Status::failure("world_command.workpiece_not_owned",
+                                     "workpiece edit sender does not own the active session");
+    }
+    if (record->server_state.has_value()) {
+        const auto shape = record->grid.shape();
+        const auto index =
+            static_cast<std::size_t>(payload.value().operation.coord.z) * shape.width *
+                shape.height +
+            static_cast<std::size_t>(payload.value().operation.coord.y) * shape.width +
+            payload.value().operation.coord.x;
+        if (!record->server_state->in_blob(index)) {
+            return core::Status::failure("world_command.workpiece_outside_blob",
+                                         "workpiece edit targets a cell outside its server blob");
+        }
+    }
 
     auto status = record->grid.apply(payload.value().operation);
     if (!status) {
         return status;
     }
+    if (record->server_state.has_value()) {
+        const auto shape = record->grid.shape();
+        const auto index =
+            static_cast<std::size_t>(payload.value().operation.coord.z) * shape.width *
+                shape.height +
+            static_cast<std::size_t>(payload.value().operation.coord.y) * shape.width +
+            payload.value().operation.coord.x;
+        auto revealed = record->server_state->reveal(index);
+        if (!revealed)
+            return core::Status::failure(revealed.error().code, revealed.error().message);
+    }
+    ++record->revision;
     status =
         operation.record_mutation("edit workpiece " + payload.value().workpiece_id.to_string());
     if (!status) {
         return status;
     }
     operation.record_derived_update("WorkpieceMesh");
-    operation.emit_event({"workpiece.edited", {}, envelope.payload});
+    operation.emit_event({"workpiece.edited",
+                          core::SaveId::from_value(payload.value().workpiece_id.value()),
+                          envelope.payload});
+    operation.mark_replication_dirty();
+    operation.mark_save_dirty();
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status handle_finish_workpiece(const net::CommandEnvelope& envelope,
+                                                   const net::CommandExecutionContext& context,
+                                                   WorldOperation& operation) {
+    auto world_status = require_authoritative_world(context);
+    if (!world_status)
+        return world_status;
+    if (context.prototypes == nullptr) {
+        return core::Status::failure("world_command.missing_prototypes",
+                                     "workpiece finishing requires the prototype registry");
+    }
+    auto payload = parse_workpiece_finish_payload(envelope.payload);
+    if (!payload)
+        return core::Status::failure(payload.error().code, payload.error().message);
+
+    auto* record = context.world_state->workpieces().find(payload.value().workpiece_id);
+    if (record == nullptr) {
+        return core::Status::failure("world_command.missing_workpiece",
+                                     "workpiece id is not present in world state");
+    }
+    if (record->committed) {
+        return core::Status::failure("world_command.workpiece_committed",
+                                     "workpiece is already committed");
+    }
+    if (record->owner_session.is_valid() && record->owner_session != envelope.sender) {
+        return core::Status::failure("world_command.workpiece_not_owned",
+                                     "workpiece finish sender does not own the active session");
+    }
+    auto library = workpieces::pattern_library_from_prototypes(*context.prototypes);
+    if (!library)
+        return core::Status::failure(library.error().code, library.error().message);
+    auto result = workpieces::finish_workpiece(
+        record->grid, record->server_state ? &*record->server_state : nullptr, library.value(),
+        record->material_prototype_id, payload.value().requested_pattern);
+    if (!result)
+        return core::Status::failure(result.error().code, result.error().message);
+
+    if (record->server_state.has_value()) {
+        record->server_state->output_metadata = result.value().metadata;
+    }
+    record->committed = true;
+    ++record->revision;
+    auto status = operation.record_mutation("finish workpiece " + record->workpiece_id.to_string());
+    if (!status)
+        return status;
+    operation.record_derived_update("WorkpieceOutput");
+    operation.emit_event({"workpiece.finished",
+                          core::SaveId::from_value(record->workpiece_id.value()),
+                          result.value().output_prototype_id.value() +
+                              "|pattern=" + result.value().pattern_id.value() +
+                              "|mass=" + std::to_string(result.value().metadata.mass_units) +
+                              "|byproduct=" + std::to_string(result.value().byproduct_units)});
     operation.mark_replication_dirty();
     operation.mark_save_dirty();
     return core::Status::ok();
@@ -1232,8 +1539,9 @@ handle_transfer_inventory_items(const net::CommandEnvelope& envelope,
     if (!process_id) {
         return core::Status::failure(process_id.error().code, process_id.error().message);
     }
-    auto instance = processes::ProcessRuntime::create(process_id.value(), payload.value().owner_id,
-                                                      definition.value(), context.server_time_ms);
+    auto instance =
+        processes::ProcessRuntime::create(process_id.value(), payload.value().owner_id,
+                                          definition.value(), context.world_state->world_time());
     if (!instance) {
         return core::Status::failure(instance.error().code, instance.error().message);
     }
@@ -1271,8 +1579,9 @@ handle_transfer_inventory_items(const net::CommandEnvelope& envelope,
     }
 
     auto advanced = context.world_state->processes().advance_all(
-        context.server_time_ms, [state = context.world_state, prototypes = context.prototypes](
-                                    const processes::ProcessInstance& process) {
+        context.world_state->world_time(),
+        [state = context.world_state,
+         prototypes = context.prototypes](const processes::ProcessInstance& process) {
             return resolve_process_modifiers(*state, *prototypes, process);
         });
     if (!advanced) {
@@ -1290,6 +1599,36 @@ handle_transfer_inventory_items(const net::CommandEnvelope& envelope,
     }
     operation.record_derived_update("Processes");
     operation.emit_event({"processes.advanced", {}, std::to_string(advanced.value())});
+    operation.mark_replication_dirty();
+    operation.mark_save_dirty();
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status handle_sleep(const net::CommandEnvelope& envelope,
+                                        const net::CommandExecutionContext& context,
+                                        WorldOperation& operation) {
+    auto world_status = require_authoritative_world(context);
+    if (!world_status) {
+        return world_status;
+    }
+    auto payload = parse_sleep_payload(envelope.payload);
+    if (!payload) {
+        return core::Status::failure(payload.error().code, payload.error().message);
+    }
+    const simulation::WorldTimeConfig default_config;
+    const auto& config =
+        context.world_time_config == nullptr ? default_config : *context.world_time_config;
+    auto status = context.world_state->advance_world_time_hours(payload.value().hours, config);
+    if (!status) {
+        return status;
+    }
+    status = operation.record_mutation("advance authoritative world time by sleep");
+    if (!status) {
+        return status;
+    }
+    operation.record_derived_update("WorldTime");
+    operation.emit_event(
+        {"world.time_advanced", {}, std::to_string(context.world_state->world_time())});
     operation.mark_replication_dirty();
     operation.mark_save_dirty();
     return core::Status::ok();
@@ -1499,6 +1838,182 @@ handle_transfer_inventory_items(const net::CommandEnvelope& envelope,
     return core::Status::ok();
 }
 
+[[nodiscard]] core::Result<assemblies::AssemblyDefinition>
+load_assembly_definition(const modding::PrototypeRegistry* prototypes,
+                         const core::PrototypeId& prototype_id) {
+    if (prototypes == nullptr) {
+        return core::Result<assemblies::AssemblyDefinition>::failure(
+            "world_command.missing_prototypes", "assembly command requires prototype registry");
+    }
+    auto status = prototypes->require_kind(prototype_id, modding::PrototypeKinds::assembly);
+    if (!status) {
+        return core::Result<assemblies::AssemblyDefinition>::failure(status.error().code,
+                                                                     status.error().message);
+    }
+    return assemblies::assembly_definition_from_prototype(*prototypes->find(prototype_id));
+}
+
+[[nodiscard]] core::Status
+handle_start_assembly_blueprint(const net::CommandEnvelope& envelope,
+                                const net::CommandExecutionContext& context,
+                                WorldOperation& operation) {
+    auto status = require_authoritative_world(context);
+    if (!status)
+        return status;
+    auto payload = parse_assembly_blueprint_payload(envelope.payload);
+    if (!payload)
+        return core::Status::failure(payload.error().code, payload.error().message);
+    const auto* root =
+        context.world_state->build_objects().find(payload.value().root_build_piece_id);
+    if (root == nullptr || root->construction_state != build::ConstructionState::complete) {
+        return core::Status::failure("world_command.invalid_assembly_root",
+                                     "assembly blueprint requires a completed root build piece");
+    }
+    auto definition = load_assembly_definition(context.prototypes, payload.value().prototype_id);
+    if (!definition)
+        return core::Status::failure(definition.error().code, definition.error().message);
+    auto id = operation.reserve_save_id(context.world_state->save_ids());
+    if (!id)
+        return core::Status::failure(id.error().code, id.error().message);
+    auto record = assemblies::AssemblyRuntime::create_blueprint(
+        id.value(), payload.value().root_build_piece_id, definition.value());
+    if (!record)
+        return core::Status::failure(record.error().code, record.error().message);
+    status = context.world_state->assemblies().insert(std::move(record).value());
+    if (!status)
+        return status;
+    status = mark_assembly_derived_dirty(*context.world_state,
+                                         *context.world_state->assemblies().find(id.value()));
+    if (!status)
+        return status;
+    status = operation.record_mutation("start assembly blueprint " + id.value().to_string());
+    if (!status)
+        return status;
+    operation.record_derived_update("AssemblyGhostBlueprint");
+    operation.emit_event(
+        {"assembly.blueprint_started", id.value(), payload.value().prototype_id.value()});
+    operation.mark_replication_dirty();
+    operation.mark_save_dirty();
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status handle_place_assembly_part(const net::CommandEnvelope& envelope,
+                                                      const net::CommandExecutionContext& context,
+                                                      WorldOperation& operation) {
+    auto status = require_authoritative_world(context);
+    if (!status)
+        return status;
+    auto payload = parse_assembly_place_part_payload(envelope.payload);
+    if (!payload)
+        return core::Status::failure(payload.error().code, payload.error().message);
+    auto* assembly = context.world_state->assemblies().find(payload.value().assembly_id);
+    const auto* part = context.world_state->build_objects().find(payload.value().build_piece_id);
+    if (assembly == nullptr || part == nullptr ||
+        part->construction_state != build::ConstructionState::complete) {
+        return core::Status::failure("world_command.invalid_assembly_part",
+                                     "assembly or completed build piece is missing");
+    }
+    auto definition = load_assembly_definition(context.prototypes, assembly->prototype_id);
+    if (!definition)
+        return core::Status::failure(definition.error().code, definition.error().message);
+    status = assemblies::AssemblyRuntime::place_part(
+        *assembly, definition.value(),
+        {payload.value().part_name, payload.value().build_piece_id, part->prototype_id});
+    if (!status)
+        return status;
+    status = mark_assembly_derived_dirty(*context.world_state, *assembly);
+    if (!status)
+        return status;
+    status = operation.record_mutation("place assembly part " + payload.value().part_name);
+    if (!status)
+        return status;
+    operation.record_derived_update("AssemblyGhostBlueprint");
+    operation.emit_event(
+        {"assembly.part_placed", assembly->assembly_id, payload.value().part_name});
+    operation.mark_replication_dirty();
+    operation.mark_save_dirty();
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status
+handle_advance_assembly_stage(const net::CommandEnvelope& envelope,
+                              const net::CommandExecutionContext& context,
+                              WorldOperation& operation) {
+    auto status = require_authoritative_world(context);
+    if (!status)
+        return status;
+    auto payload = parse_assembly_advance_payload(envelope.payload);
+    if (!payload)
+        return core::Status::failure(payload.error().code, payload.error().message);
+    auto* assembly = context.world_state->assemblies().find(payload.value().assembly_id);
+    if (assembly == nullptr) {
+        return core::Status::failure("world_command.missing_assembly", "assembly is missing");
+    }
+    auto definition = load_assembly_definition(context.prototypes, assembly->prototype_id);
+    if (!definition)
+        return core::Status::failure(definition.error().code, definition.error().message);
+    status = assemblies::AssemblyRuntime::advance_stage(*assembly, definition.value());
+    if (!status)
+        return status;
+    if (assembly->state == assemblies::AssemblyState::ready) {
+        AssemblyCreateCommandPayload completed_payload;
+        completed_payload.prototype_id = assembly->prototype_id;
+        completed_payload.root_build_piece_id = assembly->root_build_piece_id;
+        for (const auto& part : assembly->parts) {
+            completed_payload.parts.push_back({part.name, part.build_piece_id});
+        }
+        auto completed = build_assembly_record(*context.world_state, completed_payload,
+                                               assembly->assembly_id, definition.value());
+        if (!completed)
+            return core::Status::failure(completed.error().code, completed.error().message);
+        completed.value().current_stage = assembly->current_stage;
+        completed.value().revision = assembly->revision;
+        completed.value().process_slots = assembly->process_slots;
+        *assembly = std::move(completed).value();
+    }
+    status = mark_assembly_derived_dirty(*context.world_state, *assembly);
+    if (!status)
+        return status;
+    status =
+        operation.record_mutation("advance assembly stage " + assembly->assembly_id.to_string());
+    if (!status)
+        return status;
+    operation.record_derived_update("Assemblies");
+    operation.emit_event({"assembly.stage_advanced", assembly->assembly_id,
+                          std::to_string(assembly->current_stage)});
+    operation.mark_replication_dirty();
+    operation.mark_save_dirty();
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status handle_transition_assembly(const net::CommandEnvelope& envelope,
+                                                      const net::CommandExecutionContext& context,
+                                                      WorldOperation& operation) {
+    auto status = require_authoritative_world(context);
+    if (!status)
+        return status;
+    auto payload = parse_assembly_transition_payload(envelope.payload);
+    if (!payload)
+        return core::Status::failure(payload.error().code, payload.error().message);
+    auto* assembly = context.world_state->assemblies().find(payload.value().assembly_id);
+    if (assembly == nullptr) {
+        return core::Status::failure("world_command.missing_assembly", "assembly is missing");
+    }
+    status = assemblies::AssemblyRuntime::transition(*assembly, payload.value().state,
+                                                     payload.value().reason);
+    if (!status)
+        return status;
+    status = operation.record_mutation("transition assembly " + assembly->assembly_id.to_string());
+    if (!status)
+        return status;
+    operation.record_derived_update("AssemblyStateMachine");
+    operation.emit_event({"assembly.state_changed", assembly->assembly_id,
+                          std::string(assemblies::assembly_state_name(assembly->state))});
+    operation.mark_replication_dirty();
+    operation.mark_save_dirty();
+    return core::Status::ok();
+}
+
 } // namespace
 
 core::Status
@@ -1523,6 +2038,11 @@ WorldCommandRegistry::register_engine_commands(net::ServerCommandDispatcher& dis
     if (!status) {
         return status;
     }
+    status = dispatcher.register_command(
+        net::CommandDescriptor{"workpiece.finish", true, true, handle_finish_workpiece});
+    if (!status) {
+        return status;
+    }
     status = dispatcher.register_command(net::CommandDescriptor{
         "inventory.transfer_items", true, true, handle_transfer_inventory_items});
     if (!status) {
@@ -1539,6 +2059,11 @@ WorldCommandRegistry::register_engine_commands(net::ServerCommandDispatcher& dis
         return status;
     }
     status = dispatcher.register_command(
+        net::CommandDescriptor{"world.sleep", true, true, handle_sleep});
+    if (!status) {
+        return status;
+    }
+    status = dispatcher.register_command(
         net::CommandDescriptor{"cargo.create", true, true, handle_create_cargo});
     if (!status) {
         return status;
@@ -1548,8 +2073,24 @@ WorldCommandRegistry::register_engine_commands(net::ServerCommandDispatcher& dis
     if (!status) {
         return status;
     }
-    return dispatcher.register_command(
+    status = dispatcher.register_command(
         net::CommandDescriptor{"assembly.create", true, true, handle_create_assembly});
+    if (!status)
+        return status;
+    status = dispatcher.register_command(net::CommandDescriptor{
+        "assembly.start_blueprint", true, true, handle_start_assembly_blueprint});
+    if (!status)
+        return status;
+    status = dispatcher.register_command(
+        net::CommandDescriptor{"assembly.place_part", true, true, handle_place_assembly_part});
+    if (!status)
+        return status;
+    status = dispatcher.register_command(net::CommandDescriptor{
+        "assembly.advance_stage", true, true, handle_advance_assembly_stage});
+    if (!status)
+        return status;
+    return dispatcher.register_command(
+        net::CommandDescriptor{"assembly.transition", true, true, handle_transition_assembly});
 }
 
 } // namespace heartstead::world

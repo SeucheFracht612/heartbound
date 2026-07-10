@@ -4,6 +4,7 @@
 #include "engine/core/ids.hpp"
 #include "engine/core/result.hpp"
 #include "engine/physics/physics_world.hpp"
+#include "engine/world/coords/world_position.hpp"
 
 #include <cstdint>
 #include <string>
@@ -38,6 +39,7 @@ struct PhysicalResourceRecord {
     core::SaveId resource_id;
     core::PrototypeId prototype_id;
     core::PrototypeId cargo_prototype_id;
+    world::WorldPosition position;
     PhysicalResourceKind kind = PhysicalResourceKind::felled_tree;
     PhysicalResourceState state = PhysicalResourceState::cutting;
     physics::PhysicsBodyId physics_body_id;
@@ -47,8 +49,21 @@ struct PhysicalResourceRecord {
     cargo::CargoTransportModes allowed_transport_modes;
     std::vector<std::string> hazard_tags;
     std::vector<PhysicalResourceSegment> segments;
+    bool needs_physics_rebuild = false;
 
     [[nodiscard]] core::Status validate() const;
+};
+
+inline constexpr std::string_view physical_resource_state_magic =
+    "heartstead.physical_resource.v1\n";
+
+class PhysicalResourceTextCodec {
+  public:
+    [[nodiscard]] static std::string encode(const PhysicalResourceRecord& resource);
+    [[nodiscard]] static core::Result<PhysicalResourceRecord> decode(core::SaveId resource_id,
+                                                                     core::PrototypeId prototype_id,
+                                                                     world::WorldPosition position,
+                                                                     std::string_view text);
 };
 
 [[nodiscard]] core::Result<physics::PhysicsBodyDesc>

@@ -2,8 +2,12 @@
 
 #include "engine/modding/prototype_registry.hpp"
 
+#include <charconv>
+#include <cstdint>
+#include <ranges>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -97,6 +101,82 @@ parse_required_ports(const modding::GenericPrototype& prototype) {
     return core::Result<std::vector<AssemblyPort>>::success(std::move(ports));
 }
 
+[[nodiscard]] std::vector<std::string> parse_string_list(const modding::GenericPrototype& prototype,
+                                                         std::string_view key) {
+    const auto* value = field(prototype, key);
+    if (value == nullptr || value->empty())
+        return {};
+    std::vector<std::string> result;
+    for (const auto entry : split(*value, ','))
+        result.emplace_back(entry);
+    return result;
+}
+
+[[nodiscard]] core::Result<std::uint32_t>
+parse_capacity(const modding::GenericPrototype& prototype) {
+    const auto* value = field(prototype, "capacity");
+    if (value == nullptr)
+        return core::Result<std::uint32_t>::success(1);
+    std::uint32_t parsed = 0;
+    const auto [end, error] = std::from_chars(value->data(), value->data() + value->size(), parsed);
+    if (error != std::errc{} || end != value->data() + value->size() || parsed == 0) {
+        return core::Result<std::uint32_t>::failure("assembly_prototype.invalid_capacity",
+                                                    "assembly capacity must be a positive u32");
+    }
+    return core::Result<std::uint32_t>::success(parsed);
+}
+
+[[nodiscard]] core::Result<bool> parse_bool(const modding::GenericPrototype& prototype,
+                                            std::string_view key) {
+    const auto* value = field(prototype, key);
+    if (value == nullptr || *value == "false")
+        return core::Result<bool>::success(false);
+    if (*value == "true")
+        return core::Result<bool>::success(true);
+    return core::Result<bool>::failure("assembly_prototype.invalid_bool",
+                                       std::string(key) + " must be true or false");
+}
+
+[[nodiscard]] core::Status apply_part_layouts(const modding::GenericPrototype& prototype,
+                                              std::vector<AssemblyPartRequirement>& requirements) {
+    const auto* value = field(prototype, "part_layouts");
+    if (value == nullptr || value->empty())
+        return core::Status::ok();
+    for (const auto entry : split(*value, ',')) {
+        const auto parts = split(entry, '~');
+        if (parts.size() != 6) {
+            return core::Status::failure("assembly_prototype.invalid_part_layout",
+                                         "part layout must be name~x~y~z~stage~role");
+        }
+        const auto requirement =
+            std::ranges::find_if(requirements, [name = parts[0]](const auto& candidate) {
+                return candidate.name == name;
+            });
+        if (requirement == requirements.end()) {
+            return core::Status::failure("assembly_prototype.unknown_part_layout",
+                                         "part layout references an undeclared part");
+        }
+        std::int64_t x = 0;
+        std::int64_t y = 0;
+        std::int64_t z = 0;
+        std::uint32_t stage = 0;
+        const auto parse = [](std::string_view text, auto& output) {
+            const auto [end, error] =
+                std::from_chars(text.data(), text.data() + text.size(), output);
+            return error == std::errc{} && end == text.data() + text.size();
+        };
+        if (!parse(parts[1], x) || !parse(parts[2], y) || !parse(parts[3], z) ||
+            !parse(parts[4], stage)) {
+            return core::Status::failure("assembly_prototype.invalid_part_layout",
+                                         "part layout contains invalid coordinates or stage");
+        }
+        requirement->relative_coord = {x, y, z};
+        requirement->construction_stage = stage;
+        requirement->role = std::string(parts[5]);
+    }
+    return core::Status::ok();
+}
+
 } // namespace
 
 core::Result<AssemblyDefinition>
@@ -113,6 +193,9 @@ assembly_definition_from_prototype(const modding::GenericPrototype& prototype) {
     auto required_parts = parse_part_requirements(prototype, "required_parts", true, false);
     auto optional_parts = parse_part_requirements(prototype, "optional_parts", false, true);
     auto required_ports = parse_required_ports(prototype);
+    auto capacity = parse_capacity(prototype);
+    auto requires_heat = parse_bool(prototype, "requires_heat");
+    auto requires_power = parse_bool(prototype, "requires_power");
     if (!required_parts) {
         return core::Result<AssemblyDefinition>::failure(required_parts.error().code,
                                                          required_parts.error().message);
@@ -125,6 +208,11 @@ assembly_definition_from_prototype(const modding::GenericPrototype& prototype) {
         return core::Result<AssemblyDefinition>::failure(required_ports.error().code,
                                                          required_ports.error().message);
     }
+    if (!capacity || !requires_heat || !requires_power) {
+        return core::Result<AssemblyDefinition>::failure(
+            "assembly_prototype.invalid_runtime_fields",
+            "assembly capacity or runtime requirements are invalid");
+    }
 
     AssemblyDefinition definition;
     definition.prototype_id = prototype.id;
@@ -133,6 +221,30 @@ assembly_definition_from_prototype(const modding::GenericPrototype& prototype) {
         definition.part_requirements.push_back(std::move(part));
     }
     definition.required_ports = std::move(required_ports).value();
+    auto stages = parse_string_list(prototype, "construction_stages");
+    if (!stages.empty())
+        definition.construction_stages = std::move(stages);
+    definition.capabilities = parse_string_list(prototype, "capabilities");
+    definition.validation_rule_ids = parse_string_list(prototype, "validation_rules");
+    definition.room_requirements = parse_string_list(prototype, "room_requirements");
+    definition.capacity = capacity.value();
+    definition.requires_heat = requires_heat.value();
+    definition.requires_power = requires_power.value();
+    if (const auto* panel = field(prototype, "ui_panel"))
+        definition.ui_panel = *panel;
+    for (const auto& process : parse_string_list(prototype, "allowed_processes")) {
+        auto parsed = core::PrototypeId::parse(process);
+        if (!parsed) {
+            return core::Result<AssemblyDefinition>::failure("assembly_prototype.invalid_process",
+                                                             "allowed process id is invalid");
+        }
+        definition.allowed_processes.push_back(std::move(parsed).value());
+    }
+    auto layout_status = apply_part_layouts(prototype, definition.part_requirements);
+    if (!layout_status) {
+        return core::Result<AssemblyDefinition>::failure(layout_status.error().code,
+                                                         layout_status.error().message);
+    }
 
     auto status = definition.validate();
     if (!status) {

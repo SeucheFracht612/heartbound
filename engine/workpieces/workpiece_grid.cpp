@@ -52,6 +52,10 @@ const std::vector<WorkpieceOperation>& WorkpieceGrid::history() const noexcept {
     return history_;
 }
 
+std::uint64_t WorkpieceGrid::mesh_revision() const noexcept {
+    return mesh_revision_;
+}
+
 core::Status WorkpieceGrid::apply(const WorkpieceOperation& operation) {
     if (!contains(operation.coord)) {
         return core::Status::failure("workpiece.coord_out_of_bounds",
@@ -95,6 +99,7 @@ core::Status WorkpieceGrid::apply(const WorkpieceOperation& operation) {
     }
 
     history_.push_back(operation);
+    ++mesh_revision_;
     return core::Status::ok();
 }
 

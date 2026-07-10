@@ -452,7 +452,7 @@ void test_math_primitives() {
 
     heartstead::build::Transform build_transform;
     build_transform.position = {1.0, 2.0, 3.0};
-    assert(build_transform.position.x == 1.0);
+    assert(build_transform.position.approximate_global().x == 1.0);
 
     heartstead::physics::Vec3 physics_vector{1.0F, 2.0F, 3.0F};
     assert(physics_vector.is_finite());
@@ -5616,7 +5616,8 @@ void test_save_snapshot_validation() {
     assert(decoded_snapshot.value().chunk_edits.front().coord.z == far_chunk_coord + 3);
     assert(decoded_snapshot.value().build_pieces.size() == 3);
     assert(decoded_snapshot.value().entities.size() == 1);
-    assert(decoded_snapshot.value().entities.front().transform.position.x == 12.5);
+    assert(decoded_snapshot.value().entities.front().transform.position.approximate_global().x ==
+           12.5);
     assert(decoded_snapshot.value().entities.front().transform.rotation_degrees.y == 45.0);
     assert(decoded_snapshot.value().inventories.size() == 1);
     assert(decoded_snapshot.value().cargo_records.size() == 1);
@@ -5632,8 +5633,8 @@ void test_save_snapshot_validation() {
            encoded_chunk_edit_delta);
     assert(decoded_snapshot.value().build_pieces.front().object_id == wall_record.object_id);
     assert(decoded_snapshot.value().cargo_records.front().mass_grams == 90000);
-    assert(decoded_snapshot.value().cargo_records.front().position.x == 7.25);
-    assert(decoded_snapshot.value().cargo_records.front().position.z == -3.5);
+    assert(decoded_snapshot.value().cargo_records.front().position.approximate_global().x == 7.25);
+    assert(decoded_snapshot.value().cargo_records.front().position.approximate_global().z == -3.5);
     assert(decoded_snapshot.value().processes.front().input_slots.front().count == 4);
     assert(decoded_snapshot.value().mod_states.front().encoded_state == "opaque mod state");
 
@@ -5654,12 +5655,13 @@ void test_save_snapshot_validation() {
     assert(decoded_binary.value().build_pieces.size() == 3);
     assert(decoded_binary.value().build_pieces.front().room_contribution_tags.front() == "wall");
     assert(decoded_binary.value().entities.front().sleeping);
-    assert(decoded_binary.value().entities.front().transform.position.x == 12.5);
+    assert(decoded_binary.value().entities.front().transform.position.approximate_global().x ==
+           12.5);
     assert(decoded_binary.value().entities.front().transform.rotation_degrees.y == 45.0);
     assert(decoded_binary.value().inventories.front().stacks.front().count == 12);
     assert(decoded_binary.value().cargo_records.front().mass_grams == 90000);
-    assert(decoded_binary.value().cargo_records.front().position.x == 7.25);
-    assert(decoded_binary.value().cargo_records.front().position.z == -3.5);
+    assert(decoded_binary.value().cargo_records.front().position.approximate_global().x == 7.25);
+    assert(decoded_binary.value().cargo_records.front().position.approximate_global().z == -3.5);
     assert(decoded_binary.value().workpieces.front().shape.width == 4);
     assert(decoded_binary.value().assemblies.front().parts.size() == 2);
     assert(decoded_binary.value().assemblies.front().ports.front().source_build_piece_id ==
@@ -5679,7 +5681,9 @@ void test_save_snapshot_validation() {
         heartstead::save::SaveTextCodec::decode_snapshot(legacy_entity_snapshot);
     assert(decoded_legacy_entity);
     assert(decoded_legacy_entity.value().entities.size() == 1);
-    assert(decoded_legacy_entity.value().entities.front().transform.position.x == 0.0);
+    assert(
+        decoded_legacy_entity.value().entities.front().transform.position.approximate_global().x ==
+        0.0);
     assert(decoded_legacy_entity.value().entities.front().transform.scale.x == 1.0);
 
     const std::string legacy_cargo_snapshot =
@@ -5693,7 +5697,8 @@ void test_save_snapshot_validation() {
         heartstead::save::SaveTextCodec::decode_snapshot(legacy_cargo_snapshot);
     assert(decoded_legacy_cargo);
     assert(decoded_legacy_cargo.value().cargo_records.size() == 1);
-    assert(decoded_legacy_cargo.value().cargo_records.front().position.x == 0.0);
+    assert(decoded_legacy_cargo.value().cargo_records.front().position.approximate_global().x ==
+           0.0);
     assert(decoded_legacy_cargo.value().cargo_records.front().mass_grams == 90000);
 
     auto unknown_transport_snapshot = snapshot;
@@ -5893,8 +5898,8 @@ void test_save_snapshot_validation() {
     auto invalid_process_snapshot = snapshot;
     invalid_process_snapshot.processes.front().accumulated_effective_work_ms =
         invalid_process_snapshot.processes.front().required_effective_work_ms + 1;
-    invalid_process_snapshot.processes.front().last_update_time_ms =
-        invalid_process_snapshot.processes.front().start_time_ms - 1;
+    invalid_process_snapshot.processes.front().started_at = 1;
+    invalid_process_snapshot.processes.front().last_eval = 0;
     validation =
         heartstead::save::SaveSnapshotValidator::validate(invalid_process_snapshot, registry);
     assert(!validation.valid());
@@ -5903,8 +5908,8 @@ void test_save_snapshot_validation() {
     }));
 
     auto invalid_process_time_snapshot = snapshot;
-    invalid_process_time_snapshot.processes.front().last_update_time_ms =
-        invalid_process_time_snapshot.processes.front().start_time_ms - 1;
+    invalid_process_time_snapshot.processes.front().started_at = 1;
+    invalid_process_time_snapshot.processes.front().last_eval = 0;
     validation =
         heartstead::save::SaveSnapshotValidator::validate(invalid_process_time_snapshot, registry);
     assert(!validation.valid());
@@ -8203,7 +8208,7 @@ void test_world_replication_delta_planning() {
     assert(snapshot.entities.front().save_id == entity_id);
     assert(snapshot.entities.front().kind == heartstead::entities::EntityKind::cart);
     assert(snapshot.entities.front().sleeping);
-    assert(snapshot.entities.front().transform.position.x == 4.0);
+    assert(snapshot.entities.front().transform.position.approximate_global().x == 4.0);
     assert(snapshot.cargo_records.size() == 1);
     assert(snapshot.cargo_records.front().cargo_id == cargo_id);
     assert(snapshot.inventories.size() == 1);
@@ -8637,7 +8642,7 @@ void test_world_replication_delta_planning() {
     const auto client_entity_runtime = client_entity->runtime_handle;
     const auto client_entity_net_id = client_entity->net_id;
     assert(client_entity->save_id == entity_id);
-    assert(client_entity->transform.position.x == 4.0);
+    assert(client_entity->transform.position.approximate_global().x == 4.0);
     assert(client_state.runtime_handles().peek_next() ==
            heartstead::core::RuntimeHandle::from_value(2));
     assert(client_state.entity_net_ids().peek_next() ==
@@ -8769,11 +8774,11 @@ void test_world_replication_delta_planning() {
 
     auto* mutable_build = state.build_objects().find(build_id);
     assert(mutable_build != nullptr);
-    mutable_build->transform.position.x = 5.0;
+    mutable_build->transform.position = {5.0, 0.0, 0.0};
     auto* mutable_entity = state.entities().find_by_save_id(entity_id);
     assert(mutable_entity != nullptr);
     mutable_entity->sleeping = false;
-    mutable_entity->transform.position.x = 8.0;
+    mutable_entity->transform.position = {8.0, 0.0, 0.0};
     auto* mutable_cargo = state.cargo().find(cargo_id);
     assert(mutable_cargo != nullptr);
     mutable_cargo->mass_grams = 91000;
@@ -8798,8 +8803,9 @@ void test_world_replication_delta_planning() {
     assert(client_entity->runtime_handle == client_entity_runtime);
     assert(client_entity->net_id == client_entity_net_id);
     assert(!client_entity->sleeping);
-    assert(client_entity->transform.position.x == 8.0);
-    assert(client_state.build_objects().find(build_id)->transform.position.x == 5.0);
+    assert(client_entity->transform.position.approximate_global().x == 8.0);
+    assert(client_state.build_objects().find(build_id)->transform.position.approximate_global().x ==
+           5.0);
     assert(client_state.cargo().find(cargo_id)->mass_grams == 91000);
     assert(client_state.inventories().find(build_id)->stacks.front().count == 5);
     auto update_inspection = heartstead::debug::Inspector::inspect(update_report.value());
@@ -9680,7 +9686,7 @@ void test_world_command_registry() {
     const auto* placed = state.build_objects().find(heartstead::core::SaveId::from_value(3000));
     assert(placed != nullptr);
     assert(placed->prototype_id == wall_id.value());
-    assert(placed->transform.position.x == 1.5);
+    assert(placed->transform.position.approximate_global().x == 1.5);
     assert(placed->transform.rotation_degrees.y == 90.0);
     assert(placed->material_tags.size() == 2);
     assert(placed->room_contribution_tags.size() == 2);
@@ -9783,7 +9789,8 @@ void test_world_command_registry() {
     assert(workpiece_result.value().reserved_ids.empty());
     assert(workpiece_result.value().events.size() == 1);
     assert(workpiece_result.value().events.front().type == "workpiece.edited");
-    assert(!workpiece_result.value().events.front().subject.is_valid());
+    assert(workpiece_result.value().events.front().subject ==
+           heartstead::core::SaveId::from_value(7));
 
     const auto* edited_workpiece =
         state.workpieces().find(heartstead::core::WorkpieceId::from_value(7));
@@ -9861,6 +9868,7 @@ void test_world_command_registry() {
     assert(process_payload.set("owner", "3000"));
     assert(process_payload.set("prototype", "base:processes/drying"));
     process_command.payload = heartstead::net::CommandPayloadTextCodec::encode(process_payload);
+    assert(state.advance_world_time(500));
     auto process_result = dispatcher.dispatch(process_command, context);
     assert(process_result);
     assert(process_result.value().committed_world_mutation);
@@ -9930,6 +9938,7 @@ void test_world_command_registry() {
     process_power.clear_dirty();
 
     context.server_time_ms = 1200;
+    assert(state.advance_world_time(700));
     heartstead::net::CommandEnvelope process_advance_command;
     process_advance_command.sequence = 8;
     process_advance_command.sender = heartstead::core::NetId::from_value(10);
@@ -10030,8 +10039,8 @@ void test_world_command_registry() {
     const auto* cargo_record = state.cargo().find(heartstead::core::SaveId::from_value(3004));
     assert(cargo_record != nullptr);
     assert(cargo_record->prototype_id == heavy_log_id.value());
-    assert(cargo_record->position.x == 5.5);
-    assert(cargo_record->position.z == -2.25);
+    assert(cargo_record->position.approximate_global().x == 5.5);
+    assert(cargo_record->position.approximate_global().z == -2.25);
     assert(cargo_record->mass_grams == 120000);
     assert(cargo_record->volume_milliliters == 200000);
     assert(
@@ -10068,8 +10077,8 @@ void test_world_command_registry() {
     assert(spawned_entity->prototype_id == hand_cart_id.value());
     assert(spawned_entity->kind == heartstead::entities::EntityKind::cart);
     assert(spawned_entity->persistent);
-    assert(spawned_entity->transform.position.x == 4.5);
-    assert(spawned_entity->transform.position.y == 1.0);
+    assert(spawned_entity->transform.position.approximate_global().x == 4.5);
+    assert(spawned_entity->transform.position.approximate_global().y == 1.0);
     assert(spawned_entity->transform.rotation_degrees.y == 180.0);
     assert(state.entities().find_by_net_id(heartstead::core::NetId::from_value(8000)) != nullptr);
     assert(state.entities().find_by_save_id(heartstead::core::SaveId::from_value(3005)) != nullptr);
@@ -11801,7 +11810,7 @@ void test_cargo_records() {
 
     assert(record.validate());
     assert(record.is_hazardous());
-    assert(record.position.y == 2.0);
+    assert(record.position.approximate_global().y == 2.0);
     assert(record.allowed_transport_modes.allows(heartstead::cargo::CargoTransportMode::cart));
     assert(!record.allowed_transport_modes.allows(heartstead::cargo::CargoTransportMode::hand));
 
@@ -11832,7 +11841,7 @@ void test_cargo_records() {
 
     auto invalid_position = record;
     invalid_position.stability_per_mille = 1000;
-    invalid_position.position.x = std::numeric_limits<double>::infinity();
+    invalid_position.position.local_offset.x = std::numeric_limits<double>::infinity();
     auto invalid_position_status = invalid_position.validate();
     assert(!invalid_position_status);
     assert(invalid_position_status.error().code == "cargo.invalid_position");
@@ -11921,7 +11930,7 @@ void test_entity_prototype_materialization() {
         heartstead::core::RuntimeHandle::from_value(12), heartstead::core::NetId::from_value(13),
         heartstead::core::SaveId::from_value(14), spawn_transform);
     assert(transformed_record);
-    assert(transformed_record.value().transform.position.z == 4.0);
+    assert(transformed_record.value().transform.position.approximate_global().z == 4.0);
     assert(transformed_record.value().transform.rotation_degrees.y == 90.0);
 
     auto missing_save = definition.value().create_record(
@@ -12094,7 +12103,7 @@ void test_build_piece_record() {
     assert(status.error().code == "build_piece.invalid_construction_state");
 
     auto invalid_transform = wall;
-    invalid_transform.transform.position.x = std::numeric_limits<double>::infinity();
+    invalid_transform.transform.position.local_offset.x = std::numeric_limits<double>::infinity();
     status = invalid_transform.validate();
     assert(!status);
     assert(status.error().code == "build_piece.invalid_transform");
@@ -12630,7 +12639,7 @@ void test_chunk_streamer() {
     assert(flushed_chunk->dirty().contains(heartstead::world::ChunkDirtyFlag::replication));
     auto flushed_delta = database.read_chunk_delta(dirty_retained_coord);
     assert(flushed_delta);
-    assert(flushed_delta.value().encoded_edit_delta.find("heartstead.chunk_edit_delta.v1") !=
+    assert(flushed_delta.value().encoded_edit_delta.find("heartstead.chunk_edit_delta.v2") !=
            std::string::npos);
 
     const std::vector<heartstead::world::ChunkCoord> replication_pinned_requests{
@@ -12675,7 +12684,7 @@ void test_chunk_streamer() {
            replication_without_delta_coord);
     assert(replication_sink.records.size() == 1);
     assert(replication_sink.records.front().encoded_edit_delta.find(
-               "heartstead.chunk_edit_delta.v1") != std::string::npos);
+               "heartstead.chunk_edit_delta.v2") != std::string::npos);
     flushed_chunk = state.chunks().find(dirty_retained_coord);
     assert(flushed_chunk != nullptr);
     assert(!flushed_chunk->dirty().contains(heartstead::world::ChunkDirtyFlag::save));
@@ -13204,13 +13213,13 @@ void test_world_snapshot_bridge() {
     assert(snapshot.value().metadata.world_seed == 12345);
     assert(snapshot.value().chunk_edits.size() == 1);
     assert(snapshot.value().chunk_edits.front().encoded_edit_delta.find(
-               "heartstead.chunk_edit_delta.v1") != std::string::npos);
+               "heartstead.chunk_edit_delta.v2") != std::string::npos);
     assert(snapshot.value().build_pieces.size() == 1);
     assert(snapshot.value().cargo_records.size() == 1);
-    assert(snapshot.value().cargo_records.front().position.z == 9.0);
+    assert(snapshot.value().cargo_records.front().position.approximate_global().z == 9.0);
     assert(snapshot.value().entities.size() == 1);
     assert(snapshot.value().entities.front().sleeping);
-    assert(snapshot.value().entities.front().transform.position.x == 6.0);
+    assert(snapshot.value().entities.front().transform.position.approximate_global().x == 6.0);
     assert(snapshot.value().entities.front().transform.rotation_degrees.y == 270.0);
     assert(snapshot.value().inventories.size() == 1);
     assert(snapshot.value().workpieces.size() == 1);
@@ -13239,8 +13248,8 @@ void test_world_snapshot_bridge() {
     assert(imported.value().stats().cargo_count == 1);
     const auto* imported_cargo = imported.value().cargo().find(cargo_id.value());
     assert(imported_cargo != nullptr);
-    assert(imported_cargo->position.x == -2.0);
-    assert(imported_cargo->position.z == 9.0);
+    assert(imported_cargo->position.approximate_global().x == -2.0);
+    assert(imported_cargo->position.approximate_global().z == 9.0);
     assert(imported.value().stats().entity_count == 1);
     assert(imported.value().stats().inventory_count == 1);
     assert(imported.value().stats().workpiece_count == 1);
@@ -13258,7 +13267,7 @@ void test_world_snapshot_bridge() {
     assert(restored_entity->runtime_handle == heartstead::core::RuntimeHandle::from_value(500));
     assert(restored_entity->net_id == heartstead::core::NetId::from_value(9000));
     assert(restored_entity->sleeping);
-    assert(restored_entity->transform.position.x == 6.0);
+    assert(restored_entity->transform.position.approximate_global().x == 6.0);
     assert(restored_entity->transform.rotation_degrees.y == 270.0);
     assert(imported.value().entity_net_ids().peek_next() ==
            heartstead::core::NetId::from_value(9001));
@@ -13272,15 +13281,15 @@ void test_world_snapshot_bridge() {
     assert(reexported);
     assert(reexported.value().chunk_edits.size() == 1);
     assert(reexported.value().entities.size() == 1);
-    assert(reexported.value().entities.front().transform.position.x == 6.0);
+    assert(reexported.value().entities.front().transform.position.approximate_global().x == 6.0);
 
     heartstead::modding::PrototypeRegistry empty_registry;
     assert(!empty_registry.build({}).has_errors());
     auto missing_prototype_import =
         heartstead::world::WorldSnapshotBridge::import_validated_snapshot(
             snapshot.value(), empty_registry, load_config);
-    assert(!missing_prototype_import);
-    assert(missing_prototype_import.error().code == "prototype_registry.missing_reference");
+    assert(missing_prototype_import);
+    assert(!missing_prototype_import.value().missing_prototypes().empty());
 
     auto wrong_item_kind = snapshot.value();
     wrong_item_kind.inventories.front().stacks.front().prototype_id = cargo_prototype.value();

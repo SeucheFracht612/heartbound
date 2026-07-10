@@ -1,5 +1,6 @@
 #include "engine/world/world_snapshot.hpp"
 
+#include "engine/save/missing_prototype_recovery.hpp"
 #include "engine/workpieces/workpiece_codec.hpp"
 #include "engine/world/chunks/chunk_edit_delta_codec.hpp"
 
@@ -77,6 +78,14 @@ template <typename T, typename Less>
     for (const auto& assembly : snapshot.assemblies) {
         visit(assembly.assembly_id);
     }
+    for (const auto& missing : snapshot.missing_prototypes) {
+        if (missing.kind == MissingPrototypeKind::build_piece ||
+            missing.kind == MissingPrototypeKind::entity ||
+            missing.kind == MissingPrototypeKind::cargo ||
+            missing.kind == MissingPrototypeKind::assembly) {
+            visit(core::SaveId::from_value(missing.stable_id));
+        }
+    }
     return max_id;
 }
 
@@ -95,6 +104,7 @@ template <typename T, typename Less>
 core::Result<save::SaveSnapshot> WorldSnapshotBridge::export_snapshot(const WorldState& state) {
     save::SaveSnapshot snapshot;
     snapshot.metadata = state.metadata();
+    snapshot.voxel_palette = state.voxel_palette_manifest();
 
     std::map<ChunkCoord, std::vector<const VoxelEditRecord*>> edits_by_chunk;
     for (const auto& edit : state.chunks().edit_log()) {
@@ -130,6 +140,23 @@ core::Result<save::SaveSnapshot> WorldSnapshotBridge::export_snapshot(const Worl
         }
     }
 
+    for (const auto* resource :
+         sorted_records(state.physical_resources().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->resource_id.value() < rhs->resource_id.value();
+         })) {
+        entities::Transform transform;
+        transform.position = resource->position;
+        snapshot.entities.push_back(save::EntitySaveRecord{
+            resource->resource_id,
+            resource->prototype_id,
+            entities::EntityKind::temporary_physics,
+            resource->state == entities::PhysicalResourceState::settled_sleeping ||
+                resource->state == entities::PhysicalResourceState::frozen_static,
+            entities::PhysicalResourceTextCodec::encode(*resource),
+            transform,
+        });
+    }
+
     for (const auto* inventory :
          sorted_records(state.inventories().records(), [](const auto* lhs, const auto* rhs) {
              return lhs->owner_id.value() < rhs->owner_id.value();
@@ -154,6 +181,14 @@ core::Result<save::SaveSnapshot> WorldSnapshotBridge::export_snapshot(const Worl
             workpiece->prototype_id,
             workpiece->grid.shape(),
             workpieces::WorkpieceGridTextCodec::encode(workpiece->grid),
+            workpiece->material_prototype_id,
+            workpiece->server_state.has_value()
+                ? workpieces::WorkpieceServerStateTextCodec::encode(*workpiece->server_state,
+                                                                    workpiece->grid.shape())
+                : std::string{},
+            workpiece->owner_session,
+            workpiece->revision,
+            workpiece->committed,
         });
     }
 
@@ -171,6 +206,13 @@ core::Result<save::SaveSnapshot> WorldSnapshotBridge::export_snapshot(const Worl
         snapshot.processes.push_back(*process);
     }
 
+    for (const auto* fire :
+         sorted_records(state.fires().records(), [](const auto* lhs, const auto* rhs) {
+             return lhs->fire_id.value() < rhs->fire_id.value();
+         })) {
+        snapshot.fires.push_back(*fire);
+    }
+
     for (const auto* mod_state :
          sorted_records(state.mod_states().records(), [](const auto* lhs, const auto* rhs) {
              if (lhs->mod_id == rhs->mod_id) {
@@ -181,6 +223,7 @@ core::Result<save::SaveSnapshot> WorldSnapshotBridge::export_snapshot(const Worl
         snapshot.mod_states.push_back(save::ModStateSaveRecord{
             mod_state->mod_id, mod_state->state_key, mod_state->encoded_state});
     }
+    snapshot.missing_prototypes = state.missing_prototypes();
 
     return core::Result<save::SaveSnapshot>::success(std::move(snapshot));
 }
@@ -189,13 +232,18 @@ core::Result<WorldState>
 WorldSnapshotBridge::import_validated_snapshot(const save::SaveSnapshot& snapshot,
                                                const modding::PrototypeRegistry& prototypes,
                                                WorldSnapshotLoadConfig config) {
-    const auto validation = save::SaveSnapshotValidator::validate(snapshot, prototypes);
+    auto recoverable = snapshot;
+    auto recovery = save::preserve_missing_prototypes(recoverable, prototypes);
+    if (!recovery) {
+        return core::Result<WorldState>::failure(recovery.error().code, recovery.error().message);
+    }
+    const auto validation = save::SaveSnapshotValidator::validate(recoverable, prototypes);
     if (!validation.valid()) {
         const auto& first_issue = validation.issues.front();
         return core::Result<WorldState>::failure(first_issue.code, first_issue.message);
     }
 
-    return import_snapshot(snapshot, config);
+    return import_snapshot(recoverable, config);
 }
 
 core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSnapshot& snapshot,
@@ -211,6 +259,7 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
         std::max(config.next_process_id, max_snapshot_process_id(snapshot) + 1);
     WorldStateDesc desc;
     desc.metadata = snapshot.metadata;
+    desc.voxel_palette = snapshot.voxel_palette;
     desc.next_save_id = next_save_id;
     desc.next_runtime_handle = config.next_runtime_handle;
     desc.next_entity_net_id = config.next_entity_net_id;
@@ -253,6 +302,21 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
         auto status = track_unique_save_id(save_ids, entity.save_id, "entity");
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        if (entity.encoded_state.starts_with(entities::physical_resource_state_magic)) {
+            auto resource = entities::PhysicalResourceTextCodec::decode(
+                entity.save_id, entity.prototype_id, entity.transform.position,
+                entity.encoded_state);
+            if (!resource) {
+                return core::Result<WorldState>::failure(resource.error().code,
+                                                         resource.error().message);
+            }
+            status = state.physical_resources().insert(std::move(resource).value());
+            if (!status) {
+                return core::Result<WorldState>::failure(status.error().code,
+                                                         status.error().message);
+            }
+            continue;
         }
         auto runtime_handle = state.runtime_handles().reserve();
         if (!runtime_handle) {
@@ -299,8 +363,20 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
                 "world_snapshot.workpiece_shape_mismatch",
                 "decoded workpiece grid shape does not match save record shape");
         }
-        auto status = state.workpieces().insert(WorkpieceRecord{
-            workpiece.workpiece_id, workpiece.prototype_id, std::move(grid).value()});
+        std::optional<workpieces::WorkpieceServerState> server_state;
+        if (!workpiece.encoded_server_state.empty()) {
+            auto decoded_state = workpieces::WorkpieceServerStateTextCodec::decode(
+                workpiece.encoded_server_state, workpiece.shape);
+            if (!decoded_state) {
+                return core::Result<WorldState>::failure(decoded_state.error().code,
+                                                         decoded_state.error().message);
+            }
+            server_state = std::move(decoded_state).value();
+        }
+        auto status = state.workpieces().insert(
+            WorkpieceRecord{workpiece.workpiece_id, workpiece.prototype_id, std::move(grid).value(),
+                            workpiece.material_prototype_id, std::move(server_state),
+                            workpiece.owner_session, workpiece.revision, workpiece.committed});
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }
@@ -368,12 +444,33 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
         }
     }
 
+    for (const auto& fire : snapshot.fires) {
+        auto status = state.fires().insert(fire);
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+    }
+
     for (const auto& mod_state : snapshot.mod_states) {
         auto status = state.mod_states().insert(
             ModStateRecord{mod_state.mod_id, mod_state.state_key, mod_state.encoded_state});
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }
+    }
+
+    std::set<std::pair<MissingPrototypeKind, std::uint64_t>> missing_keys;
+    for (const auto& missing : snapshot.missing_prototypes) {
+        auto status = missing.validate();
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        if (!missing_keys.emplace(missing.kind, missing.stable_id).second) {
+            return core::Result<WorldState>::failure(
+                "world_snapshot.duplicate_missing_prototype",
+                "snapshot contains duplicate missing prototype placeholders");
+        }
+        state.missing_prototypes().push_back(missing);
     }
 
     return core::Result<WorldState>::success(std::move(state));

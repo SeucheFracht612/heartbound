@@ -153,14 +153,19 @@ process_definition_from_prototype(const modding::GenericPrototype& prototype) {
                                                         "process prototype id is invalid");
     }
 
-    const auto* work_value = field(prototype, "default_required_work_ms");
+    const auto* work_value = field(prototype, "default_required_work_ticks");
+    const auto* work_field_name = "default_required_work_ticks";
+    if (work_value == nullptr) {
+        work_value = field(prototype, "default_required_work_ms");
+        work_field_name = "default_required_work_ms";
+    }
     if (work_value == nullptr || work_value->empty()) {
         return core::Result<ProcessDefinition>::failure(
             "process_prototype.missing_required_work",
-            "process prototype must declare default_required_work_ms");
+            "process prototype must declare default_required_work_ticks");
     }
 
-    auto required_work = parse_positive_i64(*work_value, "default_required_work_ms");
+    auto required_work = parse_positive_i64(*work_value, work_field_name);
     auto requires_room = parse_optional_bool(prototype, "requires_room", false);
     auto requires_power = parse_optional_bool(prototype, "requires_power", false);
     auto required_power_capacity =
@@ -194,7 +199,8 @@ process_definition_from_prototype(const modding::GenericPrototype& prototype) {
 
     ProcessDefinition definition;
     definition.prototype_id = prototype.id;
-    definition.default_required_work_ms = required_work.value();
+    definition.default_required_work_ticks =
+        static_cast<simulation::WorldTick>(required_work.value());
     definition.requires_room = requires_room.value();
     definition.requires_power = requires_power.value();
     definition.required_power_capacity = required_power_capacity.value();

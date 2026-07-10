@@ -2,6 +2,7 @@
 
 #include "engine/core/ids.hpp"
 #include "engine/core/result.hpp"
+#include "engine/simulation/world_time.hpp"
 
 #include <cstdint>
 #include <string>
@@ -18,7 +19,10 @@ struct ProcessSlot {
 
 struct ProcessDefinition {
     core::PrototypeId prototype_id;
-    std::int64_t default_required_work_ms = 0;
+    union {
+        simulation::WorldTick default_required_work_ticks = 0;
+        simulation::WorldTick default_required_work_ms;
+    };
     bool requires_room = false;
     bool requires_power = false;
     std::uint32_t required_power_capacity = 1;
@@ -32,6 +36,21 @@ enum class ProcessState {
     running,
     interrupted,
     complete,
+};
+
+enum class ProcessInterruptionPolicy {
+    pause,
+    reset,
+    fail,
+};
+
+enum class ProcessEvaluationTrigger {
+    chunk_load,
+    interaction,
+    render_proximity,
+    state_change,
+    inspection,
+    save_load_validation,
 };
 
 struct ProcessModifiers {
@@ -48,32 +67,56 @@ struct ProcessInstance {
     core::PrototypeId prototype_id;
     std::vector<ProcessSlot> input_slots;
     std::vector<ProcessSlot> output_slots;
-    std::int64_t start_time_ms = 0;
-    std::int64_t last_update_time_ms = 0;
-    std::int64_t required_effective_work_ms = 0;
-    std::int64_t accumulated_effective_work_ms = 0;
+    union {
+        simulation::WorldTick started_at = 0;
+        simulation::WorldTick start_time_ms;
+    };
+    union {
+        simulation::WorldTick last_eval = 0;
+        simulation::WorldTick last_update_time_ms;
+    };
+    union {
+        simulation::WorldTick required_work_ticks = 0;
+        simulation::WorldTick required_effective_work_ms;
+    };
+    union {
+        simulation::WorldTick accrued_work_ticks = 0;
+        simulation::WorldTick accumulated_effective_work_ms;
+    };
     ProcessState state = ProcessState::running;
     std::string interruption_reason;
+    bool output_claimed = false;
+    std::string condition_function_id;
+    ProcessInterruptionPolicy interruption_policy = ProcessInterruptionPolicy::pause;
 
     [[nodiscard]] core::Status validate() const;
     [[nodiscard]] bool is_complete() const noexcept;
-    [[nodiscard]] std::int64_t remaining_effective_work_ms() const noexcept;
+    [[nodiscard]] simulation::WorldTick remaining_work_ticks() const noexcept;
+    [[nodiscard]] simulation::WorldTick remaining_effective_work_ms() const noexcept {
+        return remaining_work_ticks();
+    }
 };
 
 class ProcessRuntime {
   public:
     [[nodiscard]] static core::Result<ProcessInstance>
     create(core::ProcessId process_id, core::SaveId owner_id, core::PrototypeId prototype_id,
-           std::int64_t now_ms, std::int64_t required_effective_work_ms);
+           simulation::WorldTick world_time, simulation::WorldTick required_work_ticks);
     [[nodiscard]] static core::Result<ProcessInstance> create(core::ProcessId process_id,
                                                               core::SaveId owner_id,
                                                               const ProcessDefinition& definition,
-                                                              std::int64_t now_ms);
+                                                              simulation::WorldTick world_time);
 
-    [[nodiscard]] static core::Status advance(ProcessInstance& instance, std::int64_t now_ms,
+    [[nodiscard]] static core::Status advance(ProcessInstance& instance,
+                                              simulation::WorldTick world_time,
                                               ProcessModifiers modifiers);
+    [[nodiscard]] static core::Status evaluate(ProcessInstance& instance,
+                                               simulation::WorldTick world_time,
+                                               ProcessModifiers modifiers,
+                                               ProcessEvaluationTrigger trigger);
     static void interrupt(ProcessInstance& instance, std::string reason);
-    [[nodiscard]] static core::Status resume(ProcessInstance& instance, std::int64_t now_ms);
+    [[nodiscard]] static core::Status resume(ProcessInstance& instance,
+                                             simulation::WorldTick world_time);
 };
 
 class ProcessIdAllocator {
@@ -88,5 +131,6 @@ class ProcessIdAllocator {
 };
 
 [[nodiscard]] bool is_known_process_state(ProcessState state) noexcept;
+[[nodiscard]] bool is_known_interruption_policy(ProcessInterruptionPolicy policy) noexcept;
 
 } // namespace heartstead::processes

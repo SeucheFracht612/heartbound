@@ -79,7 +79,7 @@ core::Status CargoRecord::validate() const {
     if (!prototype_id.is_valid()) {
         return core::Status::failure("cargo.invalid_prototype", "cargo prototype id must be valid");
     }
-    if (!position.is_finite()) {
+    if (!position.is_valid()) {
         return core::Status::failure("cargo.invalid_position", "cargo position must be finite");
     }
     if (mass_grams == 0) {
@@ -152,8 +152,8 @@ bool CargoDefinition::is_hazardous() const noexcept {
     return !hazard_tags.empty();
 }
 
-core::Result<CargoRecord> CargoDefinition::create_record(core::SaveId cargo_id,
-                                                         Vec3 position) const {
+core::Result<CargoRecord>
+CargoDefinition::create_record(core::SaveId cargo_id, world::WorldPosition position) const {
     auto status = validate();
     if (!status) {
         return core::Result<CargoRecord>::failure(status.error().code, status.error().message);

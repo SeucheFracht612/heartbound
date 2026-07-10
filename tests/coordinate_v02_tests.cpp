@@ -1,6 +1,8 @@
 #include "engine/build/build_piece.hpp"
 #include "engine/dirty/dirty_region.hpp"
 #include "engine/networks/network_derivation.hpp"
+#include "engine/save/save_binary_codec.hpp"
+#include "engine/save/save_text_codec.hpp"
 #include "engine/simulation/simulation_lod.hpp"
 #include "engine/world/chunks/chunk_database.hpp"
 #include "engine/world/coords/world_coords.hpp"
@@ -65,7 +67,7 @@ void test_block_chunk_local_round_trips() {
 }
 
 void test_dirty_regions_keep_far_coordinates() {
-    constexpr std::int64_t far = std::int64_t{1} << 40;
+    constexpr std::int64_t far = std::int64_t{1} << 60;
     heartstead::world::ChunkDatabase chunks;
     heartstead::dirty::DirtyRegionTracker dirty_regions;
     assert(chunks.set({far, -far, far + 7}, {1, 2, 3}, {1, 0}, dirty_regions));
@@ -108,21 +110,24 @@ void test_simulation_distance_at_i64_extremes() {
 }
 
 void test_far_transform_derivation() {
-    constexpr std::int64_t far = std::int64_t{1} << 40;
+    constexpr std::int64_t far = std::int64_t{1} << 60;
     const auto prototype = heartstead::core::PrototypeId::parse("base:build_pieces/far_test");
     assert(prototype);
 
     heartstead::build::BuildPieceRecord positive;
     positive.object_id = heartstead::core::SaveId::from_value(1);
     positive.prototype_id = prototype.value();
-    positive.transform.position = {static_cast<double>(far) + 0.75, 0.0, 0.0};
+    positive.transform.position =
+        heartstead::world::WorldPosition::from_anchor({far, 0, 0}, {0.75, 0.0, 0.0}).value();
     positive.construction_state = heartstead::build::ConstructionState::complete;
     positive.network_ports.push_back(
         {"storage", heartstead::networks::NetworkKind::storage_access, 1});
 
     auto negative = positive;
     negative.object_id = heartstead::core::SaveId::from_value(2);
-    negative.transform.position.x = -static_cast<double>(far) - 0.25;
+    negative.transform.position = heartstead::world::WorldPosition::from_anchor(
+                                      {-far - 1, 0, 0}, {0.75, 0.0, 0.0})
+                                      .value();
 
     heartstead::networks::SpatialNetworkDerivationInput input;
     input.build_pieces = {&positive, &negative};
@@ -149,6 +154,71 @@ void test_far_transform_derivation() {
     assert(subjects.value().front().coord.x == far);
 }
 
+void test_floating_origin_and_physics_island_adapters() {
+    constexpr std::int64_t far = std::int64_t{1} << 60;
+    auto position = heartstead::world::WorldPosition::from_anchor(
+        {far + 10, -far + 3, 99}, {0.25, 0.5, 0.75});
+    assert(position);
+
+    auto render_local = heartstead::world::to_camera_relative(
+        position.value(), heartstead::world::FloatingOrigin{{far, -far, 100}});
+    assert(render_local);
+    assert(render_local.value().x == 10.25F);
+    assert(render_local.value().y == 3.5F);
+    assert(render_local.value().z == -0.25F);
+
+    auto physics_local = heartstead::world::to_physics_local(
+        position.value(), heartstead::world::PhysicsIslandFrame{{far, -far, 100}, 16.0F});
+    assert(physics_local);
+    auto outside_island = heartstead::world::to_physics_local(
+        position.value(), heartstead::world::PhysicsIslandFrame{{0, 0, 0}, 16.0F});
+    assert(!outside_island);
+    assert(outside_island.error().code == "floating_origin.outside_local_extent");
+
+    auto normalized = heartstead::world::WorldPosition::from_anchor({far, 0, 0}, {-0.25, 0, 0});
+    assert(normalized);
+    assert(normalized.value().anchor.x == far - 1);
+    assert(normalized.value().local_offset.x == 0.75);
+    assert(!heartstead::world::WorldPosition::from_anchor(
+        {std::numeric_limits<std::int64_t>::max(), 0, 0}, {1.0, 0.0, 0.0}));
+}
+
+void test_far_world_positions_round_trip_saves() {
+    constexpr std::int64_t far = std::int64_t{1} << 60;
+    const auto prototype = heartstead::core::PrototypeId::parse("base:build_pieces/far_save");
+    assert(prototype);
+
+    heartstead::save::SaveSnapshot snapshot;
+    snapshot.metadata.schema_version = 1;
+    snapshot.metadata.game_version = "test";
+    snapshot.metadata.world_seed = 7;
+    snapshot.voxel_palette.entries = {{42, prototype.value()}};
+
+    heartstead::build::BuildPieceRecord build;
+    build.object_id = heartstead::core::SaveId::from_value(1);
+    build.prototype_id = prototype.value();
+    build.construction_state = heartstead::build::ConstructionState::complete;
+    build.transform.position = heartstead::world::WorldPosition::from_anchor(
+                                   {far + 1, -far - 1, far + 3}, {0.125, 0.875, 0.5})
+                                   .value();
+    snapshot.build_pieces.push_back(build);
+
+    const auto text = heartstead::save::SaveTextCodec::encode_snapshot(snapshot);
+    assert(text.starts_with("heartstead.save_snapshot_text.v2\n"));
+    auto decoded_text = heartstead::save::SaveTextCodec::decode_snapshot(text);
+    assert(decoded_text);
+    assert(decoded_text.value().build_pieces.front().transform.position ==
+           build.transform.position);
+    assert(decoded_text.value().voxel_palette.entries == snapshot.voxel_palette.entries);
+
+    const auto binary = heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot);
+    auto decoded_binary = heartstead::save::SaveBinaryCodec::decode_snapshot(binary);
+    assert(decoded_binary);
+    assert(decoded_binary.value().build_pieces.front().transform.position ==
+           build.transform.position);
+    assert(decoded_binary.value().voxel_palette.entries == snapshot.voxel_palette.entries);
+}
+
 } // namespace
 
 int main() {
@@ -156,5 +226,7 @@ int main() {
     test_dirty_regions_keep_far_coordinates();
     test_simulation_distance_at_i64_extremes();
     test_far_transform_derivation();
+    test_floating_origin_and_physics_island_adapters();
+    test_far_world_positions_round_trip_saves();
     return 0;
 }

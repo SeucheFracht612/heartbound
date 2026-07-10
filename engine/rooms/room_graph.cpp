@@ -31,7 +31,10 @@ core::Status RoomRecord::validate() const {
         !per_mille_valid(metrics.light_per_mille) || !per_mille_valid(metrics.smoke_per_mille) ||
         !per_mille_valid(metrics.ventilation_per_mille) ||
         !per_mille_valid(metrics.safety_per_mille) ||
-        !per_mille_valid(metrics.spaciousness_per_mille)) {
+        !per_mille_valid(metrics.spaciousness_per_mille) ||
+        !per_mille_valid(metrics.weather_exposure_per_mille) ||
+        !per_mille_valid(metrics.dampness_per_mille) ||
+        !per_mille_valid(metrics.cleanliness_per_mille)) {
         return core::Status::failure("room.invalid_metric",
                                      "room per-mille metrics must be 0..1000");
     }
@@ -101,6 +104,25 @@ std::vector<RoomDescriptor> RoomEvaluator::evaluate(const RoomMetrics& metrics) 
     }
     if (metrics.ward_coverage) {
         add_descriptor(descriptors, "warded", "Warded", RoomDescriptorSeverity::positive);
+    }
+    if (metrics.underground && metrics.warmth <= 100 && metrics.dampness_per_mille < 400) {
+        add_descriptor(descriptors, "cool_cellar", "Cool Cellar", RoomDescriptorSeverity::positive);
+    }
+    if (metrics.terrain_contact && metrics.ward_coverage && metrics.safety_per_mille >= 700) {
+        add_descriptor(descriptors, "stable_ward_room", "Stable Ward Room",
+                       RoomDescriptorSeverity::positive);
+    }
+    if (metrics.terrain_contact && metrics.storage_access && metrics.dryness >= 250 &&
+        metrics.weather_exposure_per_mille <= 200) {
+        add_descriptor(descriptors, "dry_fuel_shed", "Dry Fuel Shed",
+                       RoomDescriptorSeverity::positive);
+    }
+    if (metrics.cleanliness_per_mille < 350) {
+        add_descriptor(descriptors, "dirty", "Dirty", RoomDescriptorSeverity::warning);
+    }
+    if (metrics.weather_exposure_per_mille > 500) {
+        add_descriptor(descriptors, "weather_exposed", "Weather Exposed",
+                       RoomDescriptorSeverity::warning);
     }
 
     return descriptors;

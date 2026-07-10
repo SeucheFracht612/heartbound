@@ -13,6 +13,8 @@
 
 namespace heartstead::world {
 
+class VoxelPalette;
+
 struct VoxelEditRecord {
     ChunkCoord chunk_coord;
     VoxelCoord voxel_coord;
@@ -50,6 +52,9 @@ class ChunkDatabase {
     [[nodiscard]] core::Status set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell);
     [[nodiscard]] core::Status set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell,
                                    dirty::DirtyRegionTracker& dirty_regions);
+    [[nodiscard]] core::Status set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell,
+                                   dirty::DirtyRegionTracker& dirty_regions,
+                                   const VoxelPalette& palette);
     [[nodiscard]] core::Status apply_saved_edits(std::span<const VoxelEditRecord> edits);
     [[nodiscard]] core::Status apply_saved_edits(std::span<const VoxelEditRecord> edits,
                                                  dirty::DirtyRegionTracker& dirty_regions);
@@ -78,6 +83,10 @@ class ChunkDatabase {
     void replace_saved_edit_history(std::span<const VoxelEditRecord> edits);
     void mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
                                          dirty::DirtyRegionTracker* dirty_regions);
+    [[nodiscard]] core::Status
+    mark_rich_mesh_invalidation(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
+                                std::uint16_t radius,
+                                dirty::DirtyRegionTracker& dirty_regions);
     [[nodiscard]] static dirty::DirtyRegionCoord dirty_coord_for_chunk(ChunkCoord coord) noexcept;
     [[nodiscard]] static core::Status
     mark_chunk_rebuild_regions(dirty::DirtyRegionTracker& dirty_regions, ChunkCoord coord,

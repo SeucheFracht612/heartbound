@@ -4,6 +4,7 @@
 #include "engine/core/result.hpp"
 #include "engine/modding/prototype_registry.hpp"
 #include "engine/save/save_metadata.hpp"
+#include "engine/simulation/world_time.hpp"
 #include "engine/world/operations/world_operation.hpp"
 
 #include <cstdint>
@@ -16,7 +17,8 @@
 
 namespace heartstead::world {
 class WorldState;
-}
+class VoxelPalette;
+} // namespace heartstead::world
 
 namespace heartstead::net {
 
@@ -39,6 +41,8 @@ struct CommandExecutionContext {
     save::SaveIdAllocator* save_ids = nullptr;
     const modding::PrototypeRegistry* prototypes = nullptr;
     heartstead::world::WorldState* world_state = nullptr;
+    const heartstead::world::VoxelPalette* voxel_palette = nullptr;
+    const simulation::WorldTimeConfig* world_time_config = nullptr;
 };
 
 struct CommandOperationTrace {

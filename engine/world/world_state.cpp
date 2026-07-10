@@ -53,6 +53,20 @@ core::Status WorkpieceRecord::validate() const {
         return core::Status::failure("world_state.invalid_workpiece_shape",
                                      "workpiece grid shape must be non-zero");
     }
+    if (revision == 0) {
+        return core::Status::failure("world_state.invalid_workpiece_revision",
+                                     "workpiece revision must be non-zero");
+    }
+    if (server_state.has_value()) {
+        if (!material_prototype_id.is_valid()) {
+            return core::Status::failure(
+                "world_state.invalid_workpiece_material",
+                "server-owned workpiece state requires a material prototype");
+        }
+        auto status = server_state->validate(shape);
+        if (!status)
+            return status;
+    }
     return core::Status::ok();
 }
 
@@ -385,6 +399,41 @@ std::size_t WorkpieceDatabase::count() const noexcept {
     return records_.size();
 }
 
+core::Status PhysicalResourceDatabase::insert(entities::PhysicalResourceRecord record) {
+    auto status = record.validate();
+    if (!status)
+        return status;
+    const auto [_, inserted] = records_.emplace(record.resource_id.value(), std::move(record));
+    if (!inserted) {
+        return core::Status::failure("world_state.duplicate_physical_resource",
+                                     "physical resource save id already exists");
+    }
+    return core::Status::ok();
+}
+
+entities::PhysicalResourceRecord* PhysicalResourceDatabase::find(core::SaveId id) noexcept {
+    const auto found = records_.find(id.value());
+    return found == records_.end() ? nullptr : &found->second;
+}
+
+const entities::PhysicalResourceRecord*
+PhysicalResourceDatabase::find(core::SaveId id) const noexcept {
+    const auto found = records_.find(id.value());
+    return found == records_.end() ? nullptr : &found->second;
+}
+
+std::vector<const entities::PhysicalResourceRecord*> PhysicalResourceDatabase::records() const {
+    std::vector<const entities::PhysicalResourceRecord*> result;
+    result.reserve(records_.size());
+    for (const auto& [_, record] : records_)
+        result.push_back(&record);
+    return result;
+}
+
+std::size_t PhysicalResourceDatabase::count() const noexcept {
+    return records_.size();
+}
+
 core::Status AssemblyDatabase::insert(assemblies::AssemblyRecord record) {
     auto status = record.validate_record();
     if (!status) {
@@ -467,14 +516,14 @@ std::vector<const processes::ProcessInstance*> ProcessDatabase::records() const 
     return result;
 }
 
-core::Result<std::size_t> ProcessDatabase::advance_all(std::int64_t now_ms,
+core::Result<std::size_t> ProcessDatabase::advance_all(simulation::WorldTick world_time,
                                                        processes::ProcessModifiers modifiers) {
-    return advance_all(now_ms, [modifiers](const processes::ProcessInstance&) {
+    return advance_all(world_time, [modifiers](const processes::ProcessInstance&) {
         return core::Result<processes::ProcessModifiers>::success(modifiers);
     });
 }
 
-core::Result<std::size_t> ProcessDatabase::advance_all(std::int64_t now_ms,
+core::Result<std::size_t> ProcessDatabase::advance_all(simulation::WorldTick world_time,
                                                        const ProcessModifierResolver& resolver) {
     // Resolve and advance against a staged copy. A bad modifier resolution or a time-reversal in
     // any one process must not leave earlier records advanced by a command that reports failure.
@@ -488,15 +537,16 @@ core::Result<std::size_t> ProcessDatabase::advance_all(std::int64_t now_ms,
         }
 
         const auto previous_state = process.state;
-        const auto previous_update_time = process.last_update_time_ms;
-        const auto previous_work = process.accumulated_effective_work_ms;
-        auto status = processes::ProcessRuntime::advance(process, now_ms, modifiers.value());
+        const auto previous_update_time = process.last_eval;
+        const auto previous_work = process.accrued_work_ticks;
+        auto status = processes::ProcessRuntime::evaluate(
+            process, world_time, modifiers.value(),
+            processes::ProcessEvaluationTrigger::save_load_validation);
         if (!status) {
             return core::Result<std::size_t>::failure(status.error().code, status.error().message);
         }
-        if (process.state != previous_state ||
-            process.last_update_time_ms != previous_update_time ||
-            process.accumulated_effective_work_ms != previous_work) {
+        if (process.state != previous_state || process.last_eval != previous_update_time ||
+            process.accrued_work_ticks != previous_work) {
             ++advanced;
         }
     }
@@ -508,6 +558,34 @@ core::Result<std::size_t> ProcessDatabase::advance_all(std::int64_t now_ms,
         records_.at(record_key) = std::move(process);
     }
     return core::Result<std::size_t>::success(advanced);
+}
+
+core::Result<std::size_t>
+ProcessDatabase::evaluate_owner(core::SaveId owner_id, simulation::WorldTick world_time,
+                                processes::ProcessEvaluationTrigger trigger,
+                                const ProcessModifierResolver& resolver) {
+    auto staged_records = records_;
+    std::size_t evaluated = 0;
+    for (auto& [_, process] : staged_records) {
+        if (process.owner_id != owner_id) {
+            continue;
+        }
+        auto modifiers = resolver(process);
+        if (!modifiers) {
+            return core::Result<std::size_t>::failure(modifiers.error().code,
+                                                      modifiers.error().message);
+        }
+        auto status =
+            processes::ProcessRuntime::evaluate(process, world_time, modifiers.value(), trigger);
+        if (!status) {
+            return core::Result<std::size_t>::failure(status.error().code, status.error().message);
+        }
+        ++evaluated;
+    }
+    for (auto& [record_key, process] : staged_records) {
+        records_.at(record_key) = std::move(process);
+    }
+    return core::Result<std::size_t>::success(evaluated);
 }
 
 std::size_t ProcessDatabase::count() const noexcept {
@@ -603,13 +681,49 @@ std::size_t ModStateDatabase::count() const noexcept {
     return records_.size();
 }
 
+core::Status FireDatabase::insert(simulation::FireInstance fire) {
+    auto status = fire.validate_record();
+    if (!status)
+        return status;
+    if (!records_.emplace(fire.fire_id.value(), std::move(fire)).second) {
+        return core::Status::failure("world_state.duplicate_fire", "fire id is already present");
+    }
+    return core::Status::ok();
+}
+
+simulation::FireInstance* FireDatabase::find(core::SaveId id) noexcept {
+    auto found = records_.find(id.value());
+    return found == records_.end() ? nullptr : &found->second;
+}
+
+const simulation::FireInstance* FireDatabase::find(core::SaveId id) const noexcept {
+    auto found = records_.find(id.value());
+    return found == records_.end() ? nullptr : &found->second;
+}
+
+std::vector<const simulation::FireInstance*> FireDatabase::records() const {
+    std::vector<const simulation::FireInstance*> result;
+    result.reserve(records_.size());
+    for (const auto& [_, fire] : records_)
+        result.push_back(&fire);
+    return result;
+}
+
+std::size_t FireDatabase::count() const noexcept {
+    return records_.size();
+}
+
 WorldState::WorldState(WorldStateDesc desc)
-    : metadata_(std::move(desc.metadata)), save_ids_(desc.next_save_id),
-      runtime_handles_(desc.next_runtime_handle), entity_net_ids_(desc.next_entity_net_id),
-      process_ids_(desc.next_process_id) {}
+    : metadata_(std::move(desc.metadata)), voxel_palette_manifest_(std::move(desc.voxel_palette)),
+      save_ids_(desc.next_save_id), runtime_handles_(desc.next_runtime_handle),
+      entity_net_ids_(desc.next_entity_net_id), process_ids_(desc.next_process_id) {}
 
 const save::SaveMetadata& WorldState::metadata() const noexcept {
     return metadata_;
+}
+
+const VoxelPaletteManifest& WorldState::voxel_palette_manifest() const noexcept {
+    return voxel_palette_manifest_;
 }
 
 simulation::WorldTick WorldState::world_time() const noexcept {
@@ -732,6 +846,14 @@ const WorkpieceDatabase& WorldState::workpieces() const noexcept {
     return workpieces_;
 }
 
+PhysicalResourceDatabase& WorldState::physical_resources() noexcept {
+    return physical_resources_;
+}
+
+const PhysicalResourceDatabase& WorldState::physical_resources() const noexcept {
+    return physical_resources_;
+}
+
 AssemblyDatabase& WorldState::assemblies() noexcept {
     return assemblies_;
 }
@@ -772,21 +894,51 @@ const ModStateDatabase& WorldState::mod_states() const noexcept {
     return mod_states_;
 }
 
+std::vector<MissingPrototypeObject>& WorldState::missing_prototypes() noexcept {
+    return missing_prototypes_;
+}
+
+const std::vector<MissingPrototypeObject>& WorldState::missing_prototypes() const noexcept {
+    return missing_prototypes_;
+}
+
+FireDatabase& WorldState::fires() noexcept {
+    return fires_;
+}
+const FireDatabase& WorldState::fires() const noexcept {
+    return fires_;
+}
+
 bool WorldState::contains_saved_object(core::SaveId id) const noexcept {
     if (!id.is_valid()) {
         return false;
     }
     return build_objects_.contains(id) || cargo_.find(id) != nullptr ||
-           entities_.find_by_save_id(id) != nullptr || assemblies_.find(id) != nullptr;
+           entities_.find_by_save_id(id) != nullptr || assemblies_.find(id) != nullptr ||
+           workpieces_.find(core::WorkpieceId::from_value(id.value())) != nullptr ||
+           physical_resources_.find(id) != nullptr;
 }
 
 WorldStateStats WorldState::stats() const noexcept {
     return WorldStateStats{
-        chunks_.chunk_count(),        regions_.region_count(), regions_.connection_count(),
-        dirty_regions_.size(),        build_objects_.count(),  entities_.count(),
-        entities_.persistent_count(), cargo_.count(),          inventories_.count(),
-        workpieces_.count(),          assemblies_.count(),     processes_.count(),
-        rooms_.room_count(),          networks_.count(),       mod_states_.count(),
+        chunks_.chunk_count(),
+        regions_.region_count(),
+        regions_.connection_count(),
+        dirty_regions_.size(),
+        build_objects_.count(),
+        entities_.count(),
+        entities_.persistent_count(),
+        cargo_.count(),
+        inventories_.count(),
+        workpieces_.count(),
+        physical_resources_.count(),
+        assemblies_.count(),
+        processes_.count(),
+        rooms_.room_count(),
+        networks_.count(),
+        mod_states_.count(),
+        missing_prototypes_.size(),
+        fires_.count(),
     };
 }
 

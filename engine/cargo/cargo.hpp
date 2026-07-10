@@ -3,6 +3,7 @@
 #include "engine/core/ids.hpp"
 #include "engine/core/result.hpp"
 #include "engine/math/vector.hpp"
+#include "engine/world/coords/world_position.hpp"
 
 #include <cstdint>
 #include <initializer_list>
@@ -43,7 +44,7 @@ class CargoTransportModes {
 struct CargoRecord {
     core::SaveId cargo_id;
     core::PrototypeId prototype_id;
-    Vec3 position;
+    world::WorldPosition position;
     std::uint64_t mass_grams = 0;
     std::uint64_t volume_milliliters = 0;
     std::int32_t stability_per_mille = 1000;
@@ -65,7 +66,7 @@ struct CargoDefinition {
     [[nodiscard]] core::Status validate() const;
     [[nodiscard]] bool is_hazardous() const noexcept;
     [[nodiscard]] core::Result<CargoRecord> create_record(core::SaveId cargo_id,
-                                                          Vec3 position = {}) const;
+                                                          world::WorldPosition position = {}) const;
 };
 
 [[nodiscard]] core::Result<CargoTransportMode>

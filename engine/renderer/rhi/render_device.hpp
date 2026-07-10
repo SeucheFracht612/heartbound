@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace heartstead::renderer::rhi {
@@ -193,6 +194,19 @@ struct RenderComputePipelineStats {
     bool gpu_backed = false;
 };
 
+enum class RenderVertexAttributeFormat : std::uint8_t {
+    float2,
+    float3,
+    uint16,
+    uint8,
+};
+
+struct RenderVertexAttributeDesc {
+    std::uint32_t location = 0;
+    std::uint32_t byte_offset = 0;
+    RenderVertexAttributeFormat format = RenderVertexAttributeFormat::float3;
+};
+
 struct RenderGraphicsPipelineDesc {
     RenderResourceHandle vertex_shader;
     RenderResourceHandle fragment_shader;
@@ -200,6 +214,16 @@ struct RenderGraphicsPipelineDesc {
     std::string vertex_entry_point = "main";
     std::string fragment_entry_point = "main";
     std::string debug_name;
+    std::uint32_t vertex_stride = 0;
+    std::vector<RenderVertexAttributeDesc> vertex_attributes;
+
+    RenderGraphicsPipelineDesc() = default;
+    RenderGraphicsPipelineDesc(RenderResourceHandle vertex, RenderResourceHandle fragment,
+                               core::PrototypeId material, std::string vertex_entry,
+                               std::string fragment_entry, std::string name)
+        : vertex_shader(vertex), fragment_shader(fragment), material_id(std::move(material)),
+          vertex_entry_point(std::move(vertex_entry)),
+          fragment_entry_point(std::move(fragment_entry)), debug_name(std::move(name)) {}
 };
 
 struct RenderGraphicsPipelineStats {
@@ -237,6 +261,20 @@ struct RenderMeshBinding {
     std::uint32_t index_count = 0;
     std::uint32_t instance_count = 1;
     std::string debug_name;
+    std::int64_t world_anchor_x = 0;
+    std::int64_t world_anchor_y = 0;
+    std::int64_t world_anchor_z = 0;
+    float camera_relative_x = 0.0F;
+    float camera_relative_y = 0.0F;
+    float camera_relative_z = 0.0F;
+
+    RenderMeshBinding() = default;
+    RenderMeshBinding(RenderResourceHandle vertices, RenderResourceHandle indices,
+                      core::PrototypeId material, std::uint32_t vertices_count,
+                      std::uint32_t indices_count, std::uint32_t instances, std::string name)
+        : vertex_buffer(vertices), index_buffer(indices), material_id(std::move(material)),
+          vertex_count(vertices_count), index_count(indices_count), instance_count(instances),
+          debug_name(std::move(name)) {}
 };
 
 struct RenderDrawStats {

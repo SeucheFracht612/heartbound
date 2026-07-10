@@ -2,7 +2,11 @@
 
 #include "engine/core/ids.hpp"
 #include "engine/renderer/materials/material_prototype_loader.hpp"
+#include "engine/simulation/fire_prototype.hpp"
+#include "engine/workpieces/pattern_library.hpp"
 #include "engine/workpieces/workpiece_grid.hpp"
+#include "engine/world/blocks/block_model.hpp"
+#include "engine/world/voxels/voxel_palette.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -268,10 +272,23 @@ void validate_entity(PrototypeSemanticValidationResult& result, const GenericPro
     (void)validate_bool_field(result, prototype, "persistent", false);
 }
 
-void validate_voxel(PrototypeSemanticValidationResult& result, const GenericPrototype& prototype) {
+void validate_voxel(PrototypeSemanticValidationResult& result, const GenericPrototype& prototype,
+                    const PrototypeRegistry& registry) {
     (void)validate_token_list(result, prototype, "mining_tool", true);
     (void)validate_token_list(result, prototype, "terrain_material", true);
     (void)validate_token_list(result, prototype, "tags", false);
+    auto definition = world::voxel_definition_from_prototype(prototype, 1);
+    if (!definition) {
+        add_error(result, prototype, definition.error().code, definition.error().message);
+        return;
+    }
+    if (definition.value().block_model_id.has_value()) {
+        auto status =
+            registry.require_kind(*definition.value().block_model_id, PrototypeKinds::block_model);
+        if (!status) {
+            add_error(result, prototype, status.error().code, status.error().message);
+        }
+    }
 }
 
 void validate_build_piece(PrototypeSemanticValidationResult& result,
@@ -348,9 +365,20 @@ void validate_workpiece(PrototypeSemanticValidationResult& result,
     }
 }
 
+void validate_pattern(PrototypeSemanticValidationResult& result,
+                      const GenericPrototype& prototype) {
+    auto pattern = workpieces::pattern_definition_from_prototype(prototype);
+    if (!pattern)
+        add_error(result, prototype, pattern.error().code, pattern.error().message);
+}
+
 void validate_process(PrototypeSemanticValidationResult& result,
                       const GenericPrototype& prototype) {
-    (void)parse_positive_u64(result, prototype, "default_required_work_ms");
+    if (field(prototype, "default_required_work_ticks") != nullptr) {
+        (void)parse_positive_u64(result, prototype, "default_required_work_ticks");
+    } else {
+        (void)parse_positive_u64(result, prototype, "default_required_work_ms");
+    }
     (void)validate_bool_field(result, prototype, "requires_room", false);
     (void)validate_bool_field(result, prototype, "requires_power", false);
     (void)validate_optional_u64_range(
@@ -358,6 +386,13 @@ void validate_process(PrototypeSemanticValidationResult& result,
         static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()));
     (void)validate_optional_u64_range(result, prototype, "base_quality_rate_per_mille", 0, 10000);
     (void)validate_token_list(result, prototype, "tags", false);
+}
+
+void validate_fire(PrototypeSemanticValidationResult& result, const GenericPrototype& prototype) {
+    auto definition = simulation::fire_definition_from_prototype(prototype);
+    if (!definition) {
+        add_error(result, prototype, definition.error().code, definition.error().message);
+    }
 }
 
 void validate_room_descriptor(PrototypeSemanticValidationResult& result,
@@ -372,6 +407,14 @@ void validate_material(PrototypeSemanticValidationResult& result,
     auto material = renderer::materials::material_definition_from_prototype(prototype);
     if (!material) {
         add_error(result, prototype, material.error().code, material.error().message);
+    }
+}
+
+void validate_block_model(PrototypeSemanticValidationResult& result,
+                          const GenericPrototype& prototype) {
+    auto definition = world::block_model_definition_from_prototype(prototype);
+    if (!definition) {
+        add_error(result, prototype, definition.error().code, definition.error().message);
     }
 }
 
@@ -406,15 +449,21 @@ PrototypeSemanticValidator::validate(const std::vector<GenericPrototype>& protot
         } else if (prototype.kind == PrototypeKinds::entity) {
             validate_entity(result, prototype);
         } else if (prototype.kind == PrototypeKinds::voxel) {
-            validate_voxel(result, prototype);
+            validate_voxel(result, prototype, registry);
+        } else if (prototype.kind == PrototypeKinds::block_model) {
+            validate_block_model(result, prototype);
         } else if (prototype.kind == PrototypeKinds::build_piece) {
             validate_build_piece(result, prototype);
         } else if (prototype.kind == PrototypeKinds::assembly) {
             validate_assembly(result, prototype, registry);
         } else if (prototype.kind == PrototypeKinds::workpiece) {
             validate_workpiece(result, prototype, registry);
+        } else if (prototype.kind == PrototypeKinds::pattern) {
+            validate_pattern(result, prototype);
         } else if (prototype.kind == PrototypeKinds::process) {
             validate_process(result, prototype);
+        } else if (prototype.kind == PrototypeKinds::fire) {
+            validate_fire(result, prototype);
         } else if (prototype.kind == PrototypeKinds::room_descriptor) {
             validate_room_descriptor(result, prototype);
         } else if (prototype.kind == PrototypeKinds::material) {

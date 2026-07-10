@@ -60,6 +60,8 @@ class MapDiscovery {
     [[nodiscard]] std::vector<const MapDiscoveryRegion*> regions() const;
     [[nodiscard]] std::size_t region_count() const noexcept;
     [[nodiscard]] std::size_t discovered_count() const noexcept;
+    [[nodiscard]] std::size_t clear_layer(std::string_view layer_id);
+    void clear() noexcept;
 
   private:
     struct Key {

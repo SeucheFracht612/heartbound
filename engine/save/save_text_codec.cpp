@@ -18,7 +18,8 @@ namespace heartstead::save {
 namespace {
 
 constexpr std::string_view magic = "heartstead.save_text.v1";
-constexpr std::string_view snapshot_magic = "heartstead.save_snapshot_text.v1";
+constexpr std::string_view snapshot_magic_v1 = "heartstead.save_snapshot_text.v1";
+constexpr std::string_view snapshot_magic_v2 = "heartstead.save_snapshot_text.v2";
 
 [[nodiscard]] bool is_hex_digit(char value) noexcept {
     return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
@@ -380,10 +381,63 @@ parse_construction_state(std::string_view value) {
         "save_text.invalid_process_state", "unknown process state: " + std::string(value));
 }
 
+[[nodiscard]] std::string_view
+process_interruption_policy_name(processes::ProcessInterruptionPolicy policy) noexcept {
+    switch (policy) {
+    case processes::ProcessInterruptionPolicy::pause:
+        return "pause";
+    case processes::ProcessInterruptionPolicy::reset:
+        return "reset";
+    case processes::ProcessInterruptionPolicy::fail:
+        return "fail";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::optional<processes::ProcessInterruptionPolicy>
+parse_process_interruption_policy(std::string_view value) noexcept {
+    if (value == "pause")
+        return processes::ProcessInterruptionPolicy::pause;
+    if (value == "reset")
+        return processes::ProcessInterruptionPolicy::reset;
+    if (value == "fail")
+        return processes::ProcessInterruptionPolicy::fail;
+    return std::nullopt;
+}
+
+[[nodiscard]] std::string_view fire_state_name(simulation::FireState state) noexcept {
+    switch (state) {
+    case simulation::FireState::unlit:
+        return "unlit";
+    case simulation::FireState::lit:
+        return "lit";
+    case simulation::FireState::embers:
+        return "embers";
+    case simulation::FireState::out:
+        return "out";
+    }
+    return "unknown";
+}
+
+[[nodiscard]] std::optional<simulation::FireState>
+parse_fire_state(std::string_view value) noexcept {
+    if (value == "unlit")
+        return simulation::FireState::unlit;
+    if (value == "lit")
+        return simulation::FireState::lit;
+    if (value == "embers")
+        return simulation::FireState::embers;
+    if (value == "out")
+        return simulation::FireState::out;
+    return std::nullopt;
+}
+
 [[nodiscard]] std::string encode_transform(const build::Transform& transform) {
     std::ostringstream output;
-    output << encode_double(transform.position.x) << '~' << encode_double(transform.position.y)
-           << '~' << encode_double(transform.position.z) << '~'
+    output << transform.position.anchor.x << '~' << transform.position.anchor.y << '~'
+           << transform.position.anchor.z << '~' << encode_double(transform.position.local_offset.x)
+           << '~' << encode_double(transform.position.local_offset.y) << '~'
+           << encode_double(transform.position.local_offset.z) << '~'
            << encode_double(transform.rotation_degrees.x) << '~'
            << encode_double(transform.rotation_degrees.y) << '~'
            << encode_double(transform.rotation_degrees.z) << '~' << encode_double(transform.scale.x)
@@ -391,54 +445,81 @@ parse_construction_state(std::string_view value) {
     return output.str();
 }
 
-[[nodiscard]] std::string encode_vec3(math::Vec3d value) {
+[[nodiscard]] std::string encode_world_position(const world::WorldPosition& value) {
     std::ostringstream output;
-    output << encode_double(value.x) << '~' << encode_double(value.y) << '~'
-           << encode_double(value.z);
+    output << value.anchor.x << '~' << value.anchor.y << '~' << value.anchor.z << '~'
+           << encode_double(value.local_offset.x) << '~' << encode_double(value.local_offset.y)
+           << '~' << encode_double(value.local_offset.z);
     return output.str();
 }
 
-[[nodiscard]] core::Result<math::Vec3d> parse_vec3(std::string_view value, std::string_view label) {
+[[nodiscard]] core::Result<world::WorldPosition> parse_world_position(std::string_view value,
+                                                                      std::string_view label) {
     const auto parts = split(value, '~');
-    if (parts.size() != 3) {
-        return core::Result<math::Vec3d>::failure(
-            "save_text.invalid_vec3",
-            std::string(label) + " must contain 3 tilde-separated numeric fields");
+    if (parts.size() != 3 && parts.size() != 6) {
+        return core::Result<world::WorldPosition>::failure(
+            "save_text.invalid_world_position",
+            std::string(label) + " must contain 3 legacy or 6 anchored numeric fields");
+    }
+    if (parts.size() == 3) {
+        auto x = parse_double(parts[0], "x");
+        auto y = parse_double(parts[1], "y");
+        auto z = parse_double(parts[2], "z");
+        if (!x || !y || !z) {
+            return core::Result<world::WorldPosition>::failure(
+                "save_text.invalid_world_position",
+                std::string(label) + " contains invalid legacy numbers");
+        }
+        return world::WorldPosition::from_legacy_global({x.value(), y.value(), z.value()});
     }
 
-    auto x = parse_double(parts[0], "x");
-    auto y = parse_double(parts[1], "y");
-    auto z = parse_double(parts[2], "z");
-    if (!x || !y || !z) {
-        return core::Result<math::Vec3d>::failure("save_text.invalid_vec3",
-                                                  std::string(label) + " contains invalid numbers");
+    auto ax = parse_i64(parts[0], "anchor_x");
+    auto ay = parse_i64(parts[1], "anchor_y");
+    auto az = parse_i64(parts[2], "anchor_z");
+    auto lx = parse_double(parts[3], "local_x");
+    auto ly = parse_double(parts[4], "local_y");
+    auto lz = parse_double(parts[5], "local_z");
+    if (!ax || !ay || !az || !lx || !ly || !lz) {
+        return core::Result<world::WorldPosition>::failure(
+            "save_text.invalid_world_position",
+            std::string(label) + " contains invalid anchored numbers");
     }
-    return core::Result<math::Vec3d>::success({x.value(), y.value(), z.value()});
+    return world::WorldPosition::from_anchor({ax.value(), ay.value(), az.value()},
+                                             {lx.value(), ly.value(), lz.value()});
 }
 
 [[nodiscard]] core::Result<build::Transform> parse_transform(std::string_view value) {
     const auto parts = split(value, '~');
-    if (parts.size() != 9) {
+    if (parts.size() != 9 && parts.size() != 12) {
         return core::Result<build::Transform>::failure(
             "save_text.invalid_transform",
-            "build transform must contain 9 tilde-separated numeric fields");
+            "transform must contain 9 legacy or 12 anchored numeric fields");
     }
 
     build::Transform transform;
-    auto px = parse_double(parts[0], "position_x");
-    auto py = parse_double(parts[1], "position_y");
-    auto pz = parse_double(parts[2], "position_z");
-    auto rx = parse_double(parts[3], "rotation_x");
-    auto ry = parse_double(parts[4], "rotation_y");
-    auto rz = parse_double(parts[5], "rotation_z");
-    auto sx = parse_double(parts[6], "scale_x");
-    auto sy = parse_double(parts[7], "scale_y");
-    auto sz = parse_double(parts[8], "scale_z");
-    if (!px || !py || !pz || !rx || !ry || !rz || !sx || !sy || !sz) {
+    const auto spatial_field_count = parts.size() == 12 ? std::size_t{6} : std::size_t{3};
+    const auto position_text = [&parts, spatial_field_count] {
+        std::ostringstream encoded;
+        for (std::size_t index = 0; index < spatial_field_count; ++index) {
+            if (index > 0) {
+                encoded << '~';
+            }
+            encoded << parts[index];
+        }
+        return encoded.str();
+    }();
+    auto position = parse_world_position(position_text, "transform_position");
+    auto rx = parse_double(parts[spatial_field_count], "rotation_x");
+    auto ry = parse_double(parts[spatial_field_count + 1], "rotation_y");
+    auto rz = parse_double(parts[spatial_field_count + 2], "rotation_z");
+    auto sx = parse_double(parts[spatial_field_count + 3], "scale_x");
+    auto sy = parse_double(parts[spatial_field_count + 4], "scale_y");
+    auto sz = parse_double(parts[spatial_field_count + 5], "scale_z");
+    if (!position || !rx || !ry || !rz || !sx || !sy || !sz) {
         return core::Result<build::Transform>::failure("save_text.invalid_transform",
                                                        "build transform contains invalid numbers");
     }
-    transform.position = {px.value(), py.value(), pz.value()};
+    transform.position = position.value();
     transform.rotation_degrees = {rx.value(), ry.value(), rz.value()};
     transform.scale = {sx.value(), sy.value(), sz.value()};
     return core::Result<build::Transform>::success(transform);
@@ -688,6 +769,32 @@ parse_assembly_ports(std::string_view value) {
     return core::Result<std::vector<assemblies::AssemblyPort>>::success(std::move(ports));
 }
 
+[[nodiscard]] std::string encode_process_ids(const std::vector<core::ProcessId>& values) {
+    std::ostringstream output;
+    for (std::size_t index = 0; index < values.size(); ++index) {
+        if (index > 0)
+            output << ',';
+        output << values[index].value();
+    }
+    return output.str();
+}
+
+[[nodiscard]] core::Result<std::vector<core::ProcessId>> parse_process_ids(std::string_view value) {
+    std::vector<core::ProcessId> result;
+    if (value.empty())
+        return core::Result<std::vector<core::ProcessId>>::success(std::move(result));
+    for (const auto entry : split(value, ',')) {
+        auto parsed = parse_u64(entry, "assembly_process_slot");
+        if (!parsed || parsed.value() == 0) {
+            return core::Result<std::vector<core::ProcessId>>::failure(
+                "save_text.invalid_assembly_process_slot",
+                "assembly process slot contains an invalid process id");
+        }
+        result.push_back(core::ProcessId::from_value(parsed.value()));
+    }
+    return core::Result<std::vector<core::ProcessId>>::success(std::move(result));
+}
+
 } // namespace
 
 std::string SaveTextCodec::encode_metadata(const SaveMetadata& metadata) {
@@ -824,7 +931,7 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
 
 std::string SaveTextCodec::encode_snapshot(const SaveSnapshot& snapshot) {
     std::ostringstream output;
-    output << snapshot_magic << '\n';
+    output << snapshot_magic_v2 << '\n';
     output << "schema_version=" << snapshot.metadata.schema_version << '\n';
     output << "game_version=" << percent_escape(snapshot.metadata.game_version) << '\n';
     output << "world_seed=" << snapshot.metadata.world_seed << '\n';
@@ -836,6 +943,10 @@ std::string SaveTextCodec::encode_snapshot(const SaveSnapshot& snapshot) {
     }
     for (const auto& migration : snapshot.metadata.migration_history) {
         output << "migration=" << percent_escape(migration) << '\n';
+    }
+    for (const auto& entry : snapshot.voxel_palette.entries) {
+        output << "voxel_palette=" << entry.type << '|'
+               << percent_escape(entry.prototype_id.value()) << '\n';
     }
 
     for (const auto& chunk : snapshot.chunk_edits) {
@@ -866,38 +977,64 @@ std::string SaveTextCodec::encode_snapshot(const SaveSnapshot& snapshot) {
     for (const auto& cargo_record : snapshot.cargo_records) {
         output << "cargo=" << cargo_record.cargo_id.value() << '|'
                << percent_escape(cargo_record.prototype_id.value()) << '|'
-               << encode_vec3(cargo_record.position) << '|' << cargo_record.mass_grams << '|'
-               << cargo_record.volume_milliliters << '|' << cargo_record.stability_per_mille << '|'
-               << cargo_record.allowed_transport_modes.bits() << '|'
+               << encode_world_position(cargo_record.position) << '|' << cargo_record.mass_grams
+               << '|' << cargo_record.volume_milliliters << '|' << cargo_record.stability_per_mille
+               << '|' << cargo_record.allowed_transport_modes.bits() << '|'
                << encode_string_list(cargo_record.hazard_tags) << '\n';
     }
     for (const auto& workpiece : snapshot.workpieces) {
         output << "workpiece=" << workpiece.workpiece_id.value() << '|'
                << percent_escape(workpiece.prototype_id.value()) << '|' << workpiece.shape.width
                << '|' << workpiece.shape.height << '|' << workpiece.shape.depth << '|'
-               << percent_escape(workpiece.encoded_cells) << '\n';
+               << percent_escape(workpiece.encoded_cells) << '|'
+               << percent_escape(workpiece.material_prototype_id.value()) << '|'
+               << percent_escape(workpiece.encoded_server_state) << '|'
+               << workpiece.owner_session.value() << '|' << workpiece.revision << '|'
+               << (workpiece.committed ? '1' : '0') << '\n';
     }
     for (const auto& assembly : snapshot.assemblies) {
         output << "assembly=" << assembly.assembly_id.value() << '|'
                << assembly.root_build_piece_id.value() << '|'
                << percent_escape(assembly.prototype_id.value()) << '|'
                << (assembly.operating ? '1' : '0') << '|' << encode_assembly_parts(assembly.parts)
-               << '|' << encode_assembly_ports(assembly.ports) << '\n';
+               << '|' << encode_assembly_ports(assembly.ports) << '|'
+               << assemblies::assembly_state_name(
+                      assembly.operating ? assemblies::AssemblyState::operating : assembly.state)
+               << '|' << assembly.current_stage << '|' << assembly.revision << '|'
+               << encode_string_list(assembly.capabilities) << '|'
+               << encode_process_ids(assembly.process_slots) << '|'
+               << percent_escape(assembly.failure_reason) << '|'
+               << percent_escape(assembly.custom_state) << '\n';
     }
     for (const auto& process : snapshot.processes) {
         output << "process=" << process.process_id.value() << '|' << process.owner_id.value() << '|'
-               << percent_escape(process.prototype_id.value()) << '|' << process.start_time_ms
-               << '|' << process.last_update_time_ms << '|' << process.required_effective_work_ms
-               << '|' << process.accumulated_effective_work_ms << '|'
-               << process_state_name(process.state) << '|'
+               << percent_escape(process.prototype_id.value()) << '|' << process.started_at << '|'
+               << process.last_eval << '|' << process.required_work_ticks << '|'
+               << process.accrued_work_ticks << '|' << process_state_name(process.state) << '|'
                << percent_escape(process.interruption_reason) << '|'
                << encode_process_slots(process.input_slots) << '|'
-               << encode_process_slots(process.output_slots) << '\n';
+               << encode_process_slots(process.output_slots) << '|'
+               << (process.output_claimed ? '1' : '0') << '|'
+               << percent_escape(process.condition_function_id) << '|'
+               << process_interruption_policy_name(process.interruption_policy) << '\n';
+    }
+    for (const auto& fire : snapshot.fires) {
+        output << "fire=" << fire.fire_id.value() << '|'
+               << percent_escape(fire.prototype_id.value()) << '|' << fire_state_name(fire.state)
+               << '|' << fire.fuel_buffer_ticks << '|' << fire.last_eval << '|' << fire.embers_until
+               << '|' << (fire.weather_exposed ? '1' : '0') << '\n';
     }
     for (const auto& mod_state : snapshot.mod_states) {
         output << "mod_state=" << percent_escape(mod_state.mod_id) << '|'
                << percent_escape(mod_state.state_key) << '|'
                << percent_escape(mod_state.encoded_state) << '\n';
+    }
+    for (const auto& missing : snapshot.missing_prototypes) {
+        output << "missing_prototype=" << world::missing_prototype_kind_name(missing.kind) << '|'
+               << missing.stable_id << '|' << percent_escape(missing.original_prototype_id.value())
+               << '|' << encode_world_position(missing.position) << '|' << missing.owner_id.value()
+               << '|' << percent_escape(missing.warning) << '|'
+               << percent_escape(missing.saved_blob) << '\n';
     }
 
     output << "end\n";
@@ -924,7 +1061,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
         }
 
         if (!saw_magic) {
-            if (line != snapshot_magic) {
+            if (line != snapshot_magic_v1 && line != snapshot_magic_v2) {
                 return core::Result<SaveSnapshot>::failure(
                     "save_text.invalid_snapshot_magic",
                     "save snapshot does not start with the expected magic");
@@ -989,6 +1126,27 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                                                                parsed.error().message);
                 }
                 snapshot.metadata.migration_history.push_back(std::move(parsed).value());
+            } else if (key == "voxel_palette") {
+                const auto parts = split(value, '|');
+                if (parts.size() != 2) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.invalid_voxel_palette",
+                        "voxel palette entry must contain type and prototype id");
+                }
+                auto type = parse_u16(parts[0], "voxel_palette_type");
+                auto encoded_id = percent_unescape(parts[1]);
+                if (!type || !encoded_id) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.invalid_voxel_palette",
+                        "voxel palette entry contains invalid fields");
+                }
+                auto prototype_id = core::PrototypeId::parse(encoded_id.value());
+                if (!prototype_id) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.invalid_voxel_palette",
+                        "voxel palette entry prototype id is invalid");
+                }
+                snapshot.voxel_palette.entries.push_back({type.value(), prototype_id.value()});
             } else if (key == "chunk") {
                 const auto parts = split(value, '|');
                 if (parts.size() != 4) {
@@ -1085,10 +1243,10 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 }
                 auto id = parse_u64(parts[0], "cargo_id");
                 auto prototype = parse_prototype_id(parts[1]);
-                math::Vec3d position;
+                world::WorldPosition position;
                 std::size_t mass_index = 2;
                 if (parts.size() == 8) {
-                    auto parsed_position = parse_vec3(parts[2], "cargo_position");
+                    auto parsed_position = parse_world_position(parts[2], "cargo_position");
                     if (!parsed_position) {
                         return core::Result<SaveSnapshot>::failure(parsed_position.error().code,
                                                                    parsed_position.error().message);
@@ -1118,9 +1276,10 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.cargo_records.push_back(std::move(record));
             } else if (key == "workpiece") {
                 const auto parts = split(value, '|');
-                if (parts.size() != 6) {
+                if (parts.size() != 6 && parts.size() != 11) {
                     return core::Result<SaveSnapshot>::failure(
-                        "save_text.invalid_workpiece", "workpiece record must contain 6 fields");
+                        "save_text.invalid_workpiece",
+                        "workpiece record must contain 6 legacy or 11 rich fields");
                 }
                 auto id = parse_u64(parts[0], "workpiece_id");
                 auto prototype = parse_prototype_id(parts[1]);
@@ -1128,6 +1287,37 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 auto y = parse_u16(parts[3], "workpiece_y");
                 auto z = parse_u16(parts[4], "workpiece_z");
                 auto cells = percent_unescape(parts[5]);
+                core::PrototypeId material;
+                std::string server_state;
+                core::NetId owner;
+                std::uint64_t revision = 1;
+                bool committed = false;
+                if (parts.size() == 11) {
+                    auto encoded_material = percent_unescape(parts[6]);
+                    auto encoded_server_state = percent_unescape(parts[7]);
+                    auto parsed_owner = parse_u64(parts[8], "workpiece_owner");
+                    auto parsed_revision = parse_u64(parts[9], "workpiece_revision");
+                    auto parsed_committed = parse_bool(parts[10], "workpiece_committed");
+                    if (!encoded_material || !encoded_server_state || !parsed_owner ||
+                        !parsed_revision || !parsed_committed) {
+                        return core::Result<SaveSnapshot>::failure(
+                            "save_text.invalid_workpiece",
+                            "workpiece rich state contains invalid fields");
+                    }
+                    if (!encoded_material.value().empty()) {
+                        auto parsed_material = core::PrototypeId::parse(encoded_material.value());
+                        if (!parsed_material) {
+                            return core::Result<SaveSnapshot>::failure(
+                                "save_text.invalid_workpiece",
+                                "workpiece material prototype id is invalid");
+                        }
+                        material = *parsed_material;
+                    }
+                    server_state = std::move(encoded_server_state).value();
+                    owner = core::NetId::from_value(parsed_owner.value());
+                    revision = parsed_revision.value();
+                    committed = parsed_committed.value();
+                }
                 if (!id || !prototype || !x || !y || !z || !cells) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_workpiece", "workpiece record contains invalid fields");
@@ -1135,12 +1325,18 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.workpieces.push_back({core::WorkpieceId::from_value(id.value()),
                                                prototype.value(),
                                                {x.value(), y.value(), z.value()},
-                                               std::move(cells).value()});
+                                               std::move(cells).value(),
+                                               material,
+                                               std::move(server_state),
+                                               owner,
+                                               revision,
+                                               committed});
             } else if (key == "assembly") {
                 const auto parts = split(value, '|');
-                if (parts.size() != 6) {
+                if (parts.size() != 6 && parts.size() != 13) {
                     return core::Result<SaveSnapshot>::failure(
-                        "save_text.invalid_assembly", "assembly record must contain 6 fields");
+                        "save_text.invalid_assembly",
+                        "assembly record must contain 6 legacy or 13 state-machine fields");
                 }
                 auto id = parse_u64(parts[0], "assembly_id");
                 auto root = parse_u64(parts[1], "assembly_root");
@@ -1152,29 +1348,67 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_assembly", "assembly record contains invalid fields");
                 }
-                snapshot.assemblies.push_back({core::SaveId::from_value(id.value()),
-                                               core::SaveId::from_value(root.value()),
-                                               prototype.value(), std::move(parts_result).value(),
-                                               std::move(ports).value(), operating.value()});
+                assemblies::AssemblyRecord record;
+                record.assembly_id = core::SaveId::from_value(id.value());
+                record.root_build_piece_id = core::SaveId::from_value(root.value());
+                record.prototype_id = prototype.value();
+                record.parts = std::move(parts_result).value();
+                record.ports = std::move(ports).value();
+                record.operating = operating.value();
+                record.state = operating.value() ? assemblies::AssemblyState::operating
+                                                 : assemblies::AssemblyState::ready;
+                if (parts.size() == 13) {
+                    auto state = assemblies::parse_assembly_state(parts[6]);
+                    auto stage = parse_u32(parts[7], "assembly_current_stage");
+                    auto revision = parse_u64(parts[8], "assembly_revision");
+                    auto capabilities = parse_string_list(parts[9]);
+                    auto process_slots = parse_process_ids(parts[10]);
+                    auto failure = percent_unescape(parts[11]);
+                    auto custom = percent_unescape(parts[12]);
+                    if (!state || !stage || !revision || !capabilities || !process_slots ||
+                        !failure || !custom) {
+                        return core::Result<SaveSnapshot>::failure(
+                            "save_text.invalid_assembly",
+                            "assembly state-machine fields are invalid");
+                    }
+                    record.state = state.value();
+                    record.current_stage = stage.value();
+                    record.revision = revision.value();
+                    record.capabilities = std::move(capabilities).value();
+                    record.process_slots = std::move(process_slots).value();
+                    record.failure_reason = std::move(failure).value();
+                    record.custom_state = std::move(custom).value();
+                }
+                snapshot.assemblies.push_back(std::move(record));
             } else if (key == "process") {
                 const auto parts = split(value, '|');
-                if (parts.size() != 11) {
+                if (parts.size() != 11 && parts.size() != 14) {
                     return core::Result<SaveSnapshot>::failure(
-                        "save_text.invalid_process", "process record must contain 11 fields");
+                        "save_text.invalid_process",
+                        "process record must contain 11 legacy or 14 lazy-process fields");
                 }
                 auto id = parse_u64(parts[0], "process_id");
                 auto owner = parse_u64(parts[1], "process_owner");
                 auto prototype = parse_prototype_id(parts[2]);
-                auto start = parse_i64(parts[3], "process_start");
-                auto last = parse_i64(parts[4], "process_last_update");
-                auto required = parse_i64(parts[5], "process_required");
-                auto accumulated = parse_i64(parts[6], "process_accumulated");
+                auto start = parse_u64(parts[3], "process_start");
+                auto last = parse_u64(parts[4], "process_last_update");
+                auto required = parse_u64(parts[5], "process_required");
+                auto accumulated = parse_u64(parts[6], "process_accumulated");
                 auto state = parse_process_state(parts[7]);
                 auto interruption_reason = percent_unescape(parts[8]);
                 auto inputs = parse_process_slots(parts[9]);
                 auto outputs = parse_process_slots(parts[10]);
+                auto output_claimed = parts.size() == 14
+                                          ? parse_bool(parts[11], "process_output_claimed")
+                                          : core::Result<bool>::success(false);
+                auto condition = parts.size() == 14 ? percent_unescape(parts[12])
+                                                    : core::Result<std::string>::success({});
+                auto interruption_policy =
+                    parts.size() == 14 ? parse_process_interruption_policy(parts[13])
+                                       : std::optional{processes::ProcessInterruptionPolicy::pause};
                 if (!id || !owner || !prototype || !start || !last || !required || !accumulated ||
-                    !state || !interruption_reason || !inputs || !outputs) {
+                    !state || !interruption_reason || !inputs || !outputs || !output_claimed ||
+                    !condition || !interruption_policy) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_process", "process record contains invalid fields");
                 }
@@ -1182,14 +1416,17 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 process.process_id = core::ProcessId::from_value(id.value());
                 process.owner_id = core::SaveId::from_value(owner.value());
                 process.prototype_id = prototype.value();
-                process.start_time_ms = start.value();
-                process.last_update_time_ms = last.value();
-                process.required_effective_work_ms = required.value();
-                process.accumulated_effective_work_ms = accumulated.value();
+                process.started_at = start.value();
+                process.last_eval = last.value();
+                process.required_work_ticks = required.value();
+                process.accrued_work_ticks = accumulated.value();
                 process.state = state.value();
                 process.interruption_reason = std::move(interruption_reason).value();
                 process.input_slots = std::move(inputs).value();
                 process.output_slots = std::move(outputs).value();
+                process.output_claimed = output_claimed.value();
+                process.condition_function_id = std::move(condition).value();
+                process.interruption_policy = *interruption_policy;
                 snapshot.processes.push_back(std::move(process));
             } else if (key == "mod_state") {
                 const auto parts = split(value, '|');
@@ -1207,6 +1444,50 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.mod_states.push_back({std::move(mod_id).value(),
                                                std::move(state_key).value(),
                                                std::move(encoded_state).value()});
+            } else if (key == "fire") {
+                const auto parts = split(value, '|');
+                if (parts.size() != 7) {
+                    return core::Result<SaveSnapshot>::failure("save_text.invalid_fire",
+                                                               "fire record must contain 7 fields");
+                }
+                auto id = parse_u64(parts[0], "fire_id");
+                auto prototype = parse_prototype_id(parts[1]);
+                auto state = parse_fire_state(parts[2]);
+                auto fuel = parse_u64(parts[3], "fire_fuel");
+                auto last_eval = parse_u64(parts[4], "fire_last_eval");
+                auto embers_until = parse_u64(parts[5], "fire_embers_until");
+                auto exposed = parse_bool(parts[6], "fire_weather_exposed");
+                if (!id || !prototype || !state || !fuel || !last_eval || !embers_until ||
+                    !exposed) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.invalid_fire", "fire record contains invalid fields");
+                }
+                snapshot.fires.push_back({core::SaveId::from_value(id.value()), prototype.value(),
+                                          *state, fuel.value(), last_eval.value(),
+                                          embers_until.value(), exposed.value()});
+            } else if (key == "missing_prototype") {
+                const auto parts = split(value, '|');
+                if (parts.size() != 7) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.invalid_missing_prototype",
+                        "missing prototype placeholder must contain 7 fields");
+                }
+                auto kind = world::missing_prototype_kind_from_name(parts[0]);
+                auto stable_id = parse_u64(parts[1], "missing_prototype_id");
+                auto prototype = parse_prototype_id(parts[2]);
+                auto position = parse_world_position(parts[3], "missing_prototype_position");
+                auto owner = parse_u64(parts[4], "missing_prototype_owner");
+                auto warning = percent_unescape(parts[5]);
+                auto blob = percent_unescape(parts[6]);
+                if (!kind || !stable_id || !prototype || !position || !owner || !warning || !blob) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.invalid_missing_prototype",
+                        "missing prototype placeholder contains invalid fields");
+                }
+                snapshot.missing_prototypes.push_back(
+                    {*kind, stable_id.value(), prototype.value(), position.value(),
+                     core::SaveId::from_value(owner.value()), std::move(blob).value(),
+                     std::move(warning).value()});
             } else {
                 return core::Result<SaveSnapshot>::failure("save_text.unknown_snapshot_key",
                                                            "unknown save snapshot key: " +
@@ -1227,6 +1508,10 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
     }
 
     auto status = snapshot.metadata.validate();
+    if (!status) {
+        return core::Result<SaveSnapshot>::failure(status.error().code, status.error().message);
+    }
+    status = snapshot.voxel_palette.validate();
     if (!status) {
         return core::Result<SaveSnapshot>::failure(status.error().code, status.error().message);
     }

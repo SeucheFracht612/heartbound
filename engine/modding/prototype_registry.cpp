@@ -10,10 +10,11 @@ namespace {
 [[nodiscard]] bool is_known_kind(std::string_view kind) noexcept {
     return kind == PrototypeKinds::item || kind == PrototypeKinds::cargo ||
            kind == PrototypeKinds::entity || kind == PrototypeKinds::voxel ||
-           kind == PrototypeKinds::build_piece || kind == PrototypeKinds::assembly ||
-           kind == PrototypeKinds::workpiece || kind == PrototypeKinds::process ||
-           kind == PrototypeKinds::room_descriptor || kind == PrototypeKinds::material ||
-           kind == PrototypeKinds::scenario;
+           kind == PrototypeKinds::block_model || kind == PrototypeKinds::build_piece ||
+           kind == PrototypeKinds::assembly || kind == PrototypeKinds::workpiece ||
+           kind == PrototypeKinds::pattern || kind == PrototypeKinds::process ||
+           kind == PrototypeKinds::fire || kind == PrototypeKinds::room_descriptor ||
+           kind == PrototypeKinds::material || kind == PrototypeKinds::scenario;
 }
 
 } // namespace

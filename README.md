@@ -9,7 +9,11 @@ block abstraction.
 
 ## Current Status
 
-Early engine foundation.
+Heartstead Engine v0.2 architecture is implemented as an engine-only foundation. Gameplay and
+production content are intentionally not part of this pass. The current strict build has focused
+coverage for cubic `i64` worlds, rich blocks, recoverable saves, authoritative profiles/logs,
+lazy time/process/fire simulation, workpieces, staged assemblies, resource/shader policies,
+worldgen features, admin infrastructure and camera-relative rendering.
 
 Implemented in this repository:
 

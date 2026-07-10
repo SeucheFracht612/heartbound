@@ -1,0 +1,8 @@
+kind = "block_model"
+id = "base:block_models/ore_protrusion"
+display_name = "Ore Protrusion"
+model_type = "ore_protrusion"
+boxes = "0,0,0,1,1,1;0.20,0.25,-0.30,0.80,0.80,0.15"
+render_bounds = "0,0,-0.30,1,1,1"
+neighbor_dependency_radius = "2"
+mesh_invalidation_radius = "2"

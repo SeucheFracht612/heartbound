@@ -3,6 +3,7 @@
 #include "engine/core/ids.hpp"
 #include "engine/core/result.hpp"
 #include "engine/math/vector.hpp"
+#include "engine/world/coords/world_position.hpp"
 
 #include <cstdint>
 #include <string_view>
@@ -10,7 +11,7 @@
 namespace heartstead::entities {
 
 using Vec3 = math::Vec3d;
-using Transform = math::Transform3d;
+using Transform = world::WorldTransform;
 
 enum class EntityKind {
     player,

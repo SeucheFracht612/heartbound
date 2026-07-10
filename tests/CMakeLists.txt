@@ -25,6 +25,16 @@ heartstead_add_foundation_test(heartstead_world_integrity_v02_tests world_integr
 heartstead_add_foundation_test(heartstead_replication_v02_tests replication_v02_tests.cpp)
 heartstead_add_foundation_test(heartstead_server_foundations_v02_tests
                                server_foundations_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_rich_blocks_v02_tests rich_blocks_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_region_storage_v02_tests region_storage_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_save_recovery_v02_tests save_recovery_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_authoritative_server_v02_tests
+                               authoritative_server_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_lazy_process_fire_v02_tests
+                               lazy_process_fire_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_workpiece_v02_tests workpiece_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_assembly_v02_tests assembly_v02_tests.cpp)
+heartstead_add_foundation_test(heartstead_infrastructure_v02_tests infrastructure_v02_tests.cpp)
 
 function(heartstead_add_smoke_test test_name target_name)
   if(TARGET ${target_name})
@@ -69,6 +79,9 @@ heartstead_add_smoke_test(smoke.shader_compiler_inspect heartstead_shader_compil
                           ${PROJECT_SOURCE_DIR}
                           ${CMAKE_CURRENT_BINARY_DIR}/smoke_shader_manifest_inspect.txt
                           development --inspect)
+heartstead_add_smoke_test(smoke.block_model_viewer heartstead_block_model_viewer
+                          ${PROJECT_SOURCE_DIR})
+heartstead_add_smoke_test(smoke.chunk_inspector heartstead_chunk_inspector --help)
 heartstead_add_smoke_test(smoke.workpiece_inspector heartstead_workpiece_inspector
                           ${PROJECT_SOURCE_DIR}/tests/fixtures/sample_workpiece_grid.txt)
 heartstead_add_smoke_test(smoke.world_inspector heartstead_world_inspector

@@ -254,8 +254,9 @@ assembly_total_port_capacity(const std::vector<assemblies::AssemblyPort>& ports)
     return stats.chunk_count > 0 || stats.region_count > 0 || stats.region_connection_count > 0 ||
            stats.dirty_region_count > 0 || stats.build_object_count > 0 || stats.entity_count > 0 ||
            stats.cargo_count > 0 || stats.inventory_count > 0 || stats.workpiece_count > 0 ||
-           stats.assembly_count > 0 || stats.process_count > 0 || stats.room_count > 0 ||
-           stats.network_count > 0 || stats.mod_state_count > 0;
+           stats.physical_resource_count > 0 || stats.assembly_count > 0 ||
+           stats.process_count > 0 || stats.room_count > 0 || stats.network_count > 0 ||
+           stats.mod_state_count > 0;
 }
 
 void add_simulation_frame_plan_issues(InspectionData& data,
@@ -2327,10 +2328,19 @@ InspectionData Inspector::inspect(const cargo::CargoRecord& cargo_record) {
     data.save_id = save_id_text(cargo_record.cargo_id);
     data.prototype_id = prototype_text(cargo_record.prototype_id);
     data.state = cargo_record.is_hazardous() ? "hazardous" : "stable";
+    const auto approximate_position = cargo_record.position.approximate_global();
     add_field(data, "position",
-              std::to_string(cargo_record.position.x) + "|" +
-                  std::to_string(cargo_record.position.y) + "|" +
-                  std::to_string(cargo_record.position.z));
+              std::to_string(approximate_position.x) + "|" +
+                  std::to_string(approximate_position.y) + "|" +
+                  std::to_string(approximate_position.z));
+    add_field(data, "position_anchor",
+              std::to_string(cargo_record.position.anchor.x) + "|" +
+                  std::to_string(cargo_record.position.anchor.y) + "|" +
+                  std::to_string(cargo_record.position.anchor.z));
+    add_field(data, "position_local",
+              std::to_string(cargo_record.position.local_offset.x) + "|" +
+                  std::to_string(cargo_record.position.local_offset.y) + "|" +
+                  std::to_string(cargo_record.position.local_offset.z));
     add_field(data, "mass_grams", std::to_string(cargo_record.mass_grams));
     add_field(data, "volume_milliliters", std::to_string(cargo_record.volume_milliliters));
     add_field(data, "stability_per_mille", std::to_string(cargo_record.stability_per_mille));
@@ -2351,10 +2361,19 @@ InspectionData Inspector::inspect(const entities::EntityRecord& entity) {
     data.state = entity.sleeping ? "sleeping" : "active";
     add_field(data, "net_id", entity.net_id.is_valid() ? entity.net_id.to_string() : "");
     add_field(data, "kind", entity_kind_text(entity.kind));
+    const auto approximate_position = entity.transform.position.approximate_global();
     add_field(data, "position",
-              std::to_string(entity.transform.position.x) + "|" +
-                  std::to_string(entity.transform.position.y) + "|" +
-                  std::to_string(entity.transform.position.z));
+              std::to_string(approximate_position.x) + "|" +
+                  std::to_string(approximate_position.y) + "|" +
+                  std::to_string(approximate_position.z));
+    add_field(data, "position_anchor",
+              std::to_string(entity.transform.position.anchor.x) + "|" +
+                  std::to_string(entity.transform.position.anchor.y) + "|" +
+                  std::to_string(entity.transform.position.anchor.z));
+    add_field(data, "position_local",
+              std::to_string(entity.transform.position.local_offset.x) + "|" +
+                  std::to_string(entity.transform.position.local_offset.y) + "|" +
+                  std::to_string(entity.transform.position.local_offset.z));
     add_field(data, "rotation_degrees",
               std::to_string(entity.transform.rotation_degrees.x) + "|" +
                   std::to_string(entity.transform.rotation_degrees.y) + "|" +
@@ -2801,9 +2820,8 @@ InspectionData Inspector::inspect(const world::WorldReplicationDeltaSnapshot& sn
     data.object_type = "world_replication_delta_snapshot";
     data.display_name = "World Replication Delta Snapshot";
     data.runtime_id =
-        std::to_string(snapshot.plan.replication_sequence != 0
-                           ? snapshot.plan.replication_sequence
-                           : snapshot.plan.command_sequence);
+        std::to_string(snapshot.plan.replication_sequence != 0 ? snapshot.plan.replication_sequence
+                                                               : snapshot.plan.command_sequence);
 
     const auto section_record_count = static_cast<std::uint32_t>(
         snapshot.build_pieces.size() + snapshot.entities.size() + snapshot.cargo_records.size() +
@@ -3089,9 +3107,8 @@ InspectionData Inspector::inspect(const world::WorldReplicationDeltaApplyReport&
     InspectionData data;
     data.object_type = "world_replication_delta_apply_report";
     data.display_name = "World Replication Delta Apply Report";
-    data.runtime_id = std::to_string(report.replication_sequence != 0
-                                         ? report.replication_sequence
-                                         : report.command_sequence);
+    data.runtime_id = std::to_string(report.replication_sequence != 0 ? report.replication_sequence
+                                                                      : report.command_sequence);
     if (!report.applied) {
         data.state = "not_applied";
     } else if (report.requires_snapshot_resync) {
@@ -3404,6 +3421,7 @@ InspectionData Inspector::inspect(const world::WorldState& state) {
     add_field(data, "cargo_count", std::to_string(stats.cargo_count));
     add_field(data, "inventory_count", std::to_string(stats.inventory_count));
     add_field(data, "workpiece_count", std::to_string(stats.workpiece_count));
+    add_field(data, "physical_resource_count", std::to_string(stats.physical_resource_count));
     add_field(data, "assembly_count", std::to_string(stats.assembly_count));
     add_field(data, "process_count", std::to_string(stats.process_count));
     add_field(data, "room_count", std::to_string(stats.room_count));

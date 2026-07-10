@@ -1,6 +1,7 @@
 #include "engine/networks/spatial_network.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <queue>
 #include <unordered_set>
 #include <utility>
@@ -45,6 +46,10 @@ core::Status SpatialNetwork::add_edge(NetworkEdge edge) {
     if (edge.capacity == 0) {
         return core::Status::failure("network.invalid_edge_capacity",
                                      "network edge capacity must be non-zero");
+    }
+    if (edge.quality == 0 || edge.quality > 1000) {
+        return core::Status::failure("network.invalid_edge_quality",
+                                     "network edge quality must be 1..1000");
     }
 
     const auto [_, inserted] = edges_.emplace(edge.id.value(), std::move(edge));
@@ -153,6 +158,68 @@ bool SpatialNetwork::can_reach(NetworkNodeId start, NetworkNodeId goal) const {
     }
 
     return false;
+}
+
+LogisticsRouteEffects SpatialNetwork::route_effects(NetworkNodeId start, NetworkNodeId goal) const {
+    LogisticsRouteEffects result;
+    if (!find_node(start) || !find_node(goal))
+        return result;
+    if (start == goal) {
+        result.reachable = true;
+        result.cart_speed_per_mille = 1000;
+        result.animal_stamina_cost_per_mille = 0;
+        result.pathfinding_reliability_per_mille = 1000;
+        result.travel_safety_per_mille = 1000;
+        result.corpse_recovery_per_mille = 1000;
+        result.weather_resistance_per_mille = 1000;
+        result.bottleneck_capacity = find_node(start)->capacity;
+        return result;
+    }
+
+    struct RouteState {
+        NetworkNodeId node;
+        std::uint32_t edge_count = 0;
+        std::uint64_t quality_sum = 0;
+        std::uint32_t minimum_quality = 1000;
+        std::uint32_t bottleneck = std::numeric_limits<std::uint32_t>::max();
+    };
+    std::queue<RouteState> queue;
+    std::unordered_set<std::uint64_t> visited{start.value()};
+    queue.push({start, 0, 0, 1000, find_node(start)->capacity});
+    while (!queue.empty()) {
+        auto route = queue.front();
+        queue.pop();
+        for (const auto& [_, edge] : edges_) {
+            if (edge.blocked || (edge.a != route.node && edge.b != route.node))
+                continue;
+            const auto next = edge.a == route.node ? edge.b : edge.a;
+            if (!visited.insert(next.value()).second)
+                continue;
+            auto next_route = route;
+            next_route.node = next;
+            ++next_route.edge_count;
+            next_route.quality_sum += std::min(edge.quality, 1000U);
+            next_route.minimum_quality = std::min(next_route.minimum_quality, edge.quality);
+            next_route.bottleneck =
+                std::min({next_route.bottleneck, edge.capacity, find_node(next)->capacity});
+            if (next == goal) {
+                const auto average =
+                    static_cast<std::uint32_t>(next_route.quality_sum / next_route.edge_count);
+                result.reachable = true;
+                result.edge_count = next_route.edge_count;
+                result.cart_speed_per_mille = std::min(1500U, 500U + average);
+                result.animal_stamina_cost_per_mille = 1200U - std::min(1000U, average);
+                result.pathfinding_reliability_per_mille = next_route.minimum_quality;
+                result.travel_safety_per_mille = std::min(1000U, 300U + average * 7U / 10U);
+                result.corpse_recovery_per_mille = std::min(1000U, 200U + average * 4U / 5U);
+                result.weather_resistance_per_mille = std::min(1000U, average * 3U / 4U);
+                result.bottleneck_capacity = next_route.bottleneck;
+                return result;
+            }
+            queue.push(next_route);
+        }
+    }
+    return result;
 }
 
 std::size_t SpatialNetwork::node_count() const noexcept {

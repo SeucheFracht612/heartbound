@@ -1,0 +1,3 @@
+add_executable(heartstead_chunk_inspector main.cpp)
+target_link_libraries(heartstead_chunk_inspector PRIVATE Heartstead::Engine)
+heartstead_configure_target(heartstead_chunk_inspector)

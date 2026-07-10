@@ -20,6 +20,7 @@ constexpr std::string_view line_version = "v1";
 constexpr std::size_t max_log_text_bytes = 64U * 1024U;
 constexpr std::size_t max_encoded_log_line_bytes = 1024U * 1024U;
 constexpr std::uintmax_t max_query_file_bytes = 512U * 1024U * 1024U;
+constexpr std::string_view archive_magic = "HSLZ1";
 
 [[nodiscard]] bool is_hex(char value) noexcept {
     return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
@@ -184,6 +185,72 @@ decode_metadata(std::string_view value) {
 
 } // namespace
 
+std::vector<std::uint8_t> ServerLogArchiveCodec::encode(std::string_view text) {
+    std::vector<std::uint8_t> output(archive_magic.begin(), archive_magic.end());
+    std::size_t index = 0;
+    while (index < text.size()) {
+        std::size_t run = 1;
+        while (index + run < text.size() && text[index + run] == text[index] && run < 128)
+            ++run;
+        if (run >= 4) {
+            output.push_back(static_cast<std::uint8_t>(0x80U | (run - 1U)));
+            output.push_back(static_cast<std::uint8_t>(text[index]));
+            index += run;
+            continue;
+        }
+        const auto literal_start = index;
+        index += run;
+        while (index < text.size() && index - literal_start < 128) {
+            std::size_t next_run = 1;
+            while (index + next_run < text.size() && text[index + next_run] == text[index] &&
+                   next_run < 128) {
+                ++next_run;
+            }
+            if (next_run >= 4 || index - literal_start + next_run > 128)
+                break;
+            index += next_run;
+        }
+        const auto length = index - literal_start;
+        output.push_back(static_cast<std::uint8_t>(length - 1U));
+        output.insert(output.end(), text.begin() + static_cast<std::ptrdiff_t>(literal_start),
+                      text.begin() + static_cast<std::ptrdiff_t>(index));
+    }
+    return output;
+}
+
+core::Result<std::string> ServerLogArchiveCodec::decode(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < archive_magic.size() ||
+        !std::equal(archive_magic.begin(), archive_magic.end(), bytes.begin())) {
+        return core::Result<std::string>::failure("server_log.invalid_archive",
+                                                  "rotated log archive magic is invalid");
+    }
+    std::string output;
+    std::size_t index = archive_magic.size();
+    while (index < bytes.size()) {
+        const auto token = bytes[index++];
+        const auto length = static_cast<std::size_t>((token & 0x7FU) + 1U);
+        if (output.size() > max_query_file_bytes - length) {
+            return core::Result<std::string>::failure("server_log.archive_too_large",
+                                                      "rotated log expands beyond query limit");
+        }
+        if ((token & 0x80U) != 0) {
+            if (index >= bytes.size()) {
+                return core::Result<std::string>::failure("server_log.truncated_archive",
+                                                          "rotated log run is truncated");
+            }
+            output.append(length, static_cast<char>(bytes[index++]));
+        } else {
+            if (length > bytes.size() - index) {
+                return core::Result<std::string>::failure("server_log.truncated_archive",
+                                                          "rotated log literal is truncated");
+            }
+            output.append(reinterpret_cast<const char*>(bytes.data() + index), length);
+            index += length;
+        }
+    }
+    return core::Result<std::string>::success(std::move(output));
+}
+
 core::Status ServerLogEntry::validate() const {
     if (!valid_utc_timestamp(real_timestamp_utc)) {
         return core::Status::failure(
@@ -342,7 +409,7 @@ core::Status FileServerLog::append(ServerLogCategory category, ServerLogEntry en
     }
 
     std::scoped_lock lock(mutex_);
-    status = rotate_if_needed(category, line.size());
+    status = rotate_if_needed(category, line.size(), entry.real_timestamp_utc.substr(0, 10));
     if (!status) {
         return status;
     }
@@ -414,6 +481,93 @@ FileServerLog::query_current(ServerLogCategory category, const ServerLogFilter& 
     return core::Result<std::vector<ServerLogEntry>>::success(std::move(result));
 }
 
+core::Result<std::vector<ServerLogEntry>>
+FileServerLog::query_all(ServerLogCategory category, const ServerLogFilter& filter) const {
+    std::scoped_lock lock(mutex_);
+    std::vector<ServerLogEntry> result;
+    const auto parse_text = [&result, &filter](std::string_view text) -> core::Status {
+        std::size_t start = 0;
+        while (start < text.size()) {
+            const auto end = text.find('\n', start);
+            const auto line = end == std::string_view::npos ? text.substr(start)
+                                                            : text.substr(start, end - start);
+            if (!line.empty()) {
+                if (line.size() > max_encoded_log_line_bytes) {
+                    return core::Status::failure("server_log.line_too_large",
+                                                 "server log line exceeds one MiB");
+                }
+                auto entry = ServerLogLineCodec::decode(line);
+                if (!entry)
+                    return core::Status::failure(entry.error().code, entry.error().message);
+                if (filter.matches(entry.value()))
+                    result.push_back(std::move(entry).value());
+            }
+            if (end == std::string_view::npos)
+                break;
+            start = end + 1;
+        }
+        return core::Status::ok();
+    };
+    const auto read_plain = [&parse_text](const std::filesystem::path& path) -> core::Status {
+        std::error_code error;
+        if (!std::filesystem::exists(path, error))
+            return error ? core::Status::failure("server_log.read_failed", error.message())
+                         : core::Status::ok();
+        const auto size = std::filesystem::file_size(path, error);
+        if (error || size > max_query_file_bytes)
+            return core::Status::failure("server_log.file_too_large",
+                                         "server log exceeds query limit");
+        std::ifstream input(path, std::ios::binary);
+        if (!input)
+            return core::Status::failure("server_log.open_failed", "failed to open server log");
+        std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        return parse_text(text);
+    };
+
+    const auto rotated = server_root_ / "logs" / "rotated";
+    std::error_code error;
+    if (std::filesystem::is_directory(rotated, error)) {
+        std::vector<std::filesystem::path> archives;
+        const auto marker = "." + std::string(server_log_category_name(category)) + ".";
+        for (const auto& entry : std::filesystem::directory_iterator(rotated)) {
+            if (entry.is_regular_file() && entry.path().filename().string().contains(marker) &&
+                entry.path().extension() == ".hsz") {
+                archives.push_back(entry.path());
+            }
+        }
+        std::ranges::sort(archives);
+        for (const auto& path : archives) {
+            const auto size = std::filesystem::file_size(path, error);
+            if (error || size > max_query_file_bytes) {
+                return core::Result<std::vector<ServerLogEntry>>::failure(
+                    "server_log.archive_too_large", "rotated log archive exceeds query limit");
+            }
+            std::ifstream input(path, std::ios::binary);
+            if (!input)
+                return core::Result<std::vector<ServerLogEntry>>::failure(
+                    "server_log.open_failed", "failed to open rotated log");
+            std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)),
+                                            std::istreambuf_iterator<char>());
+            auto text = ServerLogArchiveCodec::decode(bytes);
+            if (!text)
+                return core::Result<std::vector<ServerLogEntry>>::failure(text.error().code,
+                                                                          text.error().message);
+            auto status = parse_text(text.value());
+            if (!status)
+                return core::Result<std::vector<ServerLogEntry>>::failure(status.error().code,
+                                                                          status.error().message);
+        }
+    } else if (error) {
+        return core::Result<std::vector<ServerLogEntry>>::failure("server_log.read_failed",
+                                                                  error.message());
+    }
+    auto status = read_plain(current_path(category));
+    if (!status)
+        return core::Result<std::vector<ServerLogEntry>>::failure(status.error().code,
+                                                                  status.error().message);
+    return core::Result<std::vector<ServerLogEntry>>::success(std::move(result));
+}
+
 core::Status FileServerLog::append_join(const player_profiles::PlayerUuid& player_uuid,
                                         std::string display_name, std::string address_hash,
                                         simulation::WorldTick world_time,
@@ -460,8 +614,8 @@ core::Status FileServerLog::append_chat(const player_profiles::PlayerUuid& playe
     return append(ServerLogCategory::chat, std::move(entry));
 }
 
-core::Status FileServerLog::rotate_if_needed(ServerLogCategory category,
-                                             std::size_t incoming_bytes) {
+core::Status FileServerLog::rotate_if_needed(ServerLogCategory category, std::size_t incoming_bytes,
+                                             std::string_view incoming_day) {
     if (config_.rotate_after_bytes == 0) {
         return core::Status::failure("server_log.invalid_rotation_size",
                                      "server log rotation size must be non-zero");
@@ -473,13 +627,29 @@ core::Status FileServerLog::rotate_if_needed(ServerLogCategory category,
         return core::Status::failure("server_log.stat_failed", error.message());
     }
     if (!exists) {
+        current_days_[category] = incoming_day;
         return core::Status::ok();
     }
     const auto size = std::filesystem::file_size(current, error);
     if (error) {
         return core::Status::failure("server_log.stat_failed", error.message());
     }
-    if (size < config_.rotate_after_bytes && incoming_bytes <= config_.rotate_after_bytes - size) {
+    auto& current_day = current_days_[category];
+    if (current_day.empty()) {
+        std::ifstream input(current, std::ios::binary);
+        std::string first_line;
+        if (input && std::getline(input, first_line)) {
+            auto first = ServerLogLineCodec::decode(first_line);
+            if (first && first.value().real_timestamp_utc.size() >= 10) {
+                current_day = first.value().real_timestamp_utc.substr(0, 10);
+            }
+        }
+        if (current_day.empty())
+            current_day = incoming_day;
+    }
+    const auto daily_rotation = config_.rotate_daily && current_day != incoming_day;
+    if (!daily_rotation && size < config_.rotate_after_bytes &&
+        incoming_bytes <= config_.rotate_after_bytes - size) {
         return core::Status::ok();
     }
 
@@ -490,11 +660,41 @@ core::Status FileServerLog::rotate_if_needed(ServerLogCategory category,
     }
     const auto filename = compact_timestamp(utc_now_iso8601()) + "." +
                           std::string(server_log_category_name(category)) + "." +
-                          std::to_string(rotation_sequence_++) + ".log";
-    std::filesystem::rename(current, rotated_dir / filename, error);
-    if (error) {
+                          std::to_string(rotation_sequence_++) + ".log.hsz";
+    std::ifstream input(current, std::ios::binary);
+    if (!input)
+        return core::Status::failure("server_log.rotate_failed",
+                                     "failed to read current log for compression");
+    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    auto archive = ServerLogArchiveCodec::encode(text);
+    const auto archive_path = rotated_dir / filename;
+    const auto temporary = archive_path.string() + ".tmp";
+    std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+    if (!output)
+        return core::Status::failure("server_log.rotate_failed",
+                                     "failed to create compressed log archive");
+    output.write(reinterpret_cast<const char*>(archive.data()),
+                 static_cast<std::streamsize>(archive.size()));
+    output.close();
+    if (!output)
+        return core::Status::failure("server_log.rotate_failed",
+                                     "failed to flush compressed log archive");
+    std::filesystem::rename(temporary, archive_path, error);
+    if (error)
         return core::Status::failure("server_log.rotate_failed", error.message());
-    }
+    std::filesystem::remove(current, error);
+    if (error)
+        return core::Status::failure("server_log.rotate_failed", error.message());
+    std::ofstream index(rotated_dir / "index.log", std::ios::app);
+    if (!index)
+        return core::Status::failure("server_log.index_failed", "failed to open rotated log index");
+    index << filename << '|' << server_log_category_name(category) << '|' << current_day << '|'
+          << incoming_day << '|' << text.size() << '|' << archive.size() << '\n';
+    index.flush();
+    if (!index)
+        return core::Status::failure("server_log.index_failed",
+                                     "failed to update rotated log index");
+    current_day = incoming_day;
     return core::Status::ok();
 }
 

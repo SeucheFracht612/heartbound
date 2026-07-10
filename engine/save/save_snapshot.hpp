@@ -9,10 +9,14 @@
 #include "engine/modding/prototype_registry.hpp"
 #include "engine/processes/process.hpp"
 #include "engine/save/save_metadata.hpp"
+#include "engine/simulation/fire.hpp"
 #include "engine/workpieces/workpiece_grid.hpp"
+#include "engine/world/missing_prototype.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
+#include "engine/world/voxels/voxel_palette.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace heartstead::save {
@@ -43,6 +47,25 @@ struct WorkpieceSaveRecord {
     core::PrototypeId prototype_id;
     workpieces::WorkpieceGridShape shape;
     std::string encoded_cells;
+    core::PrototypeId material_prototype_id;
+    std::string encoded_server_state;
+    core::NetId owner_session;
+    std::uint64_t revision = 1;
+    bool committed = false;
+
+    WorkpieceSaveRecord() = default;
+    WorkpieceSaveRecord(core::WorkpieceId id, core::PrototypeId prototype,
+                        workpieces::WorkpieceGridShape grid_shape, std::string cells)
+        : workpiece_id(id), prototype_id(std::move(prototype)), shape(grid_shape),
+          encoded_cells(std::move(cells)) {}
+    WorkpieceSaveRecord(core::WorkpieceId id, core::PrototypeId prototype,
+                        workpieces::WorkpieceGridShape grid_shape, std::string cells,
+                        core::PrototypeId material, std::string server_state, core::NetId owner,
+                        std::uint64_t record_revision, bool is_committed)
+        : workpiece_id(id), prototype_id(std::move(prototype)), shape(grid_shape),
+          encoded_cells(std::move(cells)), material_prototype_id(std::move(material)),
+          encoded_server_state(std::move(server_state)), owner_session(owner),
+          revision(record_revision), committed(is_committed) {}
 };
 
 struct ModStateSaveRecord {
@@ -53,6 +76,7 @@ struct ModStateSaveRecord {
 
 struct SaveSnapshot {
     SaveMetadata metadata;
+    world::VoxelPaletteManifest voxel_palette;
     std::vector<ChunkEditSaveRecord> chunk_edits;
     std::vector<build::BuildPieceRecord> build_pieces;
     std::vector<EntitySaveRecord> entities;
@@ -62,6 +86,8 @@ struct SaveSnapshot {
     std::vector<assemblies::AssemblyRecord> assemblies;
     std::vector<processes::ProcessInstance> processes;
     std::vector<ModStateSaveRecord> mod_states;
+    std::vector<world::MissingPrototypeObject> missing_prototypes;
+    std::vector<simulation::FireInstance> fires;
 };
 
 struct SaveSnapshotIssue {

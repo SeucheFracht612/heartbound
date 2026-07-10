@@ -1,0 +1,334 @@
+#include "engine/server/authoritative_server.hpp"
+
+#include "engine/core/hash.hpp"
+#include "engine/world/world_state.hpp"
+
+#include <algorithm>
+#include <iomanip>
+#include <sstream>
+#include <utility>
+
+namespace heartstead::server {
+
+namespace {
+
+[[nodiscard]] net::TransportMessage profile_message(std::string type, std::string payload,
+                                                    std::uint64_t sequence) {
+    net::TransportMessage message;
+    message.kind = net::TransportMessageKind::replication;
+    message.channel = net::TransportChannel::reliable;
+    message.sequence = sequence;
+    message.payload_type = std::move(type);
+    message.payload = std::move(payload);
+    return message;
+}
+
+} // namespace
+
+AuthoritativeServer::AuthoritativeServer(AuthoritativeServerConfig config)
+    : config_(std::move(config)), host_(config_.host), profiles_(config_.world_root),
+      logs_(config_.server_root.empty() ? config_.world_root / "server" : config_.server_root) {}
+
+core::Status AuthoritativeServer::start() {
+    if (config_.world_root.empty() || config_.server_session.empty()) {
+        return core::Status::failure("authoritative_server.invalid_config",
+                                     "server requires world root and session id");
+    }
+    auto status = config_.world_time.validate();
+    if (!status)
+        return status;
+    return host_.start();
+}
+
+core::Status AuthoritativeServer::stop(simulation::WorldTick world_time) {
+    std::vector<core::NetId> clients;
+    clients.reserve(players_.size());
+    for (const auto& [_, player] : players_)
+        clients.push_back(player.client_id);
+    for (const auto client : clients) {
+        auto status = leave(client, world_time);
+        if (!status)
+            return status;
+    }
+    return host_.stop();
+}
+
+bool AuthoritativeServer::is_running() const noexcept {
+    return host_.is_running();
+}
+std::size_t AuthoritativeServer::connected_player_count() const noexcept {
+    return players_.size();
+}
+
+core::Result<core::NetId> AuthoritativeServer::join(const PlayerJoinRequest& request,
+                                                    simulation::WorldTick world_time) {
+    if (!is_running())
+        return core::Result<core::NetId>::failure("authoritative_server.not_running",
+                                                  "server is not running");
+    if (!request.player_uuid.is_valid() || request.display_name.empty())
+        return core::Result<core::NetId>::failure("authoritative_server.invalid_join",
+                                                  "join requires UUID and display name");
+    const auto address_hash = hash_client_address(request.remote_address);
+    if (config_.ban_validator && config_.ban_validator(request.player_uuid, address_hash)) {
+        return core::Result<core::NetId>::failure("authoritative_server.player_banned",
+                                                  "player or address is banned from this server");
+    }
+    if (std::ranges::any_of(players_, [&request](const auto& entry) {
+            return entry.second.profile.player_uuid == request.player_uuid;
+        }))
+        return core::Result<core::NetId>::failure("authoritative_server.already_connected",
+                                                  "player UUID is already connected");
+    if (!config_.expected_content_fingerprint.empty() &&
+        request.client_content_fingerprint != config_.expected_content_fingerprint) {
+        server_logs::ServerLogEntry mismatch{
+            server_logs::utc_now_iso8601(),
+            world_time,
+            calendar(world_time),
+            "mod_mismatch_join",
+            config_.server_session,
+            request.player_uuid,
+            request.display_name,
+            {},
+            {},
+            {{"client_fingerprint", request.client_content_fingerprint}}};
+        (void)logs_.append(server_logs::ServerLogCategory::audit, std::move(mismatch));
+        return core::Result<core::NetId>::failure(
+            "authoritative_server.content_mismatch",
+            "client content fingerprint does not match server");
+    }
+    if (config_.compatibility_validator) {
+        auto status = config_.compatibility_validator(request);
+        if (!status)
+            return core::Result<core::NetId>::failure(status.error().code, status.error().message);
+    }
+    auto profile = profiles_.load_or_create(request.player_uuid, request.display_name);
+    if (!profile)
+        return core::Result<core::NetId>::failure(profile.error().code, profile.error().message);
+    auto name_status = profile.value().remember_display_name(request.display_name);
+    if (!name_status)
+        return core::Result<core::NetId>::failure(name_status.error().code,
+                                                  name_status.error().message);
+    auto client = host_.connect_client();
+    if (!client)
+        return client;
+    ConnectedPlayer connected{client.value(), std::move(profile).value(), true};
+    auto [it, inserted] = players_.emplace(client.value().value(), std::move(connected));
+    if (!inserted) {
+        (void)host_.disconnect_client(client.value());
+        return core::Result<core::NetId>::failure("authoritative_server.client_collision",
+                                                  "transport client id collision");
+    }
+    auto status = host_.send_replication_message(
+        client.value(),
+        profile_message("world_config",
+                        "ticks_per_second=" + std::to_string(config_.world_time.ticks_per_second) +
+                            "|hours_per_day=" + std::to_string(config_.world_time.hours_per_day) +
+                            "|content=" + config_.expected_content_fingerprint,
+                        next_outbound_sequence_++));
+    if (status) {
+        status = host_.send_replication_message(
+            client.value(),
+            profile_message("world_time", std::to_string(world_time), next_outbound_sequence_++));
+    }
+    if (status)
+        status = send_profile_snapshot(it->second);
+    if (!status) {
+        players_.erase(it);
+        (void)host_.disconnect_client(client.value());
+        return core::Result<core::NetId>::failure(status.error().code, status.error().message);
+    }
+    status = logs_.append_join(request.player_uuid, request.display_name, address_hash, world_time,
+                               calendar(world_time), config_.server_session);
+    if (!status) {
+        players_.erase(client.value().value());
+        (void)host_.disconnect_client(client.value());
+        return core::Result<core::NetId>::failure(status.error().code, status.error().message);
+    }
+    return client;
+}
+
+core::Status AuthoritativeServer::leave(core::NetId client_id, simulation::WorldTick world_time) {
+    auto found = players_.find(client_id.value());
+    if (found == players_.end())
+        return core::Status::failure("authoritative_server.unknown_client",
+                                     "client is not connected");
+    auto status = profiles_.save(found->second.profile);
+    if (!status)
+        return status;
+    status = logs_.append_leave(found->second.profile.player_uuid,
+                                std::string(found->second.profile.current_display_name()),
+                                world_time, calendar(world_time), config_.server_session);
+    if (!status)
+        return status;
+    status = host_.disconnect_client(client_id);
+    if (!status)
+        return status;
+    players_.erase(found);
+    return core::Status::ok();
+}
+
+core::Result<bool> AuthoritativeServer::discover(core::NetId client_id, std::string_view layer_id,
+                                                 player_profiles::MapCellCoord cell,
+                                                 simulation::WorldTick world_time) {
+    auto* player = find(client_id);
+    if (player == nullptr)
+        return core::Result<bool>::failure("authoritative_server.unknown_client",
+                                           "client is not connected");
+    auto changed = player->profile.map_discovery.discover(layer_id, cell);
+    if (!changed || !changed.value())
+        return changed;
+    ++player->profile.revision;
+    player->dirty = true;
+    auto status =
+        send_map_update(*player, layer_id, player_profiles::map_discovery_region_coord(cell));
+    if (!status)
+        return core::Result<bool>::failure(status.error().code, status.error().message);
+    (void)world_time;
+    return changed;
+}
+
+core::Status AuthoritativeServer::chat(core::NetId client_id, std::string channel,
+                                       std::string message, simulation::WorldTick world_time) {
+    auto* player = find(client_id);
+    if (player == nullptr)
+        return core::Status::failure("authoritative_server.unknown_client",
+                                     "client is not connected");
+    auto status = logs_.append_chat(
+        player->profile.player_uuid, std::string(player->profile.current_display_name()), channel,
+        message, world_time, calendar(world_time), config_.server_session);
+    if (!status)
+        return status;
+    const auto payload =
+        std::string(player->profile.current_display_name()) + "|" + channel + "|" + message;
+    for (const auto& [_, recipient] : players_) {
+        status = host_.send_replication_message(
+            recipient.client_id, profile_message("chat", payload, next_outbound_sequence_++));
+        if (!status)
+            return status;
+    }
+    return core::Status::ok();
+}
+
+core::Status AuthoritativeServer::flush_dirty_profiles() {
+    for (auto& [_, player] : players_) {
+        if (!player.dirty)
+            continue;
+        auto status = profiles_.save(player.profile);
+        if (!status)
+            return status;
+        player.dirty = false;
+    }
+    return core::Status::ok();
+}
+
+core::Result<net::HostSessionTickResult>
+AuthoritativeServer::tick(const net::ServerCommandDispatcher& dispatcher,
+                          net::CommandExecutionContext context) {
+    auto result = host_.tick(dispatcher, context);
+    if (!result)
+        return result;
+    const auto world_time = context.world_state == nullptr ? simulation::WorldTick{0}
+                                                           : context.world_state->world_time();
+    for (const auto& report : result.value().command_reports) {
+        auto status = audit_command(report, world_time);
+        if (!status)
+            return core::Result<net::HostSessionTickResult>::failure(status.error().code,
+                                                                     status.error().message);
+    }
+    return result;
+}
+
+ConnectedPlayer* AuthoritativeServer::find(core::NetId client_id) noexcept {
+    auto found = players_.find(client_id.value());
+    return found == players_.end() ? nullptr : &found->second;
+}
+const ConnectedPlayer* AuthoritativeServer::find(core::NetId client_id) const noexcept {
+    auto found = players_.find(client_id.value());
+    return found == players_.end() ? nullptr : &found->second;
+}
+net::HostSession& AuthoritativeServer::host_session() noexcept {
+    return host_;
+}
+const player_profiles::FilePlayerProfileStore& AuthoritativeServer::profile_store() const noexcept {
+    return profiles_;
+}
+server_logs::FileServerLog& AuthoritativeServer::logs() noexcept {
+    return logs_;
+}
+
+void AuthoritativeServer::set_ban_validator(JoinBanValidator validator) {
+    config_.ban_validator = std::move(validator);
+}
+
+core::Status AuthoritativeServer::send_profile_snapshot(const ConnectedPlayer& player) {
+    auto status = host_.send_replication_message(
+        player.client_id,
+        profile_message("player_profile",
+                        player_profiles::PlayerProfileTextCodec::encode(player.profile),
+                        next_outbound_sequence_++));
+    if (!status)
+        return status;
+    return host_.send_replication_message(
+        player.client_id, profile_message("map_discovery",
+                                          player_profiles::MapDiscoveryTextCodec::encode(
+                                              player.profile.map_discovery),
+                                          next_outbound_sequence_++));
+}
+
+core::Status AuthoritativeServer::send_map_update(const ConnectedPlayer& player,
+                                                  std::string_view layer_id,
+                                                  player_profiles::MapDiscoveryRegionCoord region) {
+    const auto* source = player.profile.map_discovery.find_region(layer_id, region);
+    if (source == nullptr)
+        return core::Status::failure("authoritative_server.missing_map_region",
+                                     "discovery region is missing after update");
+    player_profiles::MapDiscovery delta;
+    auto status = delta.upsert_region(*source);
+    if (!status)
+        return status;
+    return host_.send_replication_message(
+        player.client_id, profile_message("map_discovery_delta",
+                                          player_profiles::MapDiscoveryTextCodec::encode(delta),
+                                          next_outbound_sequence_++));
+}
+
+std::string AuthoritativeServer::calendar(simulation::WorldTick world_time) const {
+    auto per_hour = config_.world_time.ticks_per_hour();
+    auto per_day = config_.world_time.ticks_per_day();
+    if (!per_hour || !per_day)
+        return "invalid";
+    const auto day = world_time / per_day.value() + 1;
+    const auto within_day = world_time % per_day.value();
+    const auto hour = within_day / per_hour.value();
+    const auto minute =
+        (within_day % per_hour.value()) * config_.world_time.minutes_per_hour / per_hour.value();
+    std::ostringstream output;
+    output << "Day " << day << ' ' << std::setw(2) << std::setfill('0') << hour << ':'
+           << std::setw(2) << minute;
+    return output.str();
+}
+
+core::Status AuthoritativeServer::audit_command(const net::HostSessionCommandReport& report,
+                                                simulation::WorldTick world_time) {
+    server_logs::ServerLogEntry entry;
+    entry.real_timestamp_utc = server_logs::utc_now_iso8601();
+    entry.world_time = world_time;
+    entry.world_calendar = calendar(world_time);
+    entry.event_type = report.success ? "server_command" : "server_command_failed";
+    entry.server_session = config_.server_session;
+    if (const auto* player = find(report.client_id)) {
+        entry.player_uuid = player->profile.player_uuid;
+        entry.display_name = std::string(player->profile.current_display_name());
+    }
+    entry.message = report.command_type;
+    entry.metadata.emplace("sequence", std::to_string(report.sequence));
+    if (!report.error_code.empty())
+        entry.metadata.emplace("error", report.error_code);
+    return logs_.append(server_logs::ServerLogCategory::audit, std::move(entry));
+}
+
+std::string hash_client_address(std::string_view address) {
+    return "stable64:" + core::stable_hash64_hex(address);
+}
+
+} // namespace heartstead::server

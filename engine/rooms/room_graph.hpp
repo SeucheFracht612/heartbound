@@ -42,6 +42,11 @@ struct RoomMetrics {
     bool cart_access = false;
     bool power_access = false;
     bool ward_coverage = false;
+    bool terrain_contact = false;
+    bool underground = false;
+    std::uint32_t weather_exposure_per_mille = 0;
+    std::uint32_t dampness_per_mille = 0;
+    std::uint32_t cleanliness_per_mille = 1000;
 };
 
 struct RoomRecord {

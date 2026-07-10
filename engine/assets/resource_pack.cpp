@@ -1,8 +1,10 @@
 #include "engine/assets/resource_pack.hpp"
 
+#include "engine/assets/asset_catalog.hpp"
 #include "engine/core/ids.hpp"
 
 #include <algorithm>
+#include <array>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -93,6 +95,103 @@ parse_flat_toml(const std::filesystem::path& file,
 
 } // namespace
 
+std::string_view shader_extension_point_name(ShaderExtensionPoint point) noexcept {
+    switch (point) {
+    case ShaderExtensionPoint::material_template:
+        return "material_template";
+    case ShaderExtensionPoint::foliage:
+        return "foliage";
+    case ShaderExtensionPoint::water:
+        return "water";
+    case ShaderExtensionPoint::ore_glow:
+        return "ore_glow";
+    case ShaderExtensionPoint::post_processing:
+        return "post_processing";
+    case ShaderExtensionPoint::fog_weather:
+        return "fog_weather";
+    case ShaderExtensionPoint::debug_overlay:
+        return "debug_overlay";
+    case ShaderExtensionPoint::sky:
+        return "sky";
+    }
+    return "unknown";
+}
+
+core::Result<ShaderExtensionPoint> shader_extension_point_from_name(std::string_view name) {
+    if (name == "material_template")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::material_template);
+    if (name == "foliage")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::foliage);
+    if (name == "water")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::water);
+    if (name == "ore_glow")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::ore_glow);
+    if (name == "post_processing")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::post_processing);
+    if (name == "fog_weather")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::fog_weather);
+    if (name == "debug_overlay")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::debug_overlay);
+    if (name == "sky")
+        return core::Result<ShaderExtensionPoint>::success(ShaderExtensionPoint::sky);
+    return core::Result<ShaderExtensionPoint>::failure(
+        "resource_pack.unknown_shader_extension",
+        "shader extension point is not controlled by the engine");
+}
+
+core::Status ResourcePackPolicy::validate_manifest(const ResourcePackManifest& manifest) {
+    if (!core::is_valid_namespace_id(manifest.id) || manifest.name.empty() ||
+        manifest.version.empty()) {
+        return core::Status::failure("resource_pack.invalid_manifest",
+                                     "resource pack id, name, and version are required");
+    }
+    if (manifest.gameplay_content) {
+        return core::Status::failure(
+            "resource_pack.gameplay_forbidden",
+            "resource packs cannot declare gameplay content; use a gameplay mod");
+    }
+    std::set<ShaderExtensionPoint> extensions;
+    for (const auto extension : manifest.shader_extensions) {
+        if (!extensions.insert(extension).second) {
+            return core::Status::failure("resource_pack.duplicate_shader_extension",
+                                         "shader extension points must be unique");
+        }
+    }
+    return core::Status::ok();
+}
+
+core::Status ResourcePackPolicy::validate_override(const ResourcePackManifest& manifest,
+                                                   const AssetRecord& asset) {
+    auto status = validate_manifest(manifest);
+    if (!status)
+        return status;
+    if (asset.source_kind != AssetSourceKind::resource_pack || asset.source_id != manifest.id) {
+        return core::Status::failure("resource_pack.asset_source_mismatch",
+                                     "asset does not belong to the resource pack being validated");
+    }
+    const auto path = asset.virtual_path.relative_path.generic_string();
+    constexpr std::array<std::string_view, 5> forbidden{{
+        "prototypes/",
+        "scripts/",
+        "migrations/",
+        "server/",
+        "worldgen/",
+    }};
+    if (std::ranges::any_of(
+            forbidden, [&path](std::string_view prefix) { return path.starts_with(prefix); })) {
+        return core::Status::failure(
+            "resource_pack.gameplay_path_forbidden",
+            "resource packs cannot override gameplay, server, migration, or worldgen data");
+    }
+    if (asset.kind == AssetKind::shader &&
+        (asset.source_path.extension() == ".spv" || path.contains("raw_vulkan"))) {
+        return core::Status::failure(
+            "resource_pack.raw_vulkan_forbidden",
+            "shader packs must use controlled engine shader extension points");
+    }
+    return core::Status::ok();
+}
+
 bool ResourcePackDiscoveryResult::has_errors() const noexcept {
     return std::ranges::any_of(diagnostics, [](const modding::ModDiagnostic& diagnostic) {
         return diagnostic.severity == modding::DiagnosticSeverity::error;
@@ -147,6 +246,29 @@ ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_roo
         manifest.version = required_value(values, "version", manifest_path, result.diagnostics);
         manifest.description = values.contains("description") ? values.at("description") : "";
         manifest.root = entry.path();
+        manifest.gameplay_content = values.contains("gameplay") && values.at("gameplay") == "true";
+        if (const auto shader_extensions = values.find("shader_extensions");
+            shader_extensions != values.end() && !shader_extensions->second.empty()) {
+            std::size_t start = 0;
+            while (start <= shader_extensions->second.size()) {
+                const auto end = shader_extensions->second.find(',', start);
+                const auto token =
+                    end == std::string::npos
+                        ? std::string_view(shader_extensions->second).substr(start)
+                        : std::string_view(shader_extensions->second).substr(start, end - start);
+                auto extension = shader_extension_point_from_name(trim(std::string(token)));
+                if (!extension) {
+                    result.diagnostics.push_back(
+                        modding::ModDiagnostic{modding::DiagnosticSeverity::error, manifest_path,
+                                               extension.error().code, extension.error().message});
+                } else {
+                    manifest.shader_extensions.push_back(extension.value());
+                }
+                if (end == std::string::npos)
+                    break;
+                start = end + 1;
+            }
+        }
 
         if (!core::is_valid_namespace_id(manifest.id)) {
             result.diagnostics.push_back(modding::ModDiagnostic{modding::DiagnosticSeverity::error,
@@ -164,6 +286,11 @@ ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_roo
         }
 
         if (!manifest.id.empty()) {
+            if (auto status = ResourcePackPolicy::validate_manifest(manifest); !status) {
+                result.diagnostics.push_back(
+                    modding::ModDiagnostic{modding::DiagnosticSeverity::error, manifest_path,
+                                           status.error().code, status.error().message});
+            }
             result.packs.push_back(std::move(manifest));
         }
     }
@@ -188,6 +315,11 @@ ResourcePackLoadPlanner::plan(std::vector<ResourcePackManifest> packs, std::uint
     plan.entries.reserve(packs.size());
     for (std::size_t index = 0; index < packs.size(); ++index) {
         auto& pack = packs[index];
+        auto policy_status = ResourcePackPolicy::validate_manifest(pack);
+        if (!policy_status) {
+            return core::Result<ResourcePackLoadPlan>::failure(policy_status.error().code,
+                                                               policy_status.error().message);
+        }
         if (!core::is_valid_namespace_id(pack.id)) {
             return core::Result<ResourcePackLoadPlan>::failure(
                 "resource_pack_load_plan.invalid_id",

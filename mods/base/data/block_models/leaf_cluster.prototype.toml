@@ -1,0 +1,8 @@
+kind = "block_model"
+id = "base:block_models/leaf_cluster"
+display_name = "Out-of-cell Leaf Cluster"
+model_type = "custom_voxel"
+boxes = "-0.35,-0.20,-0.35,1.35,1.25,1.35"
+render_bounds = "-0.35,-0.20,-0.35,1.35,1.25,1.35"
+neighbor_dependency_radius = "2"
+mesh_invalidation_radius = "2"

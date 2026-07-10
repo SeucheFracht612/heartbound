@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace heartstead::world {
 
@@ -16,6 +17,31 @@ struct TerrainGenerationConfig {
     // Authoritative vertical identity remains integral at far-world coordinates.
     std::int64_t base_surface_y = 0;
     std::uint16_t surface_variation = 0;
+    bool enable_caves = false;
+    std::uint16_t cave_frequency_per_mille = 0;
+    std::uint16_t cave_min_depth = 8;
+    std::uint16_t feature_frequency_per_mille = 1000;
+};
+
+enum class GeneratedWorldFeatureKind {
+    rich_block,
+    block_entity,
+    surface_object,
+    large_static_object,
+    resource_site,
+};
+
+struct GeneratedWorldFeature {
+    core::PrototypeId prototype_id;
+    GeneratedWorldFeatureKind kind = GeneratedWorldFeatureKind::rich_block;
+    BlockCoord position;
+    std::uint64_t deterministic_seed = 0;
+    std::string placement;
+};
+
+struct GeneratedChunk {
+    VoxelChunk chunk;
+    std::vector<GeneratedWorldFeature> features;
 };
 
 class DeterministicTerrainGenerator {
@@ -23,6 +49,9 @@ class DeterministicTerrainGenerator {
     [[nodiscard]] static core::Result<VoxelChunk>
     generate_chunk(ChunkCoord coord, const TerrainGenerationConfig& config,
                    const RegionGraph& regions, const VoxelPalette& palette);
+    [[nodiscard]] static core::Result<GeneratedChunk>
+    generate_chunk_with_features(ChunkCoord coord, const TerrainGenerationConfig& config,
+                                 const RegionGraph& regions, const VoxelPalette& palette);
 
     [[nodiscard]] static std::int64_t surface_height_at(const TerrainGenerationConfig& config,
                                                         std::int64_t global_x,

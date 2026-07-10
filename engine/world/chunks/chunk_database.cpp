@@ -1,6 +1,10 @@
 #include "engine/world/chunks/chunk_database.hpp"
 
+#include "engine/world/voxels/voxel_palette.hpp"
+
+#include <algorithm>
 #include <limits>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -141,6 +145,35 @@ core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, 
     }
     mark_neighbor_dirty_if_boundary(chunk_coord, voxel_coord, &dirty_regions);
     return core::Status::ok();
+}
+
+core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell,
+                                dirty::DirtyRegionTracker& dirty_regions,
+                                const VoxelPalette& palette) {
+    auto& chunk = get_or_create(chunk_coord);
+    auto previous = chunk.get(voxel_coord);
+    if (!previous) {
+        return core::Status::failure(previous.error().code, previous.error().message);
+    }
+    if (previous.value() == cell) {
+        return core::Status::ok();
+    }
+
+    auto status = chunk.set(voxel_coord, cell);
+    if (!status) {
+        return status;
+    }
+
+    edit_log_.push_back(VoxelEditRecord{chunk_coord, voxel_coord, previous.value(), cell});
+    status = mark_chunk_rebuild_regions(dirty_regions, chunk_coord, "voxel edit");
+    if (!status) {
+        return status;
+    }
+    mark_neighbor_dirty_if_boundary(chunk_coord, voxel_coord, &dirty_regions);
+
+    const auto radius = std::max(palette.mesh_invalidation_radius(previous.value()),
+                                 palette.mesh_invalidation_radius(cell));
+    return mark_rich_mesh_invalidation(chunk_coord, voxel_coord, radius, dirty_regions);
 }
 
 core::Status ChunkDatabase::apply_saved_edits(std::span<const VoxelEditRecord> edits) {
@@ -311,6 +344,70 @@ void ChunkDatabase::mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, Voxe
             }
         }
     }
+}
+
+core::Status
+ChunkDatabase::mark_rich_mesh_invalidation(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
+                                           std::uint16_t radius,
+                                           dirty::DirtyRegionTracker& dirty_regions) {
+    if (radius == 0) {
+        return core::Status::ok();
+    }
+
+    const auto floor_chunk_offset = [](std::int32_t cell) noexcept {
+        constexpr auto edge = static_cast<std::int32_t>(VoxelChunk::edge_length);
+        if (cell >= 0) {
+            return cell / edge;
+        }
+        return -((-cell + edge - 1) / edge);
+    };
+    const auto checked_offset = [](std::int64_t value,
+                                   std::int32_t offset) -> std::optional<std::int64_t> {
+        if (offset > 0 && value > std::numeric_limits<std::int64_t>::max() - offset) {
+            return std::nullopt;
+        }
+        if (offset < 0 && value < std::numeric_limits<std::int64_t>::min() - offset) {
+            return std::nullopt;
+        }
+        return value + offset;
+    };
+
+    const auto signed_radius = static_cast<std::int32_t>(radius);
+    const auto min_x = floor_chunk_offset(static_cast<std::int32_t>(voxel_coord.x) - signed_radius);
+    const auto max_x = floor_chunk_offset(static_cast<std::int32_t>(voxel_coord.x) + signed_radius);
+    const auto min_y = floor_chunk_offset(static_cast<std::int32_t>(voxel_coord.y) - signed_radius);
+    const auto max_y = floor_chunk_offset(static_cast<std::int32_t>(voxel_coord.y) + signed_radius);
+    const auto min_z = floor_chunk_offset(static_cast<std::int32_t>(voxel_coord.z) - signed_radius);
+    const auto max_z = floor_chunk_offset(static_cast<std::int32_t>(voxel_coord.z) + signed_radius);
+
+    for (auto z = min_z; z <= max_z; ++z) {
+        for (auto y = min_y; y <= max_y; ++y) {
+            for (auto x = min_x; x <= max_x; ++x) {
+                if (x == 0 && y == 0 && z == 0) {
+                    continue;
+                }
+                const auto neighbor_x = checked_offset(chunk_coord.x, x);
+                const auto neighbor_y = checked_offset(chunk_coord.y, y);
+                const auto neighbor_z = checked_offset(chunk_coord.z, z);
+                if (!neighbor_x || !neighbor_y || !neighbor_z) {
+                    continue;
+                }
+                const ChunkCoord neighbor{*neighbor_x, *neighbor_y, *neighbor_z};
+                auto* neighbor_chunk = find(neighbor);
+                if (neighbor_chunk == nullptr) {
+                    continue;
+                }
+                neighbor_chunk->mark_dirty(ChunkDirtyFlag::mesh);
+                auto status = dirty_regions.mark_single(dirty::DirtyRegionKind::chunk_mesh,
+                                                        dirty_coord_for_chunk(neighbor),
+                                                        "rich block mesh invalidation");
+                if (!status) {
+                    return status;
+                }
+            }
+        }
+    }
+    return core::Status::ok();
 }
 
 dirty::DirtyRegionCoord ChunkDatabase::dirty_coord_for_chunk(ChunkCoord coord) noexcept {

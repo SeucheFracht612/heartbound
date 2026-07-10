@@ -83,6 +83,12 @@ core::Status AssetCatalog::add(AssetRecord record) {
                                          "duplicate asset logical id in same source: " +
                                              record.logical_id);
         }
+        if (active.priority == record.priority && active.source_id != record.source_id) {
+            return core::Status::failure(
+                "asset_catalog.ambiguous_priority",
+                "asset override from different sources requires an explicit priority: " +
+                    record.logical_id);
+        }
     }
 
     records_.push_back(std::move(record));

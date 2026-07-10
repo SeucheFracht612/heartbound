@@ -1,4 +1,64 @@
-# Heartstead Engine v0.2 implementation audit
+# Heartstead Engine v0.2 implementation audit and closure report
+
+## Implementation closure — 2026-07-10
+
+The findings below are preserved as the pre-implementation baseline. The v0.2 engine pass has now
+closed the architectural gaps identified by that audit without adding gameplay. The repository now
+contains executable, persisted, server-authoritative foundations for the specification rather than
+documentation-only placeholders.
+
+Implemented after the baseline audit:
+
+- rich block prototypes with independent render, collision, selection, occupancy and occlusion
+  data; cube, cross-plane and external mesh models; out-of-cell bounds; prototype-defined halo and
+  invalidation radii; cross-chunk occlusion; rich mesh instances; leaf and ore proving content;
+- exact `i64` anchored transforms with normalized local offsets, camera-relative rendering and
+  local physics-island conversion, including far-world tests above the exact range of `double`;
+- stable persisted voxel palette manifests, recoverable missing-prototype objects with opaque saved
+  blobs, bounded corrupt-save decoding, and atomic `8 x 8 x 8` cubic region files;
+- an authoritative server lifecycle that validates content, owns UUID sessions, loads/saves player
+  profiles and discovery, sends profile/map state on join, flushes dirty profiles, writes chat before
+  broadcast, and logs joins, leaves and command audits with size/day rotation, lossless compressed
+  archives, an append-only rotated index and current-plus-archive queries;
+- one `u64 world_time`, lazy selective process evaluation triggers, sleep-based time advancement,
+  deterministic interruption policy, and a lazy fuel-buffer fire model with exposure, ember,
+  light, warmth, repel and cook-slot data;
+- server-owned workpiece blob/flaw/reveal masks, client-local planning separation, per-cell pattern
+  and decoration state, deterministic 2D/3D pattern rotations and mirroring, authoritative finish
+  validation, structural output metadata, byproduct hooks, versioned persistence and typed
+  replication that redacts unrevealed flaws;
+- green/dry/fired clay records, data-defined firing outcome tables, pit-firing state, molten draw
+  and pour windows, range-validated mould targets, mould careers/cooling data and wear-band copper
+  recycling foundations;
+- staged assembly ghost blueprints, spatial part layout metadata, named roles and ports,
+  construction stages, capabilities, process slots, controlled state transitions for drying and
+  maiden firing, persisted state/custom data and authoritative construction commands;
+- controlled resource/shader-pack extension declarations and policy checks that forbid gameplay
+  paths and raw Vulkan payloads, deterministic asset override priorities, new block-model/pattern/
+  fire prototype kinds and richer base-mod data;
+- deterministic cave/deposit generation and typed external worldgen feature output for rich blocks,
+  block entities, surface objects, large static objects and resource sites;
+- richer rooms and route-level logistics effects, an anchored physical-resource world database
+  with persistent/replicated typed entity state and runtime-local physics-body reconstruction,
+  a complete mandatory debug-overlay registry, an admin service for bans/kicks/roles/profile
+  import-export/map reset/backups, plus block-model and cubic-chunk inspection tools;
+- explicit chunk vertex layouts in the renderer/Vulkan pipeline and exact world-anchor plus
+  camera-relative draw bindings.
+
+Verification at closure: the GCC warning-as-error build succeeds and all 42 registered unit,
+foundation and smoke tests pass. Focused v0.2 executables cover coordinates, integrity,
+replication, profiles/logs, rich blocks, cubic regions, missing-prototype recovery, the
+authoritative server, lazy processes/fire, workpieces, assemblies and cross-cutting infrastructure.
+
+This is an engine architecture closure, not a claim that production content or gameplay is done.
+The Jolt integration, remote authentication/transport hardening, high-performance greedy meshing,
+full lighting/fluid simulation, production shader compilation, GPU presentation polish and game
+rules remain later backend/content work. Those do not require violating or replacing the v0.2
+storage, authority, time, modding or spatial contracts implemented here.
+
+---
+
+## Baseline audit (before implementation)
 
 Audit date: 2026-07-09  
 Scope: engine, game-runtime boundary, samples, tools, tests, base mod, resource packs, and
