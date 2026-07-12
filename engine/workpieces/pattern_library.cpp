@@ -193,7 +193,8 @@ pattern_definition_from_prototype(const modding::GenericPrototype& prototype) {
     auto rotate = boolean(prototype, "allow_rotate_y", true);
     auto mirror = boolean(prototype, "allow_mirror_x", false);
     auto strict = boolean(prototype, "strict", true);
-    if (!width || !height || !depth || !output || !rotate || !mirror || !strict)
+    auto negative = boolean(prototype, "negative_mould", false);
+    if (!width || !height || !depth || !output || !rotate || !mirror || !strict || !negative)
         return core::Result<PatternDefinition>::failure("pattern.invalid_fields",
                                                         "pattern fields are invalid");
     PatternDefinition pattern;
@@ -203,8 +204,7 @@ pattern_definition_from_prototype(const modding::GenericPrototype& prototype) {
     pattern.allow_rotate_y = rotate.value();
     pattern.allow_mirror_x = mirror.value();
     pattern.strict = strict.value();
-    if (const auto* negative = field(prototype, "negative_mould"))
-        pattern.negative_mould = *negative == "true";
+    pattern.negative_mould = negative.value();
     for (const auto encoded : split(*cells_value, ';')) {
         const auto parts = split(encoded, '|');
         if (parts.size() != 3)

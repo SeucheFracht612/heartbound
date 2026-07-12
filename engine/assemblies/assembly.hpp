@@ -32,6 +32,13 @@ struct AssemblyPort {
     networks::NetworkKind kind = networks::NetworkKind::logistics;
     core::SaveId source_build_piece_id;
     std::uint32_t capacity = 1;
+    world::BlockCoord relative_coord;
+
+    AssemblyPort() = default;
+    AssemblyPort(std::string port_name, networks::NetworkKind network_kind, core::SaveId source_id,
+                 std::uint32_t port_capacity, world::BlockCoord relative = {})
+        : name(std::move(port_name)), kind(network_kind), source_build_piece_id(source_id),
+          capacity(port_capacity), relative_coord(relative) {}
 };
 
 struct AssemblyDefinition {
@@ -55,6 +62,13 @@ struct AssemblyPart {
     std::string name;
     core::SaveId build_piece_id;
     core::PrototypeId prototype_id;
+    world::BlockCoord relative_coord;
+
+    AssemblyPart() = default;
+    AssemblyPart(std::string part_name, core::SaveId piece_id, core::PrototypeId prototype,
+                 world::BlockCoord relative = {})
+        : name(std::move(part_name)), build_piece_id(piece_id), prototype_id(std::move(prototype)),
+          relative_coord(relative) {}
 };
 
 enum class AssemblyState : std::uint8_t {
@@ -84,6 +98,7 @@ struct AssemblyRecord {
     std::vector<core::ProcessId> process_slots;
     std::string failure_reason;
     std::string custom_state;
+    world::BlockCoord root_coord;
 
     [[nodiscard]] core::Status validate_identity() const;
     [[nodiscard]] core::Status validate_record() const;

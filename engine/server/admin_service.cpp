@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <limits>
 #include <ranges>
 #include <set>
 #include <utility>
@@ -9,6 +10,8 @@
 namespace heartstead::server {
 
 namespace {
+
+constexpr std::uintmax_t max_profile_import_bytes = 4U * 1024U * 1024U;
 
 [[nodiscard]] bool safe_text(std::string_view value) noexcept {
     return value.find_first_of("\r\n|") == std::string_view::npos;
@@ -45,8 +48,15 @@ core::Status ServerBanRecord::validate() const {
 
 ServerAdminService::ServerAdminService(AdminServiceConfig config, AuthoritativeServer& server)
     : config_(std::move(config)), server_(server), profiles_(config_.world_root) {
-    if (config_.backup_root.empty())
+    if (config_.backup_root.empty()) {
         config_.backup_root = config_.server_root / "backups";
+        const auto world = config_.world_root.lexically_normal();
+        const auto backup = config_.backup_root.lexically_normal();
+        const auto relative = backup.lexically_relative(world);
+        if (!relative.empty() && *relative.begin() != "..")
+            config_.backup_root = config_.world_root.parent_path() /
+                                  (config_.world_root.filename().string() + "_backups");
+    }
     server_.set_ban_validator([this](const auto& uuid, std::string_view address_hash) {
         return is_banned(uuid, address_hash);
     });
@@ -61,7 +71,7 @@ std::filesystem::path ServerAdminService::ban_file() const {
 }
 
 core::Status ServerAdminService::load_bans() {
-    bans_.clear();
+    std::vector<ServerBanRecord> loaded;
     std::ifstream input(ban_file());
     if (!input) {
         if (!std::filesystem::exists(ban_file()))
@@ -88,8 +98,9 @@ core::Status ServerAdminService::load_bans() {
         auto status = record.validate();
         if (!status)
             return status;
-        bans_.push_back(std::move(record));
+        loaded.push_back(std::move(record));
     }
+    bans_ = std::move(loaded);
     return core::Status::ok();
 }
 
@@ -173,8 +184,10 @@ core::Status ServerAdminService::ban(core::NetId client_id, std::string reason,
         return status;
     bans_.push_back(record);
     status = save_bans();
-    if (!status)
+    if (!status) {
+        bans_.pop_back();
         return status;
+    }
     status = audit("BAN", actor, world_time,
                    {{"player_uuid", record.player_uuid->value()}, {"reason", record.reason}});
     if (!status)
@@ -185,12 +198,15 @@ core::Status ServerAdminService::ban(core::NetId client_id, std::string reason,
 core::Status ServerAdminService::unban(const player_profiles::PlayerUuid& uuid,
                                        simulation::WorldTick world_time, std::string actor) {
     const auto old_size = bans_.size();
+    const auto old_bans = bans_;
     std::erase_if(bans_, [&uuid](const auto& record) { return record.player_uuid == uuid; });
     if (old_size == bans_.size())
         return core::Status::failure("admin.ban_not_found", "player is not banned");
     auto status = save_bans();
-    if (!status)
+    if (!status) {
+        bans_ = old_bans;
         return status;
+    }
     return audit("UNBAN", std::move(actor), world_time, {{"player_uuid", uuid.value()}});
 }
 
@@ -199,13 +215,20 @@ core::Status ServerAdminService::grant_role(const player_profiles::PlayerUuid& u
                                             std::string actor) {
     if (!core::is_valid_local_id(role))
         return core::Status::failure("admin.invalid_role", "role must be a local id");
-    auto profile = profiles_.load(uuid);
+    auto profile =
+        server_.find(uuid) != nullptr
+            ? core::Result<player_profiles::PlayerProfile>::success(server_.find(uuid)->profile)
+            : profiles_.load(uuid);
     if (!profile)
         return core::Status::failure(profile.error().code, profile.error().message);
-    if (!std::ranges::contains(profile.value().roles, role))
-        profile.value().roles.push_back(role);
+    if (std::ranges::contains(profile.value().roles, role))
+        return core::Status::failure("admin.role_already_granted", "player already has role");
+    if (profile.value().revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("admin.profile_revision_overflow",
+                                     "player profile revision cannot overflow");
+    profile.value().roles.push_back(role);
     ++profile.value().revision;
-    auto status = profiles_.save(profile.value());
+    auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
     return audit("PERMISSION_GRANT", std::move(actor), world_time,
@@ -215,14 +238,20 @@ core::Status ServerAdminService::grant_role(const player_profiles::PlayerUuid& u
 core::Status ServerAdminService::revoke_role(const player_profiles::PlayerUuid& uuid,
                                              std::string_view role,
                                              simulation::WorldTick world_time, std::string actor) {
-    auto profile = profiles_.load(uuid);
+    auto profile =
+        server_.find(uuid) != nullptr
+            ? core::Result<player_profiles::PlayerProfile>::success(server_.find(uuid)->profile)
+            : profiles_.load(uuid);
     if (!profile)
         return core::Status::failure(profile.error().code, profile.error().message);
     const auto removed = std::erase(profile.value().roles, role);
     if (removed == 0)
         return core::Status::failure("admin.role_not_found", "player does not have role");
+    if (profile.value().revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("admin.profile_revision_overflow",
+                                     "player profile revision cannot overflow");
     ++profile.value().revision;
-    auto status = profiles_.save(profile.value());
+    auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
     return audit("PERMISSION_REVOKE", std::move(actor), world_time,
@@ -232,9 +261,14 @@ core::Status ServerAdminService::revoke_role(const player_profiles::PlayerUuid& 
 core::Status ServerAdminService::reset_map(const player_profiles::PlayerUuid& uuid,
                                            std::optional<std::string_view> layer,
                                            simulation::WorldTick world_time, std::string actor) {
-    auto profile = profiles_.load(uuid);
+    auto profile =
+        server_.find(uuid) != nullptr
+            ? core::Result<player_profiles::PlayerProfile>::success(server_.find(uuid)->profile)
+            : profiles_.load(uuid);
     if (!profile)
         return core::Status::failure(profile.error().code, profile.error().message);
+    if (layer && !core::is_valid_local_id(*layer))
+        return core::Status::failure("admin.invalid_map_layer", "map layer id is invalid");
     std::size_t removed_regions = 0;
     if (layer)
         removed_regions = profile.value().map_discovery.clear_layer(*layer);
@@ -242,8 +276,13 @@ core::Status ServerAdminService::reset_map(const player_profiles::PlayerUuid& uu
         removed_regions = profile.value().map_discovery.region_count();
         profile.value().map_discovery.clear();
     }
+    if (removed_regions == 0)
+        return core::Status::failure("admin.map_already_empty", "map selection is already empty");
+    if (profile.value().revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("admin.profile_revision_overflow",
+                                     "player profile revision cannot overflow");
     ++profile.value().revision;
-    auto status = profiles_.save(profile.value());
+    auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
     return audit("MAP_RESET", std::move(actor), world_time,
@@ -256,7 +295,10 @@ core::Status ServerAdminService::export_profile(const player_profiles::PlayerUui
                                                 const std::filesystem::path& destination,
                                                 simulation::WorldTick world_time,
                                                 std::string actor) const {
-    auto profile = profiles_.load(uuid);
+    auto profile =
+        server_.find(uuid) != nullptr
+            ? core::Result<player_profiles::PlayerProfile>::success(server_.find(uuid)->profile)
+            : profiles_.load(uuid);
     if (!profile)
         return core::Status::failure(profile.error().code, profile.error().message);
     std::ofstream output(destination, std::ios::trunc);
@@ -273,6 +315,11 @@ core::Status ServerAdminService::export_profile(const player_profiles::PlayerUui
 core::Status ServerAdminService::import_profile(const std::filesystem::path& source,
                                                 simulation::WorldTick world_time,
                                                 std::string actor) {
+    std::error_code error;
+    const auto size = std::filesystem::file_size(source, error);
+    if (error || size > max_profile_import_bytes)
+        return core::Status::failure("admin.profile_import_too_large",
+                                     "profile import exceeds its size limit");
     std::ifstream input(source);
     if (!input)
         return core::Status::failure("admin.profile_import_failed",
@@ -281,12 +328,12 @@ core::Status ServerAdminService::import_profile(const std::filesystem::path& sou
     auto profile = player_profiles::PlayerProfileTextCodec::decode(text);
     if (!profile)
         return core::Status::failure(profile.error().code, profile.error().message);
-    auto status = profiles_.save(profile.value());
+    const auto uuid = profile.value().player_uuid;
+    auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
     return audit("PROFILE_IMPORT", std::move(actor), world_time,
-                 {{"player_uuid", profile.value().player_uuid.value()},
-                  {"source", source.generic_string()}});
+                 {{"player_uuid", uuid.value()}, {"source", source.generic_string()}});
 }
 
 core::Result<std::filesystem::path>
@@ -299,6 +346,12 @@ ServerAdminService::create_backup(std::string label, simulation::WorldTick world
     auto timestamp = server_logs::utc_now_iso8601();
     std::ranges::replace(timestamp, ':', '-');
     const auto destination = config_.backup_root / (timestamp + "_" + label);
+    const auto relative = config_.backup_root.lexically_normal().lexically_relative(
+        config_.world_root.lexically_normal());
+    if (!relative.empty() && *relative.begin() != "..") {
+        return core::Result<std::filesystem::path>::failure(
+            "admin.backup_inside_world", "backup root must not be inside the world being copied");
+    }
     std::error_code error;
     std::filesystem::create_directories(config_.backup_root, error);
     if (!error) {

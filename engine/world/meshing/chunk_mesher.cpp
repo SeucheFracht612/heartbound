@@ -74,8 +74,7 @@ struct CellModelView {
     };
 }
 
-[[nodiscard]] constexpr std::int32_t floor_div(std::int32_t value,
-                                               std::int32_t divisor) noexcept {
+[[nodiscard]] constexpr std::int32_t floor_div(std::int32_t value, std::int32_t divisor) noexcept {
     auto quotient = value / divisor;
     if (value % divisor < 0) {
         --quotient;
@@ -83,8 +82,7 @@ struct CellModelView {
     return quotient;
 }
 
-[[nodiscard]] constexpr std::int32_t floor_mod(std::int32_t value,
-                                               std::int32_t divisor) noexcept {
+[[nodiscard]] constexpr std::int32_t floor_mod(std::int32_t value, std::int32_t divisor) noexcept {
     auto remainder = value % divisor;
     if (remainder < 0) {
         remainder += divisor;
@@ -103,8 +101,7 @@ struct CellModelView {
 }
 
 [[nodiscard]] std::optional<RelativeCellAddress>
-resolve_relative_cell(ChunkCoord center, std::int32_t x, std::int32_t y,
-                      std::int32_t z) noexcept {
+resolve_relative_cell(ChunkCoord center, std::int32_t x, std::int32_t y, std::int32_t z) noexcept {
     constexpr auto edge = static_cast<std::int32_t>(VoxelChunk::edge_length);
     const auto chunk_dx = floor_div(x, edge);
     const auto chunk_dy = floor_div(y, edge);
@@ -206,16 +203,15 @@ void add_quad(ChunkMesh& mesh, const std::array<math::Vec3f, 4>& positions, math
               VoxelCell cell) {
     const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
     constexpr std::array<std::pair<float, float>, 4> uvs{
-        std::pair{0.0F, 0.0F}, std::pair{1.0F, 0.0F}, std::pair{1.0F, 1.0F},
-        std::pair{0.0F, 1.0F}};
+        std::pair{0.0F, 0.0F}, std::pair{1.0F, 0.0F}, std::pair{1.0F, 1.0F}, std::pair{0.0F, 1.0F}};
     for (std::size_t index = 0; index < positions.size(); ++index) {
         include_point(mesh, positions[index]);
         mesh.vertices.push_back(ChunkMeshVertex{positions[index], normal, uvs[index].first,
                                                 uvs[index].second, cell.type, cell.light,
                                                 cell.state_bits});
     }
-    mesh.indices.insert(mesh.indices.end(), {base_index, base_index + 1, base_index + 2,
-                                             base_index, base_index + 2, base_index + 3});
+    mesh.indices.insert(mesh.indices.end(), {base_index, base_index + 1, base_index + 2, base_index,
+                                             base_index + 2, base_index + 3});
     ++mesh.face_count;
 }
 
@@ -232,10 +228,10 @@ void add_box(ChunkMesh& mesh, const ChunkMeshingContext& context, VoxelCoord coo
                              static_cast<float>(coord.z)};
     for (const auto& face : face_templates()) {
         if (box_face_is_on_cell_boundary(box, face.direction)) {
-            const auto neighbor = query_cell(
-                context, static_cast<std::int32_t>(coord.x) + face.offset_x,
-                static_cast<std::int32_t>(coord.y) + face.offset_y,
-                static_cast<std::int32_t>(coord.z) + face.offset_z);
+            const auto neighbor =
+                query_cell(context, static_cast<std::int32_t>(coord.x) + face.offset_x,
+                           static_cast<std::int32_t>(coord.y) + face.offset_y,
+                           static_cast<std::int32_t>(coord.z) + face.offset_z);
             if (is_full_occluder(neighbor)) {
                 continue;
             }
@@ -270,8 +266,7 @@ void add_rich_instance(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell,
                        const BlockModelDefinition& model) {
     const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
                              static_cast<float>(coord.z)};
-    const math::Bounds3f bounds{origin + model.render_bounds.min,
-                                origin + model.render_bounds.max};
+    const math::Bounds3f bounds{origin + model.render_bounds.min, origin + model.render_bounds.max};
     if (mesh.vertices.empty() && mesh.rich_instances.empty()) {
         mesh.local_bounds = bounds;
     } else {
@@ -291,8 +286,8 @@ void add_rich_instance(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell,
             for (std::uint16_t x = 0; x < VoxelChunk::edge_length; ++x) {
                 const auto cell = context.chunk.get({x, y, z});
                 if (cell && !cell.value().is_air()) {
-                    required = std::max(
-                        required, context.palette->neighbor_dependency_radius(cell.value()));
+                    required = std::max(required,
+                                        context.palette->neighbor_dependency_radius(cell.value()));
                 }
             }
         }
@@ -372,6 +367,11 @@ core::Result<ChunkMesh> ChunkMesher::build_surface_mesh(const ChunkMeshingContex
         return core::Result<ChunkMesh>::failure(
             "chunk_mesh.insufficient_halo",
             "block models in the chunk require a larger neighbor halo");
+    }
+    if (mesh.required_halo_radius > 0 && context.chunks == nullptr) {
+        return core::Result<ChunkMesh>::failure(
+            "chunk_mesh.missing_halo_source",
+            "palette-driven meshing requires a chunk database for its neighbor halo");
     }
 
     for (std::uint16_t z = 0; z < VoxelChunk::edge_length; ++z) {

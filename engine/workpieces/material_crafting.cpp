@@ -93,6 +93,9 @@ core::Status MoltenItemRecord::validate() const {
         return core::Status::failure("casting.invalid_held_state",
                                      "held molten item requires a player and pour deadline");
     }
+    if (state != MoltenState::held_for_pour && (held_by.is_valid() || pour_window_ends_at != 0))
+        return core::Status::failure("casting.invalid_unheld_state",
+                                     "only held molten items may retain holder or pour deadline");
     return core::Status::ok();
 }
 
@@ -105,31 +108,48 @@ core::Status MouldRecord::validate() const {
         return core::Status::failure("casting.invalid_mould_career",
                                      "redware mould cannot have more than one use");
     }
+    if (contained_material_units == 0 && cooling_until != 0)
+        return core::Status::failure("casting.invalid_mould_cooling",
+                                     "empty mould cannot retain a cooling deadline");
     return core::Status::ok();
 }
 
 core::Status CastingRuntime::draw_for_pour(MoltenItemRecord& molten, core::NetId player,
                                            simulation::WorldTick world_time,
                                            simulation::WorldTick pour_window_ticks) {
+    auto status = molten.validate();
+    if (!status)
+        return status;
     if (molten.state != MoltenState::molten || !player.is_valid() || pour_window_ticks == 0 ||
         world_time > std::numeric_limits<simulation::WorldTick>::max() - pour_window_ticks) {
         return core::Status::failure("casting.cannot_draw",
                                      "molten item cannot enter a held pour window");
     }
-    molten.state = MoltenState::held_for_pour;
-    molten.held_by = player;
-    molten.pour_window_ends_at = world_time + pour_window_ticks;
-    return core::Status::ok();
+    auto staged = molten;
+    staged.state = MoltenState::held_for_pour;
+    staged.held_by = player;
+    staged.pour_window_ends_at = world_time + pour_window_ticks;
+    status = staged.validate();
+    if (status)
+        molten = staged;
+    return status;
 }
 
 core::Status CastingRuntime::pour(MoltenItemRecord& molten, MouldRecord& mould, core::NetId player,
                                   simulation::WorldTick world_time,
                                   simulation::WorldTick cooling_ticks,
                                   double maximum_distance_blocks) {
+    auto status = molten.validate();
+    if (!status)
+        return status;
+    status = mould.validate();
+    if (!status)
+        return status;
     if (molten.state != MoltenState::held_for_pour || molten.held_by != player ||
         world_time > molten.pour_window_ends_at || cooling_ticks == 0 ||
-        mould.contained_material_units != 0 || mould.uses_remaining == 0 ||
-        !std::isfinite(maximum_distance_blocks) || maximum_distance_blocks <= 0.0) {
+        mould.contained_material_units != 0 || mould.cooling_until > world_time ||
+        mould.uses_remaining == 0 || !std::isfinite(maximum_distance_blocks) ||
+        maximum_distance_blocks <= 0.0) {
         return core::Status::failure("casting.invalid_pour",
                                      "pour window or mould state is invalid");
     }
@@ -146,13 +166,23 @@ core::Status CastingRuntime::pour(MoltenItemRecord& molten, MouldRecord& mould, 
         return core::Status::failure("casting.cooling_overflow",
                                      "mould cooling deadline overflows world time");
     }
-    mould.contained_material_units = molten.material_units;
-    mould.cooling_until = world_time + cooling_ticks;
-    molten.state = MoltenState::poured;
-    molten.held_by = {};
-    molten.pour_window_ends_at = 0;
-    if (mould.career == MouldCareer::redware_single_use)
-        --mould.uses_remaining;
+    auto staged_molten = molten;
+    auto staged_mould = mould;
+    staged_mould.contained_material_units = staged_molten.material_units;
+    staged_mould.cooling_until = world_time + cooling_ticks;
+    staged_molten.state = MoltenState::poured;
+    staged_molten.held_by = {};
+    staged_molten.pour_window_ends_at = 0;
+    if (staged_mould.career == MouldCareer::redware_single_use)
+        --staged_mould.uses_remaining;
+    status = staged_molten.validate();
+    if (!status)
+        return status;
+    status = staged_mould.validate();
+    if (!status)
+        return status;
+    molten = staged_molten;
+    mould = staged_mould;
     return core::Status::ok();
 }
 
@@ -167,7 +197,8 @@ core::Result<std::uint64_t> CastingRuntime::recycle_units(std::uint64_t original
     case ToolWearBand::lightly_used:
         return core::Result<std::uint64_t>::success(original_units);
     case ToolWearBand::worn:
-        return core::Result<std::uint64_t>::success(original_units * 3U / 4U);
+        return core::Result<std::uint64_t>::success((original_units / 4U) * 3U +
+                                                    ((original_units % 4U) * 3U) / 4U);
     case ToolWearBand::exhausted:
         return core::Result<std::uint64_t>::success(original_units / 2U);
     }

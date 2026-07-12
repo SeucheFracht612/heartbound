@@ -179,14 +179,21 @@ const ChunkRegionRecord* ChunkRegionFile::find(ChunkRegionLocalCoord local) cons
 }
 
 core::Status ChunkRegionFile::upsert(ChunkRegionRecord record) {
-    for (auto& existing : chunks) {
+    ChunkRegionFile staged = *this;
+    for (auto& existing : staged.chunks) {
         if (existing.local == record.local) {
             existing = std::move(record);
-            return validate();
+            auto status = staged.validate();
+            if (status)
+                *this = std::move(staged);
+            return status;
         }
     }
-    chunks.push_back(std::move(record));
-    return validate();
+    staged.chunks.push_back(std::move(record));
+    auto status = staged.validate();
+    if (status)
+        *this = std::move(staged);
+    return status;
 }
 
 core::Result<std::vector<std::uint8_t>>
@@ -212,7 +219,12 @@ ChunkRegionBinaryCodec::encode(const ChunkRegionFile& region) {
         writer.u64(payload_hash(chunk.encoded_chunk));
         writer.text(chunk.encoded_chunk);
     }
-    return core::Result<std::vector<std::uint8_t>>::success(std::move(writer).take());
+    auto bytes = std::move(writer).take();
+    if (bytes.size() > max_region_file_bytes) {
+        return core::Result<std::vector<std::uint8_t>>::failure(
+            "chunk_region.file_too_large", "encoded chunk region exceeds safety limit");
+    }
+    return core::Result<std::vector<std::uint8_t>>::success(std::move(bytes));
 }
 
 core::Result<ChunkRegionFile> ChunkRegionBinaryCodec::decode(std::span<const std::uint8_t> bytes) {
@@ -284,14 +296,19 @@ core::Status ChunkRegionFileStore::save(const ChunkRegionFile& region) const {
     const auto temporary = target.string() + ".tmp";
     {
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output)
+        if (!output) {
+            std::filesystem::remove(temporary, error);
             return core::Status::failure("chunk_region.open_failed",
                                          "failed to open temporary region file");
+        }
         output.write(reinterpret_cast<const char*>(encoded.value().data()),
                      static_cast<std::streamsize>(encoded.value().size()));
-        if (!output)
+        if (!output) {
+            output.close();
+            std::filesystem::remove(temporary, error);
             return core::Status::failure("chunk_region.write_failed",
                                          "failed to write region file");
+        }
     }
     std::filesystem::rename(temporary, target, error);
     if (error) {

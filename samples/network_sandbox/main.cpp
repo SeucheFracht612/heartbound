@@ -105,7 +105,7 @@ int main() {
         payload_status = payload.set("voxel", "2|3|4");
     }
     if (payload_status) {
-        payload_status = payload.set("cell", "7|0");
+        payload_status = payload.set("prototype", "base:voxels/clay");
     }
     if (!payload_status) {
         core::log(core::LogLevel::error, payload_status.error().message);
@@ -144,6 +144,19 @@ int main() {
 
     net::CommandExecutionContext context;
     context.world_state = &world_state;
+    world::VoxelPalette voxel_palette;
+    world::VoxelDefinition clay;
+    clay.type = 7;
+    clay.prototype_id = core::PrototypeId::parse("base:voxels/clay").value();
+    clay.display_name = "Clay";
+    clay.terrain_material = "clay";
+    clay.mining_tool = "shovel";
+    auto palette_status = voxel_palette.add(std::move(clay));
+    if (!palette_status) {
+        core::log(core::LogLevel::error, palette_status.error().message);
+        return 1;
+    }
+    context.voxel_palette = &voxel_palette;
     auto tick = host.tick(dispatcher, context);
     if (!tick) {
         core::log(core::LogLevel::error, tick.error().message);

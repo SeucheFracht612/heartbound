@@ -2,6 +2,9 @@
 #include "engine/assets/resource_pack.hpp"
 #include "engine/debug/debug_overlay.hpp"
 #include "engine/entities/physical_resource.hpp"
+#include "engine/net/replication.hpp"
+#include "engine/net/server_command.hpp"
+#include "engine/net/transport_packet.hpp"
 #include "engine/networks/spatial_network.hpp"
 #include "engine/renderer/world_render_list.hpp"
 #include "engine/server/admin_service.hpp"
@@ -211,6 +214,85 @@ void test_physical_resource_save_and_replication_shape() {
     assert(applied && client.physical_resources().find(resource.resource_id) != nullptr);
 }
 
+void test_failed_commands_restore_world_and_external_ids() {
+    using namespace heartstead;
+    world::WorldState state;
+    save::SaveIdAllocator ids(50);
+    net::ServerCommandDispatcher dispatcher;
+    assert(dispatcher.register_command(
+        {"test.fail_transaction", true, true,
+         [](const net::CommandEnvelope&, const net::CommandExecutionContext& context,
+            world::WorldOperation& operation) {
+             assert(context.world_state != nullptr && context.save_ids != nullptr);
+             assert(context.world_state->advance_world_time(10));
+             assert(operation.reserve_save_id(*context.save_ids));
+             assert(operation.record_mutation("staged mutation"));
+             return core::Status::failure("test.failure", "intentional failure");
+         }}));
+    net::CommandExecutionContext context;
+    context.world_state = &state;
+    context.save_ids = &ids;
+    auto result = dispatcher.dispatch(
+        {1, core::NetId::from_value(1), "test.fail_transaction", {}, 0}, context);
+    assert(!result && state.world_time() == 0);
+    assert(ids.peek_next() == core::SaveId::from_value(50));
+}
+
+void test_fragment_reassembly_has_aggregate_budget() {
+    using namespace heartstead::net;
+    TransportPacketFragmentCodecConfig config;
+    config.max_packet_bytes = 16;
+    config.max_pending_packets = 1;
+    config.max_pending_packet_bytes = 16;
+    TransportPacketReassembler reassembler(config);
+    TransportPacketFragment first{1, 0, 2, 16, "12345678"};
+    TransportPacketFragment second{2, 0, 2, 16, "abcdefgh"};
+    assert(reassembler.accept_fragment(first));
+    auto rejected = reassembler.accept_fragment(second);
+    assert(!rejected && rejected.error().code == "transport_fragment.pending_budget_exceeded");
+    auto mismatched = first;
+    mismatched.total_packet_bytes = 15;
+    auto mismatch_result = reassembler.accept_fragment(mismatched);
+    assert(!mismatch_result &&
+           mismatch_result.error().code == "transport_fragment.mismatched_packet_metadata");
+    assert(reassembler.accept_fragment(second));
+}
+
+void test_asset_namespaces_do_not_collide() {
+    using namespace heartstead;
+    assets::AssetCatalog catalog;
+    const auto add = [&catalog](std::string logical, std::string name_space) {
+        auto path = assets::VirtualPath::parse(logical);
+        assert(path);
+        assets::AssetRecord record;
+        record.logical_id = logical;
+        record.virtual_path = path.value();
+        record.source_id = std::move(name_space);
+        record.kind = assets::AssetKind::texture;
+        return catalog.add(std::move(record));
+    };
+    assert(add("base:textures/shared.png", "base"));
+    assert(add("other:textures/shared.png", "other"));
+    assert(catalog.active_count() == 2);
+    assert(catalog.find_active("base:textures/shared.png") != nullptr);
+    assert(catalog.find_active("other:textures/shared.png") != nullptr);
+}
+
+void test_replication_codec_rejects_trailing_data() {
+    using namespace heartstead;
+    net::ReplicationBatch batch;
+    batch.command_sequence = 7;
+    batch.replication_sequence = 9;
+    batch.source_client_id = core::NetId::from_value(3);
+    batch.command_type = "world.set_voxel";
+    batch.events.push_back(
+        world::OperationEvent{"world.voxel_changed", core::SaveId::from_value(4), "changed"});
+    const auto encoded = net::ReplicationTextCodec::encode(batch);
+    assert(net::ReplicationTextCodec::decode(encoded));
+    auto trailing = net::ReplicationTextCodec::decode(encoded + "sequence=10\n");
+    assert(!trailing && trailing.error().code == "replication.trailing_data");
+}
+
 } // namespace
 
 int main() {
@@ -223,4 +305,8 @@ int main() {
     test_camera_relative_draw_anchor();
     test_cubic_worldgen_caves_and_external_features();
     test_physical_resource_save_and_replication_shape();
+    test_failed_commands_restore_world_and_external_ids();
+    test_fragment_reassembly_has_aggregate_budget();
+    test_asset_namespaces_do_not_collide();
+    test_replication_codec_rejects_trailing_data();
 }

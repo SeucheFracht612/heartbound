@@ -7,6 +7,7 @@
 #include "engine/world/world_state.hpp"
 
 #include <cassert>
+#include <limits>
 #include <string>
 
 namespace {
@@ -42,6 +43,15 @@ void test_processes_evaluate_lazily_from_world_ticks() {
     processes::ProcessRuntime::interrupt(*database.find(core::ProcessId::from_value(1)),
                                          "weather_changed");
     assert(database.find(core::ProcessId::from_value(1))->accrued_work_ticks == 0);
+
+    auto huge = processes::ProcessRuntime::create(
+        core::ProcessId::from_value(3), core::SaveId::from_value(30), id("base:processes/drying"),
+        0, std::numeric_limits<simulation::WorldTick>::max());
+    assert(huge);
+    assert(processes::ProcessRuntime::advance(
+        huge.value(), std::numeric_limits<simulation::WorldTick>::max(), {1000, 1000, 500}));
+    assert(huge.value().accrued_work_ticks ==
+           std::numeric_limits<simulation::WorldTick>::max() / 2U);
 }
 
 void test_sleep_advances_only_authoritative_world_time() {

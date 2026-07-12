@@ -50,6 +50,37 @@ foundation and smoke tests pass. Focused v0.2 executables cover coordinates, int
 replication, profiles/logs, rich blocks, cubic regions, missing-prototype recovery, the
 authoritative server, lazy processes/fire, workpieces, assemblies and cross-cutting infrastructure.
 
+## Engine-readiness hardening follow-up — 2026-07-12
+
+A second implementation pass closed the remaining correctness risks exposed by this report before
+gameplay work begins:
+
+- mutating server commands now execute against a staged world and restore external ID allocators on
+  every failure path; chunk mutations prevalidate fallible work without invalidating stable chunk
+  references;
+- voxel commands now carry stable `namespace:prototype` intent while the server derives runtime
+  palette cells and light; asset and cooked-asset identities retain their VFS namespace, and
+  resource packs explicitly name the namespace they override;
+- process, simulation-LOD and replication-interest time is one lossless `u64` world-tick domain,
+  with checked large-delta arithmetic and no signed narrowing;
+- assembly records persist and validate root/relative part/port coordinates, state consistency and
+  spatial layout; workpiece measurements, hidden-mask padding, casting, fire and region mutations
+  now validate before commit;
+- profile/map pairs commit as one directory generation, live admin edits update connected profiles,
+  backups cannot recurse into the world, and ban/profile mutations roll back on persistence errors;
+- save, profile, workpiece, command, transport-fragment, log, resource-pack and cooked-manifest
+  readers enforce byte/count/allocation budgets; corrupt trailing data and unknown/duplicate fields
+  fail closed;
+- Vulkan capability reporting now describes active features instead of requested ones, and block
+  bounds/halo declarations are validated against their actual geometric reach.
+
+The general bug pass additionally fixed stale-reference invalidation, resource-pack override
+classification, profile and assembly revision/state overflow edges, aggregate fragmented-packet and
+log-query memory growth, transactional region upserts, and restart-safe log archive naming.
+
+Verification for this follow-up: all 42 registered targets pass under the GCC warnings-as-errors
+preset and under Clang AddressSanitizer/UndefinedBehaviorSanitizer. No gameplay feature was added.
+
 This is an engine architecture closure, not a claim that production content or gameplay is done.
 The Jolt integration, remote authentication/transport hardening, high-performance greedy meshing,
 full lighting/fluid simulation, production shader compilation, GPU presentation polish and game

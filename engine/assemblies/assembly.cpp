@@ -1,6 +1,7 @@
 #include "engine/assemblies/assembly.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <ranges>
 #include <set>
@@ -19,6 +20,20 @@ namespace {
     case networks::NetworkKind::smoke_ventilation:
     case networks::NetworkKind::water:
     case networks::NetworkKind::logistics:
+        return true;
+    }
+    return false;
+}
+
+[[nodiscard]] bool is_known_assembly_state(AssemblyState state) noexcept {
+    switch (state) {
+    case AssemblyState::blueprint:
+    case AssemblyState::constructing:
+    case AssemblyState::drying:
+    case AssemblyState::maiden_firing:
+    case AssemblyState::ready:
+    case AssemblyState::operating:
+    case AssemblyState::failed:
         return true;
     }
     return false;
@@ -183,6 +198,14 @@ core::Status AssemblyRecord::validate_record() const {
     if (!status) {
         return status;
     }
+    if (!is_known_assembly_state(state))
+        return core::Status::failure("assembly.invalid_state", "assembly state is unknown");
+    if (operating != (state == AssemblyState::operating))
+        return core::Status::failure("assembly.inconsistent_operating_state",
+                                     "assembly operating flag must match its state");
+    if ((state == AssemblyState::failed) != !failure_reason.empty())
+        return core::Status::failure("assembly.invalid_failure_reason",
+                                     "only failed assemblies require a failure reason");
 
     std::set<std::string> part_names;
     for (const auto& part : parts) {
@@ -237,6 +260,11 @@ core::Status AssemblyRecord::validate_record() const {
         return core::Status::failure("assembly.invalid_revision",
                                      "assembly revision must be non-zero");
     }
+    std::set<std::string> capability_names;
+    for (const auto& capability : capabilities)
+        if (!core::is_valid_local_id(capability) || !capability_names.insert(capability).second)
+            return core::Status::failure("assembly.invalid_capability",
+                                         "assembly capabilities must be unique local ids");
     std::set<std::uint64_t> process_ids;
     for (const auto process_id : process_slots) {
         if (!process_id.is_valid() || !process_ids.insert(process_id.value()).second) {
@@ -269,6 +297,10 @@ AssemblyRuntime::create_blueprint(core::SaveId assembly_id, core::SaveId root_bu
 
 core::Status AssemblyRuntime::place_part(AssemblyRecord& record,
                                          const AssemblyDefinition& definition, AssemblyPart part) {
+    if (record.prototype_id != definition.prototype_id || !record.validate_record() ||
+        record.revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("assembly.invalid_runtime_record",
+                                     "assembly record or revision is invalid for this definition");
     if (record.state != AssemblyState::blueprint && record.state != AssemblyState::constructing) {
         return core::Status::failure("assembly.part_placement_invalid_state",
                                      "assembly parts can only be placed into a blueprint");
@@ -295,6 +327,7 @@ core::Status AssemblyRuntime::place_part(AssemblyRecord& record,
         return core::Status::failure("assembly.invalid_part_build_piece",
                                      "placed assembly part requires a stable build piece id");
     }
+    part.relative_coord = requirement->relative_coord;
     record.parts.push_back(std::move(part));
     record.state = AssemblyState::constructing;
     ++record.revision;
@@ -303,6 +336,10 @@ core::Status AssemblyRuntime::place_part(AssemblyRecord& record,
 
 core::Status AssemblyRuntime::advance_stage(AssemblyRecord& record,
                                             const AssemblyDefinition& definition) {
+    if (record.prototype_id != definition.prototype_id || !record.validate_record() ||
+        record.revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("assembly.invalid_runtime_record",
+                                     "assembly record or revision is invalid for this definition");
     if (record.current_stage >= definition.construction_stages.size()) {
         return core::Status::failure("assembly.stage_out_of_range",
                                      "assembly construction stage is out of range");
@@ -331,6 +368,9 @@ core::Status AssemblyRuntime::advance_stage(AssemblyRecord& record,
 
 core::Status AssemblyRuntime::transition(AssemblyRecord& record, AssemblyState target,
                                          std::string reason) {
+    if (!record.validate_record() || record.revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("assembly.invalid_runtime_record",
+                                     "assembly record or revision is invalid");
     const auto source = record.state;
     const bool allowed =
         target == AssemblyState::failed ||
@@ -343,6 +383,9 @@ core::Status AssemblyRuntime::transition(AssemblyRecord& record, AssemblyState t
         return core::Status::failure("assembly.invalid_transition",
                                      "assembly state transition is not allowed");
     }
+    if (target == AssemblyState::failed && reason.empty())
+        return core::Status::failure("assembly.missing_failure_reason",
+                                     "failed assembly transition requires a reason");
     record.state = target;
     record.operating = target == AssemblyState::operating;
     record.failure_reason = target == AssemblyState::failed ? std::move(reason) : std::string{};
@@ -355,6 +398,9 @@ core::Status AssemblyRuntime::attach_process(AssemblyRecord& record, core::Proce
         return core::Status::failure("assembly.invalid_process_slot",
                                      "assembly process slot id must be valid");
     }
+    if (record.revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("assembly.revision_overflow",
+                                     "assembly revision cannot overflow");
     if (std::ranges::find(record.process_slots, process_id) != record.process_slots.end()) {
         return core::Status::failure("assembly.duplicate_process_slot",
                                      "process is already attached to the assembly");
@@ -365,6 +411,9 @@ core::Status AssemblyRuntime::attach_process(AssemblyRecord& record, core::Proce
 }
 
 core::Status AssemblyRuntime::detach_process(AssemblyRecord& record, core::ProcessId process_id) {
+    if (record.revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Status::failure("assembly.revision_overflow",
+                                     "assembly revision cannot overflow");
     const auto found = std::ranges::find(record.process_slots, process_id);
     if (found == record.process_slots.end()) {
         return core::Status::failure("assembly.missing_process_slot",
@@ -410,6 +459,8 @@ AssemblyValidation AssemblyValidator::validate(const AssemblyDefinition& definit
         }
         if (found->second.prototype_id != requirement.prototype_id) {
             result.mismatched_parts.push_back(requirement.name);
+        } else if (found->second.relative_coord != requirement.relative_coord) {
+            result.mismatched_parts.push_back(requirement.name + " (spatial layout)");
         }
     }
 

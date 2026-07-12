@@ -10,11 +10,16 @@
 #include <map>
 #include <set>
 #include <string_view>
+#include <system_error>
 #include <utility>
 
 namespace heartstead::assets {
 
 namespace {
+
+constexpr std::uintmax_t max_manifest_bytes = 1024U * 1024U;
+constexpr std::size_t max_manifest_line_bytes = 64U * 1024U;
+constexpr std::size_t max_manifest_fields = 256;
 
 [[nodiscard]] std::string trim(std::string value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -37,6 +42,14 @@ namespace {
 [[nodiscard]] std::map<std::string, std::string>
 parse_flat_toml(const std::filesystem::path& file,
                 std::vector<modding::ModDiagnostic>& diagnostics) {
+    std::error_code file_error;
+    const auto file_bytes = std::filesystem::file_size(file, file_error);
+    if (file_error || file_bytes > max_manifest_bytes) {
+        diagnostics.push_back(modding::ModDiagnostic{
+            modding::DiagnosticSeverity::error, file, "resource_pack.manifest.too_large",
+            "resource pack manifest exceeds its size limit"});
+        return {};
+    }
     std::ifstream input(file);
     if (!input) {
         diagnostics.push_back(modding::ModDiagnostic{modding::DiagnosticSeverity::error, file,
@@ -51,6 +64,12 @@ parse_flat_toml(const std::filesystem::path& file,
 
     while (std::getline(input, line)) {
         ++line_number;
+        if (line.size() > max_manifest_line_bytes) {
+            diagnostics.push_back(modding::ModDiagnostic{
+                modding::DiagnosticSeverity::error, file, "resource_pack.manifest.too_large",
+                "resource pack manifest exceeds its line or field limit"});
+            return {};
+        }
         const auto comment = line.find('#');
         if (comment != std::string::npos) {
             line = line.substr(0, comment);
@@ -74,6 +93,12 @@ parse_flat_toml(const std::filesystem::path& file,
 
         auto key = trim(line.substr(0, separator));
         auto value = unquote(line.substr(separator + 1));
+        if (!values.contains(key) && values.size() >= max_manifest_fields) {
+            diagnostics.push_back(modding::ModDiagnostic{
+                modding::DiagnosticSeverity::error, file, "resource_pack.manifest.too_large",
+                "resource pack manifest exceeds its field limit"});
+            return {};
+        }
         values[std::move(key)] = std::move(value);
     }
 
@@ -140,7 +165,8 @@ core::Result<ShaderExtensionPoint> shader_extension_point_from_name(std::string_
 }
 
 core::Status ResourcePackPolicy::validate_manifest(const ResourcePackManifest& manifest) {
-    if (!core::is_valid_namespace_id(manifest.id) || manifest.name.empty() ||
+    if (!core::is_valid_namespace_id(manifest.id) ||
+        !core::is_valid_namespace_id(manifest.target_namespace) || manifest.name.empty() ||
         manifest.version.empty()) {
         return core::Status::failure("resource_pack.invalid_manifest",
                                      "resource pack id, name, and version are required");
@@ -168,6 +194,11 @@ core::Status ResourcePackPolicy::validate_override(const ResourcePackManifest& m
     if (asset.source_kind != AssetSourceKind::resource_pack || asset.source_id != manifest.id) {
         return core::Status::failure("resource_pack.asset_source_mismatch",
                                      "asset does not belong to the resource pack being validated");
+    }
+    if (asset.virtual_path.namespace_id != manifest.target_namespace ||
+        asset.logical_id != asset_logical_id(asset.virtual_path)) {
+        return core::Status::failure("resource_pack.asset_namespace_mismatch",
+                                     "resource-pack assets must use the manifest target namespace");
     }
     const auto path = asset.virtual_path.relative_path.generic_string();
     constexpr std::array<std::string_view, 5> forbidden{{
@@ -246,6 +277,9 @@ ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_roo
         manifest.version = required_value(values, "version", manifest_path, result.diagnostics);
         manifest.description = values.contains("description") ? values.at("description") : "";
         manifest.root = entry.path();
+        manifest.target_namespace = values.contains("target_namespace")
+                                        ? values.at("target_namespace")
+                                        : std::string("base");
         manifest.gameplay_content = values.contains("gameplay") && values.at("gameplay") == "true";
         if (const auto shader_extensions = values.find("shader_extensions");
             shader_extensions != values.end() && !shader_extensions->second.empty()) {

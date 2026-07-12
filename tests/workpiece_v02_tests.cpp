@@ -102,6 +102,16 @@ void test_server_state_codec_rejects_wrong_shape() {
         heartstead::workpieces::WorkpieceServerStateTextCodec::encode(state.value(), {2, 1, 2});
     auto wrong = heartstead::workpieces::WorkpieceServerStateTextCodec::decode(encoded, {3, 1, 2});
     assert(!wrong && wrong.error().code == "workpiece_state.shape_mismatch");
+    state.value().output_metadata.classification = "pattern_match";
+    state.value().output_metadata.measurements["occupied_cells"] = 4;
+    auto round_trip = heartstead::workpieces::WorkpieceServerStateTextCodec::decode(
+        heartstead::workpieces::WorkpieceServerStateTextCodec::encode(state.value(), {2, 1, 2}),
+        {2, 1, 2});
+    assert(round_trip);
+    assert(round_trip.value().output_metadata.measurements.at("occupied_cells") == 4);
+
+    state.value().blob_mask.back() |= std::uint64_t{1} << 63U;
+    assert(!state.value().validate({2, 1, 2}));
 }
 
 } // namespace

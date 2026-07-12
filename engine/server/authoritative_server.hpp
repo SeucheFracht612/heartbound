@@ -64,6 +64,11 @@ class AuthoritativeServer {
 
     [[nodiscard]] ConnectedPlayer* find(core::NetId client_id) noexcept;
     [[nodiscard]] const ConnectedPlayer* find(core::NetId client_id) const noexcept;
+    [[nodiscard]] ConnectedPlayer* find(const player_profiles::PlayerUuid& uuid) noexcept;
+    [[nodiscard]] const ConnectedPlayer*
+    find(const player_profiles::PlayerUuid& uuid) const noexcept;
+    [[nodiscard]] core::Status replace_profile(player_profiles::PlayerProfile profile,
+                                               bool notify_connected = true);
     [[nodiscard]] net::HostSession& host_session() noexcept;
     [[nodiscard]] const player_profiles::FilePlayerProfileStore& profile_store() const noexcept;
     [[nodiscard]] server_logs::FileServerLog& logs() noexcept;

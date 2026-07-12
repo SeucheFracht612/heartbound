@@ -7,6 +7,11 @@ namespace heartstead::net {
 
 namespace {
 
+constexpr std::size_t max_payload_bytes = 64U * 1024U;
+constexpr std::size_t max_payload_fields = 128;
+constexpr std::size_t max_payload_key_bytes = 128;
+constexpr std::size_t max_payload_value_bytes = 32U * 1024U;
+
 [[nodiscard]] bool is_hex_digit(char value) noexcept {
     return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
            (value >= 'A' && value <= 'F');
@@ -39,6 +44,19 @@ namespace {
         }
     }
     return result;
+}
+
+[[nodiscard]] std::size_t percent_escaped_size(std::string_view input) noexcept {
+    std::size_t size = 0;
+    for (const auto value : input) {
+        if (value == '%' || value == ';' || value == '=' || value == '|' || value == '\n' ||
+            value == '\r') {
+            size += 3;
+        } else {
+            ++size;
+        }
+    }
+    return size;
 }
 
 [[nodiscard]] core::Result<std::string> percent_unescape(std::string_view input) {
@@ -87,12 +105,30 @@ core::Status CommandPayload::set(std::string key, std::string value) {
         return core::Status::failure("command_payload.invalid_key",
                                      "command payload key is invalid: " + key);
     }
-
-    auto [iterator, inserted] = fields_.emplace(std::move(key), std::move(value));
-    if (!inserted) {
-        return core::Status::failure("command_payload.duplicate_key",
-                                     "command payload key is duplicated: " + iterator->first);
+    if (key.size() > max_payload_key_bytes || value.size() > max_payload_value_bytes) {
+        return core::Status::failure("command_payload.limit_exceeded",
+                                     "command payload exceeds its field or byte limits");
     }
+    if (fields_.contains(key)) {
+        return core::Status::failure("command_payload.duplicate_key",
+                                     "command payload key is duplicated: " + key);
+    }
+    if (fields_.size() >= max_payload_fields) {
+        return core::Status::failure("command_payload.limit_exceeded",
+                                     "command payload exceeds its field or byte limits");
+    }
+    std::size_t encoded_bytes = fields_.empty() ? 0 : fields_.size() - 1;
+    for (const auto& [existing_key, existing_value] : fields_) {
+        encoded_bytes += existing_key.size() + 1 + percent_escaped_size(existing_value);
+    }
+    const auto added_bytes =
+        (fields_.empty() ? 0 : 1) + key.size() + 1 + percent_escaped_size(value);
+    if (encoded_bytes > max_payload_bytes || added_bytes > max_payload_bytes - encoded_bytes) {
+        return core::Status::failure("command_payload.limit_exceeded",
+                                     "command payload exceeds its encoded byte limit");
+    }
+
+    fields_.emplace(std::move(key), std::move(value));
     return core::Status::ok();
 }
 
@@ -141,6 +177,10 @@ core::Result<CommandPayload> CommandPayloadTextCodec::decode(std::string_view te
     if (text.empty()) {
         return core::Result<CommandPayload>::failure("command_payload.empty",
                                                      "command payload must not be empty");
+    }
+    if (text.size() > max_payload_bytes) {
+        return core::Result<CommandPayload>::failure("command_payload.too_large",
+                                                     "command payload exceeds 64 KiB");
     }
 
     CommandPayload payload;

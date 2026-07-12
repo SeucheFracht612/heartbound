@@ -699,7 +699,7 @@ InspectionData Inspector::inspect(const assets::AssetRecord& record) {
         add_field(data, "first_dependency", virtual_path_text(record.dependencies.front()));
     }
 
-    if (!core::is_valid_local_id(record.logical_id)) {
+    if (!core::PrototypeId::parse(record.logical_id)) {
         add_issue(data, InspectionSeverity::error, "asset_record.invalid_logical_id",
                   "asset logical id is not a safe relative id");
     }
@@ -707,7 +707,7 @@ InspectionData Inspector::inspect(const assets::AssetRecord& record) {
         add_issue(data, InspectionSeverity::error, "asset_record.invalid_namespace",
                   "asset virtual namespace is invalid");
     }
-    if (record.logical_id != record.virtual_path.relative_path.generic_string()) {
+    if (record.logical_id != assets::asset_logical_id(record.virtual_path)) {
         add_issue(data, InspectionSeverity::warning, "asset_record.path_mismatch",
                   "asset logical id differs from its virtual relative path");
     }
@@ -1008,7 +1008,7 @@ InspectionData Inspector::inspect(const assets::CookedAssetRecord& record) {
         add_field(data, "first_dependency", virtual_path_text(record.dependencies.front()));
     }
 
-    if (!core::is_valid_local_id(record.logical_id)) {
+    if (!core::PrototypeId::parse(record.logical_id)) {
         add_issue(data, InspectionSeverity::error, "cooked_asset_record.invalid_logical_id",
                   "cooked asset logical id is not a safe relative id");
     }
@@ -1017,7 +1017,7 @@ InspectionData Inspector::inspect(const assets::CookedAssetRecord& record) {
         add_issue(data, InspectionSeverity::error, "cooked_asset_record.invalid_source_path",
                   "cooked asset source virtual path is invalid");
     }
-    if (record.logical_id != record.source_virtual_path.relative_path.generic_string()) {
+    if (record.logical_id != assets::asset_logical_id(record.source_virtual_path)) {
         add_issue(data, InspectionSeverity::warning, "cooked_asset_record.path_mismatch",
                   "cooked asset logical id differs from its source virtual relative path");
     }
@@ -1231,7 +1231,7 @@ InspectionData Inspector::inspect(const renderer::shaders::CompiledShaderRecord&
     add_field(data, "pipeline_version", std::to_string(record.pipeline_version));
     add_field(data, "source_bytes", std::to_string(record.source_bytes));
 
-    if (!core::is_valid_local_id(record.logical_id)) {
+    if (!core::PrototypeId::parse(record.logical_id)) {
         add_issue(data, InspectionSeverity::error, "compiled_shader.invalid_logical_id",
                   "compiled shader logical id is not a safe relative id");
     }
@@ -1240,7 +1240,7 @@ InspectionData Inspector::inspect(const renderer::shaders::CompiledShaderRecord&
         add_issue(data, InspectionSeverity::error, "compiled_shader.invalid_source_path",
                   "compiled shader source virtual path is invalid");
     }
-    if (record.logical_id != record.source_virtual_path.relative_path.generic_string()) {
+    if (record.logical_id != assets::asset_logical_id(record.source_virtual_path)) {
         add_issue(data, InspectionSeverity::warning, "compiled_shader.path_mismatch",
                   "compiled shader logical id differs from its source virtual relative path");
     }
@@ -1581,10 +1581,6 @@ InspectionData Inspector::inspect(const simulation::SimulationSubject& subject) 
         add_issue(data, InspectionSeverity::error, "simulation.unexpected_save_id",
                   "non-persistent simulation subjects must not claim a save id");
     }
-    if (subject.last_update_time_ms < 0) {
-        add_issue(data, InspectionSeverity::error, "simulation.invalid_last_update_time",
-                  "simulation subject last update time must be non-negative");
-    }
     if (subject.kind == simulation::SimulationSubjectKind::process_owner &&
         !subject.process_id.is_valid()) {
         add_issue(data, InspectionSeverity::error, "simulation.missing_process_id",
@@ -1636,11 +1632,11 @@ InspectionData Inspector::inspect(const simulation::SimulationFramePlan& plan) {
     add_field(data, "unloaded_count", std::to_string(plan.unloaded_count));
     add_field(data, "due_tick_count", std::to_string(plan.due_tick_count));
 
-    std::int64_t total_offline_delta_ms = 0;
+    simulation::WorldTick total_offline_delta_ms = 0;
     for (const auto& decision : plan.decisions) {
         if (decision.offline_delta_ms > 0 &&
             total_offline_delta_ms <=
-                std::numeric_limits<std::int64_t>::max() - decision.offline_delta_ms) {
+                std::numeric_limits<simulation::WorldTick>::max() - decision.offline_delta_ms) {
             total_offline_delta_ms += decision.offline_delta_ms;
         }
     }

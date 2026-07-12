@@ -192,7 +192,7 @@ void test_world_set_voxel_rejects_unloaded_chunk() {
     heartstead::net::CommandPayload payload;
     assert(payload.set("chunk", "9|0|0"));
     assert(payload.set("voxel", "1|2|3"));
-    assert(payload.set("cell", "6|0"));
+    assert(payload.set("prototype", "test:voxels/command"));
 
     heartstead::net::CommandEnvelope command;
     command.sequence = 1;
@@ -203,6 +203,15 @@ void test_world_set_voxel_rejects_unloaded_chunk() {
     heartstead::net::CommandExecutionContext context;
     context.executor_role = heartstead::net::CommandExecutorRole::authoritative_server;
     context.world_state = &state;
+    heartstead::world::VoxelPalette palette;
+    heartstead::world::VoxelDefinition definition;
+    definition.type = 6;
+    definition.prototype_id = heartstead::core::PrototypeId::parse("test:voxels/command").value();
+    definition.display_name = "Command";
+    definition.terrain_material = "test";
+    definition.mining_tool = "none";
+    assert(palette.add(std::move(definition)));
+    context.voxel_palette = &palette;
 
     auto rejected = dispatcher.dispatch(command, context);
     assert(!rejected);

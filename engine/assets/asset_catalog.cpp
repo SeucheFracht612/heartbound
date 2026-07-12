@@ -14,7 +14,7 @@ namespace heartstead::assets {
 namespace {
 
 [[nodiscard]] bool is_valid_logical_id(std::string_view logical_id) noexcept {
-    return core::is_valid_local_id(logical_id);
+    return core::PrototypeId::parse(logical_id).has_value();
 }
 
 [[nodiscard]] std::string lower_ascii(std::string value) {
@@ -69,6 +69,10 @@ core::Status AssetCatalog::add(AssetRecord record) {
     if (!core::is_valid_namespace_id(record.virtual_path.namespace_id)) {
         return core::Status::failure("asset_catalog.invalid_namespace",
                                      "asset virtual path namespace is invalid");
+    }
+    if (record.logical_id != asset_logical_id(record.virtual_path)) {
+        return core::Status::failure("asset_catalog.logical_path_mismatch",
+                                     "asset logical id must equal its namespaced virtual path");
     }
     if (record.source_id.empty()) {
         return core::Status::failure("asset_catalog.missing_source",
@@ -200,7 +204,7 @@ AssetCatalogBuilder::index_virtual_namespace(AssetCatalog& catalog, const Virtua
     }
 
     for (const auto& entry : entries.value()) {
-        const auto logical_id = entry.virtual_path.relative_path.generic_string();
+        const auto logical_id = asset_logical_id(entry.virtual_path);
         auto hash = hash_file(entry.resolved_path);
         if (!hash) {
             result.diagnostics.push_back(
@@ -246,7 +250,7 @@ AssetCatalogBuildResult AssetCatalogBuilder::index_virtual_directory(
     }
 
     for (const auto& entry : entries.value()) {
-        const auto logical_id = entry.virtual_path.relative_path.generic_string();
+        const auto logical_id = asset_logical_id(entry.virtual_path);
         auto hash = hash_file(entry.resolved_path);
         if (!hash) {
             result.diagnostics.push_back(
@@ -275,6 +279,19 @@ AssetCatalogBuildResult AssetCatalogBuilder::index_virtual_directory(
     }
 
     return result;
+}
+
+std::string asset_logical_id(const VirtualPath& path) {
+    return path.namespace_id + ":" + path.relative_path.generic_string();
+}
+
+core::Result<std::filesystem::path> asset_logical_path(std::string_view logical_id) {
+    auto parsed = core::PrototypeId::parse(logical_id);
+    if (!parsed)
+        return core::Result<std::filesystem::path>::failure(
+            "asset_catalog.invalid_logical_id", "asset logical id is not namespace:path");
+    return core::Result<std::filesystem::path>::success(
+        std::filesystem::path(parsed->namespace_id()) / parsed->local_id());
 }
 
 std::string_view asset_kind_name(AssetKind kind) noexcept {

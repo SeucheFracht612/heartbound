@@ -16,6 +16,8 @@ namespace heartstead::player_profiles {
 namespace {
 
 constexpr std::string_view magic = "heartstead.map_discovery.v1";
+constexpr std::size_t max_encoded_map_bytes = 256U * 1024U * 1024U;
+constexpr std::size_t max_map_regions = 1'000'000U;
 
 [[nodiscard]] std::int64_t floor_div(std::int64_t value, std::int64_t divisor) noexcept {
     auto quotient = value / divisor;
@@ -104,6 +106,10 @@ core::Status MapDiscoveryRegion::validate() const {
     if (!core::is_valid_local_id(layer_id)) {
         return core::Status::failure("map_discovery.invalid_layer",
                                      "map discovery layer id must be a valid local id");
+    }
+    if (revision == 0) {
+        return core::Status::failure("map_discovery.invalid_revision",
+                                     "stored map discovery regions need a non-zero revision");
     }
     return core::Status::ok();
 }
@@ -265,6 +271,9 @@ std::string MapDiscoveryTextCodec::encode(const MapDiscovery& discovery) {
 }
 
 core::Result<MapDiscovery> MapDiscoveryTextCodec::decode(std::string_view text) {
+    if (text.size() > max_encoded_map_bytes)
+        return core::Result<MapDiscovery>::failure("map_discovery.file_too_large",
+                                                   "map discovery exceeds its size limit");
     MapDiscovery result;
     bool saw_magic = false;
     bool saw_end = false;
@@ -315,6 +324,10 @@ core::Result<MapDiscovery> MapDiscoveryTextCodec::decode(std::string_view text) 
                 return core::Result<MapDiscovery>::failure("map_discovery.duplicate_region",
                                                            "map discovery region is duplicated");
             }
+            if (seen_keys.size() > max_map_regions)
+                return core::Result<MapDiscovery>::failure(
+                    "map_discovery.too_many_regions",
+                    "map discovery exceeds its region count limit");
             MapDiscoveryRegion region;
             region.layer_id = std::string(parts[0]);
             region.coord = {x.value(), z.value()};

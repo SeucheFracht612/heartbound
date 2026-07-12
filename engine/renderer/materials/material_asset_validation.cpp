@@ -8,7 +8,7 @@ namespace heartstead::renderer::materials {
 namespace {
 
 [[nodiscard]] std::string logical_id_for(const assets::VirtualPath& path) {
-    return path.relative_path.generic_string();
+    return assets::asset_logical_id(path);
 }
 
 void add_diagnostic(MaterialAssetValidationResult& result, modding::DiagnosticSeverity severity,
@@ -66,7 +66,7 @@ void validate_reference(MaterialAssetValidationResult& result, const MaterialDef
         active->source_kind,
         active->source_id,
         required,
-        active->virtual_path.to_string() != declared_path.to_string(),
+        active->source_kind == assets::AssetSourceKind::resource_pack,
     });
 }
 

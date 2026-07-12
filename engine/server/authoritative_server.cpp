@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <utility>
 
@@ -65,7 +66,9 @@ core::Result<core::NetId> AuthoritativeServer::join(const PlayerJoinRequest& req
     if (!is_running())
         return core::Result<core::NetId>::failure("authoritative_server.not_running",
                                                   "server is not running");
-    if (!request.player_uuid.is_valid() || request.display_name.empty())
+    if (!request.player_uuid.is_valid() || request.display_name.empty() ||
+        request.display_name.size() > 128 || request.remote_address.size() > 1024 ||
+        request.client_content_fingerprint.size() > 1024)
         return core::Result<core::NetId>::failure("authoritative_server.invalid_join",
                                                   "join requires UUID and display name");
     const auto address_hash = hash_client_address(request.remote_address);
@@ -174,6 +177,9 @@ core::Result<bool> AuthoritativeServer::discover(core::NetId client_id, std::str
     if (player == nullptr)
         return core::Result<bool>::failure("authoritative_server.unknown_client",
                                            "client is not connected");
+    if (player->profile.revision == std::numeric_limits<std::uint64_t>::max())
+        return core::Result<bool>::failure("authoritative_server.profile_revision_overflow",
+                                           "player profile revision cannot overflow");
     auto changed = player->profile.map_discovery.discover(layer_id, cell);
     if (!changed || !changed.value())
         return changed;
@@ -193,6 +199,9 @@ core::Status AuthoritativeServer::chat(core::NetId client_id, std::string channe
     if (player == nullptr)
         return core::Status::failure("authoritative_server.unknown_client",
                                      "client is not connected");
+    if (!core::is_valid_local_id(channel) || message.empty() || message.size() > 64U * 1024U)
+        return core::Status::failure("authoritative_server.invalid_chat",
+                                     "chat channel or message is invalid");
     auto status = logs_.append_chat(
         player->profile.player_uuid, std::string(player->profile.current_display_name()), channel,
         message, world_time, calendar(world_time), config_.server_session);
@@ -245,6 +254,34 @@ ConnectedPlayer* AuthoritativeServer::find(core::NetId client_id) noexcept {
 const ConnectedPlayer* AuthoritativeServer::find(core::NetId client_id) const noexcept {
     auto found = players_.find(client_id.value());
     return found == players_.end() ? nullptr : &found->second;
+}
+ConnectedPlayer* AuthoritativeServer::find(const player_profiles::PlayerUuid& uuid) noexcept {
+    const auto found = std::ranges::find_if(
+        players_, [&uuid](auto& entry) { return entry.second.profile.player_uuid == uuid; });
+    return found == players_.end() ? nullptr : &found->second;
+}
+const ConnectedPlayer*
+AuthoritativeServer::find(const player_profiles::PlayerUuid& uuid) const noexcept {
+    const auto found = std::ranges::find_if(
+        players_, [&uuid](const auto& entry) { return entry.second.profile.player_uuid == uuid; });
+    return found == players_.end() ? nullptr : &found->second;
+}
+
+core::Status AuthoritativeServer::replace_profile(player_profiles::PlayerProfile profile,
+                                                  bool notify_connected) {
+    auto status = profile.validate();
+    if (!status)
+        return status;
+    status = profiles_.save(profile);
+    if (!status)
+        return status;
+    if (auto* connected = find(profile.player_uuid)) {
+        connected->profile = std::move(profile);
+        connected->dirty = false;
+        if (notify_connected)
+            return send_profile_snapshot(*connected);
+    }
+    return core::Status::ok();
 }
 net::HostSession& AuthoritativeServer::host_session() noexcept {
     return host_;

@@ -951,7 +951,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         result.backend = rhi::RenderBackend::vulkan;
         result.max_extent = rhi::RenderExtent{max_dimension, max_dimension};
         result.supports_present = surface_ != VK_NULL_HANDLE;
-        result.supports_validation = desc_.enable_validation;
+        // Do not advertise a requested feature as an active capability.  This backend does not
+        // create a validation layer/debug messenger yet.
+        result.supports_validation = false;
         result.supports_debug_markers = false;
         result.supports_shader_modules = true;
         result.supports_pipeline_layout = true;

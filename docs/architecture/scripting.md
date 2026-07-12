@@ -109,7 +109,7 @@ binding. It accepts a deliberately small Luau-like export table:
 return {
   ping = function(value) return value end,
   notify = function(chunk, voxel, cell)
-    return emit("world.set_voxel", chunk, voxel, cell)
+    return emit("world.set_voxel", chunk, voxel, prototype)
   end
 }
 ```

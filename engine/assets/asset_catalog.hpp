@@ -89,5 +89,7 @@ class AssetCatalogBuilder {
 [[nodiscard]] std::string_view asset_kind_name(AssetKind kind) noexcept;
 [[nodiscard]] std::string_view asset_source_kind_name(AssetSourceKind kind) noexcept;
 [[nodiscard]] AssetKind infer_asset_kind(const std::filesystem::path& relative_path);
+[[nodiscard]] std::string asset_logical_id(const VirtualPath& path);
+[[nodiscard]] core::Result<std::filesystem::path> asset_logical_path(std::string_view logical_id);
 
 } // namespace heartstead::assets

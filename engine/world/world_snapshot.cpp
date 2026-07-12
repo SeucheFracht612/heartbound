@@ -383,21 +383,25 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
     }
 
     for (const auto& assembly : snapshot.assemblies) {
-        auto status = track_unique_save_id(save_ids, assembly.assembly_id, "assembly");
+        auto restored_assembly = assembly;
+        auto status = track_unique_save_id(save_ids, restored_assembly.assembly_id, "assembly");
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }
-        status = assembly.validate_record();
+        status = restored_assembly.validate_record();
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }
-        status = require_build_piece_id(build_piece_ids, assembly.root_build_piece_id,
+        status = require_build_piece_id(build_piece_ids, restored_assembly.root_build_piece_id,
                                         "world_snapshot.missing_assembly_root",
                                         "assembly root build piece is not present in snapshot");
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }
-        for (const auto& part : assembly.parts) {
+        restored_assembly.root_coord = state.build_objects()
+                                           .find(restored_assembly.root_build_piece_id)
+                                           ->transform.position.anchor;
+        for (const auto& part : restored_assembly.parts) {
             status = require_build_piece_id(build_piece_ids, part.build_piece_id,
                                             "world_snapshot.missing_assembly_part",
                                             "assembly part build piece is not present in snapshot");
@@ -406,7 +410,7 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
                                                          status.error().message);
             }
         }
-        for (const auto& port : assembly.ports) {
+        for (const auto& port : restored_assembly.ports) {
             status = require_build_piece_id(
                 build_piece_ids, port.source_build_piece_id,
                 "world_snapshot.missing_assembly_port_source",
@@ -416,7 +420,7 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
                                                          status.error().message);
             }
         }
-        status = state.assemblies().insert(assembly);
+        status = state.assemblies().insert(std::move(restored_assembly));
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }

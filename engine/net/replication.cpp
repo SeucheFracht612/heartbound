@@ -16,6 +16,9 @@ namespace heartstead::net {
 namespace {
 
 constexpr std::string_view magic = "heartstead.replication_events.v1";
+constexpr std::size_t max_replication_bytes = 4U * 1024U * 1024U;
+constexpr std::size_t max_replication_line_bytes = 1024U * 1024U;
+constexpr std::size_t max_replication_records = 100'000;
 
 [[nodiscard]] bool is_hex_digit(char value) noexcept {
     return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
@@ -179,10 +182,8 @@ std::uint64_t replication_stream_sequence(const ReplicationBatch& batch) noexcep
     return batch.replication_sequence != 0 ? batch.replication_sequence : batch.command_sequence;
 }
 
-std::uint64_t
-replication_stream_sequence(const ReplicationRelevanceReport& report) noexcept {
-    return report.replication_sequence != 0 ? report.replication_sequence
-                                            : report.command_sequence;
+std::uint64_t replication_stream_sequence(const ReplicationRelevanceReport& report) noexcept {
+    return report.replication_sequence != 0 ? report.replication_sequence : report.command_sequence;
 }
 
 std::string ReplicationTextCodec::encode(const ReplicationBatch& batch) {
@@ -204,12 +205,18 @@ std::string ReplicationTextCodec::encode(const ReplicationBatch& batch) {
 }
 
 core::Result<ReplicationBatch> ReplicationTextCodec::decode(std::string_view text) {
+    if (text.size() > max_replication_bytes)
+        return core::Result<ReplicationBatch>::failure(
+            "replication.too_large", "replication payload exceeds its size limit");
     ReplicationBatch batch;
     bool saw_magic = false;
     bool saw_sequence = false;
     bool saw_command_sequence = false;
+    bool saw_source_client = false;
     bool saw_command = false;
     bool saw_end = false;
+    std::size_t consumed_bytes = 0;
+    std::size_t record_count = 0;
 
     std::size_t line_start = 0;
     while (line_start <= text.size()) {
@@ -220,6 +227,9 @@ core::Result<ReplicationBatch> ReplicationTextCodec::decode(std::string_view tex
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
+        if (line.size() > max_replication_line_bytes || ++record_count > max_replication_records)
+            return core::Result<ReplicationBatch>::failure(
+                "replication.too_large", "replication payload exceeds its record limits");
 
         if (!saw_magic) {
             if (line != magic) {
@@ -230,6 +240,7 @@ core::Result<ReplicationBatch> ReplicationTextCodec::decode(std::string_view tex
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
+            consumed_bytes = line_end == std::string_view::npos ? text.size() : line_end + 1;
             break;
         } else if (!line.empty()) {
             const auto separator = line.find('=');
@@ -242,6 +253,9 @@ core::Result<ReplicationBatch> ReplicationTextCodec::decode(std::string_view tex
             const auto key = line.substr(0, separator);
             const auto value = line.substr(separator + 1);
             if (key == "sequence") {
+                if (saw_sequence)
+                    return core::Result<ReplicationBatch>::failure(
+                        "replication.duplicate_sequence", "replication sequence is duplicated");
                 auto parsed = parse_u64(value, "sequence");
                 if (!parsed) {
                     return core::Result<ReplicationBatch>::failure(parsed.error().code,
@@ -250,6 +264,10 @@ core::Result<ReplicationBatch> ReplicationTextCodec::decode(std::string_view tex
                 batch.replication_sequence = parsed.value();
                 saw_sequence = true;
             } else if (key == "command_sequence") {
+                if (saw_command_sequence)
+                    return core::Result<ReplicationBatch>::failure(
+                        "replication.duplicate_command_sequence",
+                        "replication command sequence is duplicated");
                 auto parsed = parse_u64(value, "command_sequence");
                 if (!parsed) {
                     return core::Result<ReplicationBatch>::failure(parsed.error().code,
@@ -258,13 +276,21 @@ core::Result<ReplicationBatch> ReplicationTextCodec::decode(std::string_view tex
                 batch.command_sequence = parsed.value();
                 saw_command_sequence = true;
             } else if (key == "source_client") {
+                if (saw_source_client)
+                    return core::Result<ReplicationBatch>::failure(
+                        "replication.duplicate_source_client",
+                        "replication source client is duplicated");
                 auto parsed = parse_u64(value, "source_client");
                 if (!parsed) {
                     return core::Result<ReplicationBatch>::failure(parsed.error().code,
                                                                    parsed.error().message);
                 }
                 batch.source_client_id = core::NetId::from_value(parsed.value());
+                saw_source_client = true;
             } else if (key == "command") {
+                if (saw_command)
+                    return core::Result<ReplicationBatch>::failure(
+                        "replication.duplicate_command", "replication command is duplicated");
                 auto parsed = percent_unescape(value);
                 if (!parsed) {
                     return core::Result<ReplicationBatch>::failure(parsed.error().code,
@@ -303,6 +329,9 @@ core::Result<ReplicationBatch> ReplicationTextCodec::decode(std::string_view tex
         return core::Result<ReplicationBatch>::failure(
             "replication.incomplete", "replication payload is missing required records");
     }
+    if (consumed_bytes != text.size())
+        return core::Result<ReplicationBatch>::failure(
+            "replication.trailing_data", "replication payload contains data after its end marker");
     if (!saw_command_sequence) {
         batch.command_sequence = batch.replication_sequence;
     }
@@ -346,9 +375,9 @@ bool ReplicationRelevance::subject_is_visible(const ReplicationRelevancePolicy& 
     return subject_is_visible_for_rule(*rule, subject);
 }
 
-ReplicationBatch ReplicationRelevance::filter_for_client(
-    const ReplicationRelevancePolicy& policy, const ReplicationBatch& batch,
-    core::NetId client_id) {
+ReplicationBatch ReplicationRelevance::filter_for_client(const ReplicationRelevancePolicy& policy,
+                                                         const ReplicationBatch& batch,
+                                                         core::NetId client_id) {
     ReplicationBatch filtered;
     filtered.command_sequence = batch.command_sequence;
     filtered.command_type = batch.command_type;
@@ -419,12 +448,9 @@ ReplicationIntakeReport ReplicationIntake::summarize(std::span<const Replication
 TransportMessage make_replication_transport_message(const ReplicationBatch& batch,
                                                     std::int64_t server_time_ms) {
     return TransportMessage{
-        TransportMessageKind::replication,
-        TransportChannel::reliable,
-        replication_stream_sequence(batch),
-        std::string(replication_world_events_payload_type),
-        ReplicationTextCodec::encode(batch),
-        server_time_ms,
+        TransportMessageKind::replication,   TransportChannel::reliable,
+        replication_stream_sequence(batch),  std::string(replication_world_events_payload_type),
+        ReplicationTextCodec::encode(batch), server_time_ms,
     };
 }
 

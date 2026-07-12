@@ -49,8 +49,7 @@ void test_missing_objects_become_opaque_placeholders() {
     assert(snapshot.missing_prototypes.size() == 2);
     const auto& build_placeholder = snapshot.missing_prototypes.front();
     assert(build_placeholder.kind == heartstead::world::MissingPrototypeKind::build_piece);
-    assert(build_placeholder.original_prototype_id ==
-           id("removedmod:build_pieces/storm_furnace"));
+    assert(build_placeholder.original_prototype_id == id("removedmod:build_pieces/storm_furnace"));
     assert(build_placeholder.position.anchor.x == (std::int64_t{1} << 60));
     assert(build_placeholder.saved_blob.starts_with("heartstead.save_snapshot_text.v2\n"));
 }
@@ -64,6 +63,8 @@ void test_placeholders_round_trip_and_load_without_mod() {
     const auto text = heartstead::save::SaveTextCodec::encode_snapshot(source);
     auto text_round_trip = heartstead::save::SaveTextCodec::decode_snapshot(text);
     assert(text_round_trip);
+    auto trailing = heartstead::save::SaveTextCodec::decode_snapshot(text + "ignored=true\n");
+    assert(!trailing && trailing.error().code == "save_text.trailing_data");
     assert(text_round_trip.value().missing_prototypes.size() == 2);
     assert(text_round_trip.value().missing_prototypes.front().saved_blob ==
            source.missing_prototypes.front().saved_blob);
@@ -74,8 +75,8 @@ void test_placeholders_round_trip_and_load_without_mod() {
     assert(binary_round_trip.value().missing_prototypes.size() == 2);
 
     auto fresh_snapshot = missing_mod_snapshot();
-    auto world = heartstead::world::WorldSnapshotBridge::import_validated_snapshot(
-        fresh_snapshot, empty_registry);
+    auto world = heartstead::world::WorldSnapshotBridge::import_validated_snapshot(fresh_snapshot,
+                                                                                   empty_registry);
     assert(world);
     assert(world.value().build_objects().count() == 0);
     assert(world.value().missing_prototypes().size() == 2);

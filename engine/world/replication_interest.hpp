@@ -20,7 +20,7 @@ struct WorldReplicationInterestOptions {
     WorldSimulationSubjectOptions subject_options;
     std::vector<simulation::SimulationViewer> viewers;
     simulation::SimulationLodPolicy policy;
-    std::int64_t now_ms = 0;
+    simulation::WorldTick now_ms = 0;
     bool broadcast_by_default = false;
     bool receives_global_events = true;
     bool include_full = true;

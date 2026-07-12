@@ -178,6 +178,12 @@ std::string TransportPacketCodec::encode(const TransportEnvelope& envelope) {
 
 core::Result<TransportEnvelope> TransportPacketCodec::decode(std::string_view packet,
                                                              TransportPacketCodecConfig config) {
+    if (config.max_payload_bytes == 0 ||
+        packet.size() > static_cast<std::size_t>(config.max_payload_bytes) + 4096U) {
+        return core::Result<TransportEnvelope>::failure(
+            "transport_packet.packet_too_large",
+            "transport packet exceeds its payload and bounded header budget");
+    }
     const auto marker = packet.find(payload_marker);
     if (marker == std::string_view::npos) {
         return core::Result<TransportEnvelope>::failure(
@@ -192,6 +198,10 @@ core::Result<TransportEnvelope> TransportPacketCodec::decode(std::string_view pa
                                                         fields.error().message);
     }
     const auto payload = packet.substr(marker + payload_marker.size());
+    if (payload.size() > config.max_payload_bytes) {
+        return core::Result<TransportEnvelope>::failure("transport.payload_too_large",
+                                                        "transport payload exceeds max bytes");
+    }
 
     auto sender_value =
         require_field(fields.value(), "sender", "transport_packet", "transport packet");
@@ -448,6 +458,12 @@ TransportPacketFragmentCodec::validate_config(const TransportPacketFragmentCodec
         return core::Status::failure("transport_fragment.invalid_config",
                                      "max fragment count must be non-zero");
     }
+    if (config.max_pending_packets == 0 || config.max_pending_packet_bytes == 0 ||
+        config.max_pending_packet_bytes < config.max_packet_bytes) {
+        return core::Status::failure(
+            "transport_fragment.invalid_config",
+            "reassembly pending budgets must hold at least one maximum-size packet");
+    }
     return core::Status::ok();
 }
 
@@ -523,12 +539,24 @@ TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
     auto [iterator, inserted] = pending_.try_emplace(fragment.packet_id);
     auto& pending = iterator->second;
     if (inserted) {
+        if (pending_.size() > config_.max_pending_packets ||
+            fragment.total_packet_bytes >
+                config_.max_pending_packet_bytes -
+                    std::min(config_.max_pending_packet_bytes, pending_packet_bytes_)) {
+            pending_.erase(iterator);
+            return core::Result<TransportPacketReassemblyResult>::failure(
+                "transport_fragment.pending_budget_exceeded",
+                "too many incomplete fragmented packets are pending");
+        }
         pending.total_packet_bytes = fragment.total_packet_bytes;
         pending.fragment_count = fragment.fragment_count;
         pending.fragments.resize(static_cast<std::size_t>(fragment.fragment_count));
         pending.received.resize(static_cast<std::size_t>(fragment.fragment_count), false);
+        pending_packet_bytes_ += fragment.total_packet_bytes;
     } else if (pending.total_packet_bytes != fragment.total_packet_bytes ||
                pending.fragment_count != fragment.fragment_count) {
+        pending_packet_bytes_ -= pending.total_packet_bytes;
+        pending_.erase(iterator);
         return core::Result<TransportPacketReassemblyResult>::failure(
             "transport_fragment.mismatched_packet_metadata",
             "fragment metadata does not match the pending packet");
@@ -537,6 +565,8 @@ TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
     const auto fragment_index = static_cast<std::size_t>(fragment.fragment_index);
     if (pending.received[fragment_index]) {
         if (pending.fragments[fragment_index] != fragment.payload) {
+            pending_packet_bytes_ -= pending.total_packet_bytes;
+            pending_.erase(iterator);
             return core::Result<TransportPacketReassemblyResult>::failure(
                 "transport_fragment.conflicting_duplicate",
                 "duplicate fragment payload does not match the pending packet");
@@ -570,6 +600,7 @@ TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
     const auto expected_size = pending.total_packet_bytes;
     const auto received_count = pending.received_fragment_count;
     const auto expected_count = pending.fragment_count;
+    pending_packet_bytes_ -= pending.total_packet_bytes;
     pending_.erase(iterator);
 
     if (static_cast<std::uint64_t>(packet.size()) != expected_size) {
@@ -583,11 +614,16 @@ TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
 }
 
 void TransportPacketReassembler::discard(std::uint64_t packet_id) {
-    pending_.erase(packet_id);
+    const auto found = pending_.find(packet_id);
+    if (found != pending_.end()) {
+        pending_packet_bytes_ -= found->second.total_packet_bytes;
+        pending_.erase(found);
+    }
 }
 
 void TransportPacketReassembler::clear() {
     pending_.clear();
+    pending_packet_bytes_ = 0;
 }
 
 } // namespace heartstead::net

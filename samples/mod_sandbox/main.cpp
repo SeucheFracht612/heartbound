@@ -94,8 +94,8 @@ int main() {
                 return 1;
             }
             auto indexed = assets::AssetCatalogBuilder::index_directory(
-                asset_catalog, assets_root, pack.id, assets::AssetSourceKind::resource_pack,
-                pack.id, entry.asset_priority);
+                asset_catalog, assets_root, pack.target_namespace,
+                assets::AssetSourceKind::resource_pack, pack.id, entry.asset_priority);
             for (const auto& diagnostic : indexed.diagnostics) {
                 log_diagnostic(diagnostic);
             }
@@ -167,7 +167,7 @@ int main() {
     core::log(core::LogLevel::info,
               "Active assets: " + std::to_string(asset_catalog.active_count()));
 
-    const auto* raw_clay_asset = asset_catalog.find_active("textures/items/raw_clay.txt");
+    const auto* raw_clay_asset = asset_catalog.find_active("base:textures/items/raw_clay.txt");
     if (raw_clay_asset != nullptr) {
         core::log(core::LogLevel::info,
                   "Active raw clay asset " + raw_clay_asset->virtual_path.to_string() + " source=" +

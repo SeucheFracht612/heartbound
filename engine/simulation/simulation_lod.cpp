@@ -70,10 +70,6 @@ nearest_distance_squared(SimulationCoord subject_coord,
         return core::Status::failure("simulation.unexpected_save_id",
                                      "non-persistent simulation subjects must not claim a save id");
     }
-    if (subject.last_update_time_ms < 0) {
-        return core::Status::failure("simulation.invalid_last_update_time",
-                                     "simulation subject last update time must be non-negative");
-    }
     if (subject.kind == SimulationSubjectKind::process_owner && !subject.process_id.is_valid()) {
         return core::Status::failure("simulation.missing_process_id",
                                      "process-owner simulation subjects need stable process ids");
@@ -92,8 +88,8 @@ nearest_distance_squared(SimulationCoord subject_coord,
     return SimulationLod::unloaded;
 }
 
-[[nodiscard]] std::int64_t tick_interval_for(SimulationLod lod,
-                                             const SimulationLodPolicy& policy) noexcept {
+[[nodiscard]] WorldTick tick_interval_for(SimulationLod lod,
+                                          const SimulationLodPolicy& policy) noexcept {
     switch (lod) {
     case SimulationLod::full:
         return policy.full_tick_interval_ms;
@@ -131,8 +127,8 @@ core::Status SimulationLodPolicy::validate() const {
         return core::Status::failure("simulation.invalid_radius",
                                      "full simulation radius cannot exceed simplified radius");
     }
-    if (full_tick_interval_ms <= 0 || simplified_tick_interval_ms <= 0 ||
-        sleeping_tick_interval_ms <= 0) {
+    if (full_tick_interval_ms == 0 || simplified_tick_interval_ms == 0 ||
+        sleeping_tick_interval_ms == 0) {
         return core::Status::failure("simulation.invalid_tick_interval",
                                      "simulation tick intervals must be positive");
     }
@@ -190,7 +186,7 @@ const char* to_string(SimulationSubjectKind kind) noexcept {
 core::Result<SimulationLodDecision>
 SimulationLodPlanner::classify(const SimulationSubject& subject,
                                const std::vector<SimulationViewer>& viewers,
-                               const SimulationLodPolicy& policy, std::int64_t now_ms) {
+                               const SimulationLodPolicy& policy, WorldTick now_ms) {
     const auto policy_status = policy.validate();
     if (!policy_status) {
         return core::Result<SimulationLodDecision>::failure(policy_status.error().code,
@@ -238,7 +234,7 @@ SimulationLodPlanner::classify(const SimulationSubject& subject,
 core::Result<SimulationFramePlan>
 SimulationLodPlanner::plan_frame(const std::vector<SimulationSubject>& subjects,
                                  const std::vector<SimulationViewer>& viewers,
-                                 const SimulationLodPolicy& policy, std::int64_t now_ms) {
+                                 const SimulationLodPolicy& policy, WorldTick now_ms) {
     SimulationFramePlan plan;
     plan.decisions.reserve(subjects.size());
 

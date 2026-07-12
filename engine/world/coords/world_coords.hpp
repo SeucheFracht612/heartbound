@@ -150,4 +150,24 @@ block_axis_for_chunk_local(std::int64_t chunk_axis, std::uint16_t local_axis) {
     return core::Result<BlockCoord>::success({x.value(), y.value(), z.value()});
 }
 
+[[nodiscard]] inline core::Result<BlockCoord> checked_block_coord_offset(BlockCoord base,
+                                                                         BlockCoord offset) {
+    const auto add = [](std::int64_t left, std::int64_t right) -> core::Result<std::int64_t> {
+        constexpr auto min = std::numeric_limits<std::int64_t>::min();
+        constexpr auto max = std::numeric_limits<std::int64_t>::max();
+        if ((right > 0 && left > max - right) || (right < 0 && left < min - right))
+            return core::Result<std::int64_t>::failure("world_coord.offset_overflow",
+                                                       "block coordinate offset overflows int64");
+        return core::Result<std::int64_t>::success(left + right);
+    };
+    auto x = add(base.x, offset.x);
+    auto y = add(base.y, offset.y);
+    auto z = add(base.z, offset.z);
+    if (!x || !y || !z) {
+        const auto& error = !x ? x.error() : (!y ? y.error() : z.error());
+        return core::Result<BlockCoord>::failure(error.code, error.message);
+    }
+    return core::Result<BlockCoord>::success({x.value(), y.value(), z.value()});
+}
+
 } // namespace heartstead::world

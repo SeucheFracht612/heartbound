@@ -13,7 +13,7 @@ namespace heartstead::save {
 namespace {
 
 constexpr std::string_view magic = "HSTDSAVE";
-constexpr std::uint32_t binary_version = 12;
+constexpr std::uint32_t binary_version = 13;
 constexpr std::uint32_t minimum_supported_binary_version = 2;
 constexpr std::size_t max_binary_save_bytes = 512U * 1024U * 1024U;
 constexpr std::uint32_t max_binary_string_bytes = 16U * 1024U * 1024U;
@@ -94,6 +94,9 @@ class BinaryReader {
 
     [[nodiscard]] bool eof() const noexcept {
         return offset_ == bytes_.size();
+    }
+    [[nodiscard]] std::size_t remaining_bytes() const noexcept {
+        return remaining();
     }
 
     [[nodiscard]] core::Result<std::uint8_t> read_u8(std::string_view label) {
@@ -213,6 +216,11 @@ class BinaryReader {
                 "save_binary.collection_too_large",
                 "binary save collection exceeds the configured safety limit: " +
                     std::string(label));
+        }
+        if (count.value() > remaining()) {
+            return core::Result<std::uint32_t>::failure(
+                "save_binary.impossible_collection_count",
+                "binary collection count cannot fit in remaining input: " + std::string(label));
         }
         return count;
     }
@@ -596,11 +604,14 @@ void write_assembly_parts(BinaryWriter& writer,
         writer.write_string(part.name);
         writer.write_u64(part.build_piece_id.value());
         write_prototype_id(writer, part.prototype_id);
+        writer.write_i64(part.relative_coord.x);
+        writer.write_i64(part.relative_coord.y);
+        writer.write_i64(part.relative_coord.z);
     }
 }
 
 [[nodiscard]] core::Result<std::vector<assemblies::AssemblyPart>>
-read_assembly_parts(BinaryReader& reader) {
+read_assembly_parts(BinaryReader& reader, bool has_spatial_layout) {
     auto count = reader.read_count("assembly_parts");
     if (!count) {
         return core::Result<std::vector<assemblies::AssemblyPart>>::failure(count.error().code,
@@ -612,14 +623,21 @@ read_assembly_parts(BinaryReader& reader) {
         auto name = reader.read_string("assembly_part_name");
         auto build_piece_id = reader.read_u64("assembly_part_build_piece_id");
         auto prototype = read_prototype_id(reader, "assembly_part_prototype");
-        if (!name || !build_piece_id || !prototype) {
+        auto x = has_spatial_layout ? reader.read_i64("assembly_part_relative_x")
+                                    : core::Result<std::int64_t>::success(0);
+        auto y = has_spatial_layout ? reader.read_i64("assembly_part_relative_y")
+                                    : core::Result<std::int64_t>::success(0);
+        auto z = has_spatial_layout ? reader.read_i64("assembly_part_relative_z")
+                                    : core::Result<std::int64_t>::success(0);
+        if (!name || !build_piece_id || !prototype || !x || !y || !z) {
             return core::Result<std::vector<assemblies::AssemblyPart>>::failure(
                 "save_binary.invalid_assembly_part",
                 "binary save has invalid assembly part fields");
         }
         parts.push_back(assemblies::AssemblyPart{std::move(name).value(),
                                                  core::SaveId::from_value(build_piece_id.value()),
-                                                 prototype.value()});
+                                                 prototype.value(),
+                                                 {x.value(), y.value(), z.value()}});
     }
     return core::Result<std::vector<assemblies::AssemblyPart>>::success(std::move(parts));
 }
@@ -632,11 +650,14 @@ void write_assembly_ports(BinaryWriter& writer,
         writer.write_u8(network_kind_id(port.kind));
         writer.write_u64(port.source_build_piece_id.value());
         writer.write_u32(port.capacity);
+        writer.write_i64(port.relative_coord.x);
+        writer.write_i64(port.relative_coord.y);
+        writer.write_i64(port.relative_coord.z);
     }
 }
 
 [[nodiscard]] core::Result<std::vector<assemblies::AssemblyPort>>
-read_assembly_ports(BinaryReader& reader) {
+read_assembly_ports(BinaryReader& reader, bool has_spatial_layout) {
     auto count = reader.read_count("assembly_ports");
     if (!count) {
         return core::Result<std::vector<assemblies::AssemblyPort>>::failure(count.error().code,
@@ -649,14 +670,22 @@ read_assembly_ports(BinaryReader& reader) {
         auto kind = read_network_kind(reader);
         auto source = reader.read_u64("assembly_port_source_build_piece_id");
         auto capacity = reader.read_u32("assembly_port_capacity");
-        if (!name || !kind || !source || !capacity) {
+        auto x = has_spatial_layout ? reader.read_i64("assembly_port_relative_x")
+                                    : core::Result<std::int64_t>::success(0);
+        auto y = has_spatial_layout ? reader.read_i64("assembly_port_relative_y")
+                                    : core::Result<std::int64_t>::success(0);
+        auto z = has_spatial_layout ? reader.read_i64("assembly_port_relative_z")
+                                    : core::Result<std::int64_t>::success(0);
+        if (!name || !kind || !source || !capacity || !x || !y || !z) {
             return core::Result<std::vector<assemblies::AssemblyPort>>::failure(
                 "save_binary.invalid_assembly_port",
                 "binary save has invalid assembly port fields");
         }
-        ports.push_back(assemblies::AssemblyPort{std::move(name).value(), kind.value(),
+        ports.push_back(assemblies::AssemblyPort{std::move(name).value(),
+                                                 kind.value(),
                                                  core::SaveId::from_value(source.value()),
-                                                 capacity.value()});
+                                                 capacity.value(),
+                                                 {x.value(), y.value(), z.value()}});
     }
     return core::Result<std::vector<assemblies::AssemblyPort>>::success(std::move(ports));
 }
@@ -824,8 +853,12 @@ read_process_tick(BinaryReader& reader, std::uint32_t file_version, std::string_
 
 template <typename T>
 [[nodiscard]] core::Result<std::uint32_t> read_count(BinaryReader& reader, std::string_view label) {
-    (void)sizeof(T);
-    return reader.read_count(label);
+    auto count = reader.read_count(label);
+    if (count && count.value() > reader.remaining_bytes())
+        return core::Result<std::uint32_t>::failure(
+            "save_binary.impossible_collection_count",
+            "binary collection count cannot fit in the remaining input: " + std::string(label));
+    return count;
 }
 
 } // namespace
@@ -918,6 +951,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         write_process_ids(writer, assembly.process_slots);
         writer.write_string(assembly.failure_reason);
         writer.write_string(assembly.custom_state);
+        writer.write_i64(assembly.root_coord.x);
+        writer.write_i64(assembly.root_coord.y);
+        writer.write_i64(assembly.root_coord.z);
     }
 
     writer.write_count(snapshot.processes.size(), "processes");
@@ -1220,8 +1256,8 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
         auto root = reader.read_u64("assembly_root");
         auto prototype = read_prototype_id(reader, "assembly_prototype");
         auto operating = reader.read_bool("assembly_operating");
-        auto parts = read_assembly_parts(reader);
-        auto ports = read_assembly_ports(reader);
+        auto parts = read_assembly_parts(reader, version.value() >= 13);
+        auto ports = read_assembly_ports(reader, version.value() >= 13);
         if (!id || !root || !prototype || !operating || !parts || !ports) {
             return core::Result<SaveSnapshot>::failure("save_binary.invalid_assembly",
                                                        "binary save has invalid assembly record");
@@ -1261,6 +1297,15 @@ core::Result<SaveSnapshot> SaveBinaryCodec::decode_snapshot(std::span<const std:
             record.process_slots = std::move(process_slots).value();
             record.failure_reason = std::move(failure).value();
             record.custom_state = std::move(custom).value();
+        }
+        if (version.value() >= 13) {
+            auto x = reader.read_i64("assembly_root_x");
+            auto y = reader.read_i64("assembly_root_y");
+            auto z = reader.read_i64("assembly_root_z");
+            if (!x || !y || !z)
+                return core::Result<SaveSnapshot>::failure(
+                    "save_binary.invalid_assembly", "binary assembly root anchor is invalid");
+            record.root_coord = {x.value(), y.value(), z.value()};
         }
         snapshot.assemblies.push_back(std::move(record));
     }

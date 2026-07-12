@@ -2,6 +2,7 @@
 
 #include "engine/core/ids.hpp"
 #include "engine/core/result.hpp"
+#include "engine/simulation/world_time.hpp"
 #include "engine/world/coords/world_coords.hpp"
 
 #include <cstddef>
@@ -43,7 +44,7 @@ struct SimulationSubject {
     core::PrototypeId prototype_id;
     SimulationSubjectKind kind = SimulationSubjectKind::custom;
     SimulationCoord coord;
-    std::int64_t last_update_time_ms = 0;
+    WorldTick last_update_time_ms = 0;
     bool persistent = true;
     bool sleeping = false;
     std::optional<SimulationLod> forced_lod;
@@ -53,9 +54,9 @@ struct SimulationSubject {
 struct SimulationLodPolicy {
     std::uint32_t full_radius = 64;
     std::uint32_t simplified_radius = 256;
-    std::int64_t full_tick_interval_ms = 16;
-    std::int64_t simplified_tick_interval_ms = 1000;
-    std::int64_t sleeping_tick_interval_ms = 10000;
+    WorldTick full_tick_interval_ms = 16;
+    WorldTick simplified_tick_interval_ms = 1000;
+    WorldTick sleeping_tick_interval_ms = 10000;
 
     [[nodiscard]] core::Status validate() const;
 };
@@ -67,8 +68,8 @@ struct SimulationLodDecision {
     SimulationSubjectKind kind = SimulationSubjectKind::custom;
     SimulationLod lod = SimulationLod::unloaded;
     std::uint64_t nearest_viewer_distance_squared = 0;
-    std::int64_t elapsed_since_update_ms = 0;
-    std::int64_t offline_delta_ms = 0;
+    WorldTick elapsed_since_update_ms = 0;
+    WorldTick offline_delta_ms = 0;
     bool due_for_tick = false;
 };
 
@@ -90,12 +91,12 @@ class SimulationLodPlanner {
   public:
     [[nodiscard]] static core::Result<SimulationLodDecision>
     classify(const SimulationSubject& subject, const std::vector<SimulationViewer>& viewers,
-             const SimulationLodPolicy& policy, std::int64_t now_ms);
+             const SimulationLodPolicy& policy, WorldTick now_ms);
 
     [[nodiscard]] static core::Result<SimulationFramePlan>
     plan_frame(const std::vector<SimulationSubject>& subjects,
                const std::vector<SimulationViewer>& viewers, const SimulationLodPolicy& policy,
-               std::int64_t now_ms);
+               WorldTick now_ms);
 };
 
 } // namespace heartstead::simulation

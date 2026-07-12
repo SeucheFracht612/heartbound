@@ -72,7 +72,7 @@ void test_game_runtime_starts_from_base_mod() {
     assert(route_inspection.find_field("api_id")->value == "world.set_voxel");
     assert(route_inspection.find_field("command_type")->value == "world.set_voxel");
     assert(route_inspection.find_field("required_argument_count")->value == "3");
-    assert(route_inspection.find_field("required_arguments")->value == "chunk,voxel,cell");
+    assert(route_inspection.find_field("required_arguments")->value == "chunk,voxel,prototype");
     assert(route_inspection.issues.empty());
 
     heartstead::scripting::ScriptHostEvent set_voxel_event;
@@ -86,7 +86,7 @@ void test_game_runtime_starts_from_base_mod() {
     set_voxel_event.arguments = {
         heartstead::scripting::ScriptValue::string("1099511627776|0|-1099511627776"),
         heartstead::scripting::ScriptValue::string("1|2|3"),
-        heartstead::scripting::ScriptValue::string("4|0")};
+        heartstead::scripting::ScriptValue::string("base:voxels/test")};
     auto command_envelopes = command_router.make_command_envelopes(
         {set_voxel_event}, heartstead::game::ScriptHostCommandDispatchDesc{
                                heartstead::core::NetId::from_value(99), 700, 1234});
@@ -101,7 +101,7 @@ void test_game_runtime_starts_from_base_mod() {
     assert(decoded_payload);
     assert(*decoded_payload.value().find("chunk") == "1099511627776|0|-1099511627776");
     assert(*decoded_payload.value().find("voxel") == "1|2|3");
-    assert(*decoded_payload.value().find("cell") == "4|0");
+    assert(*decoded_payload.value().find("prototype") == "base:voxels/test");
 
     heartstead::net::ServerCommandDispatcher dispatcher;
     assert(heartstead::world::WorldCommandRegistry::register_engine_commands(dispatcher));
@@ -111,6 +111,16 @@ void test_game_runtime_starts_from_base_mod() {
     command_context.executor_role = heartstead::net::CommandExecutorRole::authoritative_server;
     command_context.server_time_ms = 5000;
     command_context.world_state = &world_state;
+    heartstead::world::VoxelPalette voxel_palette;
+    heartstead::world::VoxelDefinition voxel_definition;
+    voxel_definition.type = 4;
+    voxel_definition.prototype_id =
+        heartstead::core::PrototypeId::parse("base:voxels/test").value();
+    voxel_definition.display_name = "Test";
+    voxel_definition.terrain_material = "test";
+    voxel_definition.mining_tool = "none";
+    assert(voxel_palette.add(std::move(voxel_definition)));
+    command_context.voxel_palette = &voxel_palette;
     world_state.chunks().get_or_create({1099511627776LL, 0, -1099511627776LL}).clear_all_dirty();
 
     auto dispatched_batch =

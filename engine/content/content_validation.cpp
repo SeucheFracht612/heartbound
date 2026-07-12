@@ -113,7 +113,7 @@ ContentValidation::validate(const std::filesystem::path& mods_root,
 
     for (const auto& entry : report.resource_pack_load_plan.entries) {
         report.resource_packs.push_back(entry.manifest);
-        index_assets(report, entry.manifest.root / "assets", entry.manifest.id,
+        index_assets(report, entry.manifest.root / "assets", entry.manifest.target_namespace,
                      assets::AssetSourceKind::resource_pack, entry.manifest.id,
                      entry.asset_priority);
         for (const auto* asset : report.asset_catalog.records()) {

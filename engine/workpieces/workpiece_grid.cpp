@@ -1,5 +1,7 @@
 #include "engine/workpieces/workpiece_grid.hpp"
 
+#include <limits>
+
 namespace heartstead::workpieces {
 
 namespace {
@@ -60,6 +62,11 @@ core::Status WorkpieceGrid::apply(const WorkpieceOperation& operation) {
     if (!contains(operation.coord)) {
         return core::Status::failure("workpiece.coord_out_of_bounds",
                                      "cell coordinate is outside the workpiece grid");
+    }
+    if (mesh_revision_ == std::numeric_limits<std::uint64_t>::max() ||
+        history_.size() >= 1'000'000U) {
+        return core::Status::failure("workpiece.history_exhausted",
+                                     "workpiece edit history or revision is exhausted");
     }
 
     auto& current = cells_[index_of(operation.coord)];

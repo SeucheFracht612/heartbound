@@ -7,6 +7,7 @@
 #include <charconv>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <system_error>
@@ -104,6 +105,22 @@ core::Status WorkpieceServerState::validate(WorkpieceGridShape shape) const {
             (revealed_mask[index] & ~blob_mask[index]) != 0)
             return core::Status::failure("workpiece_state.invalid_mask",
                                          "flaw and reveal masks must be inside blob mask");
+    const auto used_bits = cell_count(shape) % 64U;
+    if (used_bits != 0) {
+        const auto valid_tail = (std::uint64_t{1} << used_bits) - 1U;
+        if (((blob_mask.back() | hidden_flaw_mask.back() | revealed_mask.back()) & ~valid_tail) !=
+            0)
+            return core::Status::failure("workpiece_state.invalid_mask_tail",
+                                         "workpiece masks set bits outside the grid");
+    }
+    if (!output_metadata.classification.empty() &&
+        !core::is_valid_local_id(output_metadata.classification))
+        return core::Status::failure("workpiece_state.invalid_classification",
+                                     "workpiece output classification is invalid");
+    for (const auto& [key, _] : output_metadata.measurements)
+        if (!core::is_valid_local_id(key))
+            return core::Status::failure("workpiece_state.invalid_measurement",
+                                         "workpiece measurement key is invalid");
     return core::Status::ok();
 }
 
@@ -132,31 +149,65 @@ std::string WorkpieceServerStateTextCodec::encode(const WorkpieceServerState& st
            << "\nclassification=" << state.output_metadata.classification
            << "\nmass=" << state.output_metadata.mass_units
            << "\nbase_closed=" << (state.output_metadata.base_closed ? 1 : 0)
-           << "\nthin_walls=" << (state.output_metadata.thin_walls ? 1 : 0) << "\nend\n";
+           << "\nthin_walls=" << (state.output_metadata.thin_walls ? 1 : 0) << '\n';
+    for (const auto& [key, value] : state.output_metadata.measurements)
+        output << "measurement=" << key << '|' << value << '\n';
+    output << "end\n";
     return output.str();
 }
 
 core::Result<WorkpieceServerState> WorkpieceServerStateTextCodec::decode(std::string_view text,
                                                                          WorkpieceGridShape shape) {
-    WorkpieceServerState state;
-    const auto value = [&text](std::string_view key) -> std::optional<std::string_view> {
-        const auto start = text.find(key);
-        if (start == std::string_view::npos)
-            return std::nullopt;
-        const auto begin = start + key.size();
-        const auto end = text.find('\n', begin);
-        return text.substr(begin, end - begin);
-    };
+    if (text.size() > 1024U * 1024U)
+        return core::Result<WorkpieceServerState>::failure(
+            "workpiece_state.too_large", "workpiece server state exceeds one MiB");
     if (!text.starts_with("heartstead.workpiece_server_state.v1\n") || !text.ends_with("end\n"))
         return core::Result<WorkpieceServerState>::failure(
             "workpiece_state.invalid_codec", "workpiece server state framing is invalid");
-    auto encoded_shape = value("shape=");
-    auto blob_text = value("blob=");
-    auto flaws_text = value("flaws=");
-    auto revealed_text = value("revealed=");
-    auto mass_text = value("mass=");
-    auto base_text = value("base_closed=");
-    auto thin_text = value("thin_walls=");
+    std::map<std::string, std::string_view> fields;
+    std::vector<std::string_view> measurements;
+    auto start = text.find('\n') + 1U;
+    while (start < text.size()) {
+        const auto end = text.find('\n', start);
+        if (end == std::string_view::npos)
+            break;
+        const auto line = text.substr(start, end - start);
+        start = end + 1U;
+        if (line == "end")
+            break;
+        const auto separator = line.find('=');
+        if (separator == std::string_view::npos || separator == 0)
+            return core::Result<WorkpieceServerState>::failure("workpiece_state.invalid_codec",
+                                                               "workpiece state line is malformed");
+        const auto key = std::string(line.substr(0, separator));
+        const auto value = line.substr(separator + 1U);
+        if (key == "measurement") {
+            if (measurements.size() >= 256)
+                return core::Result<WorkpieceServerState>::failure(
+                    "workpiece_state.too_many_measurements",
+                    "workpiece state contains too many measurements");
+            measurements.push_back(value);
+        } else if (key != "shape" && key != "blob" && key != "flaws" && key != "revealed" &&
+                   key != "classification" && key != "mass" && key != "base_closed" &&
+                   key != "thin_walls") {
+            return core::Result<WorkpieceServerState>::failure(
+                "workpiece_state.unknown_field", "workpiece state contains an unknown field");
+        } else if (!fields.emplace(key, value).second) {
+            return core::Result<WorkpieceServerState>::failure(
+                "workpiece_state.duplicate_field", "workpiece state field is duplicated");
+        }
+    }
+    const auto field_value = [&fields](std::string_view key) -> std::optional<std::string_view> {
+        const auto found = fields.find(std::string(key));
+        return found == fields.end() ? std::nullopt : std::optional{found->second};
+    };
+    auto encoded_shape = field_value("shape");
+    auto blob_text = field_value("blob");
+    auto flaws_text = field_value("flaws");
+    auto revealed_text = field_value("revealed");
+    auto mass_text = field_value("mass");
+    auto base_text = field_value("base_closed");
+    auto thin_text = field_value("thin_walls");
     if (!encoded_shape || !blob_text || !flaws_text || !revealed_text || !mass_text || !base_text ||
         !thin_text)
         return core::Result<WorkpieceServerState>::failure("workpiece_state.incomplete",
@@ -177,14 +228,34 @@ core::Result<WorkpieceServerState> WorkpieceServerStateTextCodec::decode(std::st
         mass_end != mass_text->data() + mass_text->size())
         return core::Result<WorkpieceServerState>::failure(
             "workpiece_state.invalid_codec", "workpiece server state fields are invalid");
+    if ((*base_text != "0" && *base_text != "1") || (*thin_text != "0" && *thin_text != "1"))
+        return core::Result<WorkpieceServerState>::failure("workpiece_state.invalid_codec",
+                                                           "workpiece state boolean is invalid");
+    WorkpieceServerState state;
     state.blob_mask = std::move(blob).value();
     state.hidden_flaw_mask = std::move(flaws).value();
     state.revealed_mask = std::move(revealed).value();
     state.output_metadata.mass_units = mass;
     state.output_metadata.base_closed = *base_text == "1";
     state.output_metadata.thin_walls = *thin_text == "1";
-    if (auto classification = value("classification="))
+    if (auto classification = field_value("classification"))
         state.output_metadata.classification = std::string(*classification);
+    for (const auto encoded : measurements) {
+        const auto separator = encoded.find('|');
+        if (separator == std::string_view::npos || separator == 0)
+            return core::Result<WorkpieceServerState>::failure(
+                "workpiece_state.invalid_measurement", "workpiece measurement is malformed");
+        std::int64_t parsed = 0;
+        const auto number = encoded.substr(separator + 1U);
+        const auto [end, error] =
+            std::from_chars(number.data(), number.data() + number.size(), parsed);
+        const auto key = std::string(encoded.substr(0, separator));
+        if (!core::is_valid_local_id(key) || error != std::errc{} ||
+            end != number.data() + number.size() ||
+            !state.output_metadata.measurements.emplace(key, parsed).second)
+            return core::Result<WorkpieceServerState>::failure(
+                "workpiece_state.invalid_measurement", "workpiece measurement is invalid");
+    }
     auto status = state.validate(shape);
     if (!status)
         return core::Result<WorkpieceServerState>::failure(status.error().code,

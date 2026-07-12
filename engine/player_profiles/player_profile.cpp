@@ -23,6 +23,11 @@ constexpr std::size_t max_display_name_bytes = 128;
 constexpr std::size_t max_character_data_bytes = 1024U * 1024U;
 constexpr std::uintmax_t max_profile_file_bytes = 4U * 1024U * 1024U;
 constexpr std::uintmax_t max_map_discovery_file_bytes = 256U * 1024U * 1024U;
+constexpr std::size_t max_display_name_history = 64;
+constexpr std::size_t max_roles = 64;
+constexpr std::size_t max_markers = 4096;
+constexpr std::size_t max_flags = 4096;
+constexpr std::size_t max_world_settings = 1024;
 
 [[nodiscard]] bool is_hex(char value) noexcept {
     return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
@@ -312,6 +317,13 @@ core::Status PlayerProfile::validate() const {
         return core::Status::failure("player_profile.missing_display_name",
                                      "player profile requires a display name history");
     }
+    if (display_names_history.size() > max_display_name_history || roles.size() > max_roles ||
+        waypoints.size() > max_markers || personal_markers.size() > max_markers ||
+        handbook_flags.size() > max_flags || progression_flags.size() > max_flags ||
+        world_settings.size() > max_world_settings) {
+        return core::Status::failure("player_profile.collection_too_large",
+                                     "player profile collection exceeds its safety limit");
+    }
     for (const auto& name : display_names_history) {
         if (!valid_display_name(name)) {
             return core::Status::failure(
@@ -389,6 +401,9 @@ core::Status PlayerProfile::remember_display_name(std::string name) {
         return core::Status::failure("player_profile.revision_overflow",
                                      "player profile revision cannot overflow u64");
     }
+    if (display_names_history.size() >= max_display_name_history) {
+        display_names_history.erase(display_names_history.begin());
+    }
     display_names_history.push_back(std::move(name));
     ++revision;
     return core::Status::ok();
@@ -434,6 +449,10 @@ std::string PlayerProfileTextCodec::encode(const PlayerProfile& profile) {
 }
 
 core::Result<PlayerProfile> PlayerProfileTextCodec::decode(std::string_view text) {
+    if (text.size() > max_profile_file_bytes) {
+        return core::Result<PlayerProfile>::failure("player_profile.file_too_large",
+                                                    "player profile exceeds its size limit");
+    }
     PlayerProfile profile;
     bool saw_magic = false;
     bool saw_end = false;
@@ -610,12 +629,49 @@ core::Status FilePlayerProfileStore::save_unlocked(const PlayerProfile& profile)
         return status;
     }
     const auto directory = profile_directory(profile.player_uuid);
-    status = write_atomic(directory / "profile.dat", PlayerProfileTextCodec::encode(profile));
+    auto staging = directory;
+    staging += ".tmp";
+    auto previous = directory;
+    previous += ".old";
+    std::error_code error;
+    std::filesystem::remove_all(staging, error);
+    if (error)
+        return filesystem_error("player_profile.cleanup_failed", error);
+    status = write_atomic(staging / "profile.dat", PlayerProfileTextCodec::encode(profile));
     if (!status) {
+        std::filesystem::remove_all(staging, error);
         return status;
     }
-    return write_atomic(directory / "map_discovery.dat",
-                        MapDiscoveryTextCodec::encode(profile.map_discovery));
+    status = write_atomic(staging / "map_discovery.dat",
+                          MapDiscoveryTextCodec::encode(profile.map_discovery));
+    if (!status) {
+        std::filesystem::remove_all(staging, error);
+        return status;
+    }
+
+    std::filesystem::remove_all(previous, error);
+    if (error)
+        return filesystem_error("player_profile.cleanup_failed", error);
+    const auto had_previous = std::filesystem::exists(directory, error);
+    if (error)
+        return filesystem_error("player_profile.commit_failed", error);
+    if (had_previous) {
+        std::filesystem::rename(directory, previous, error);
+        if (error)
+            return filesystem_error("player_profile.commit_failed", error);
+    }
+    std::filesystem::rename(staging, directory, error);
+    if (error) {
+        const auto commit_error = error;
+        if (had_previous) {
+            error.clear();
+            std::filesystem::rename(previous, directory, error);
+        }
+        std::filesystem::remove_all(staging, error);
+        return filesystem_error("player_profile.commit_failed", commit_error);
+    }
+    std::filesystem::remove_all(previous, error);
+    return core::Status::ok();
 }
 
 core::Result<PlayerProfile> FilePlayerProfileStore::load(const PlayerUuid& uuid) const {
@@ -629,6 +685,16 @@ core::Result<PlayerProfile> FilePlayerProfileStore::load(const PlayerUuid& uuid)
 
 core::Result<PlayerProfile> FilePlayerProfileStore::load_unlocked(const PlayerUuid& uuid) const {
     const auto directory = profile_directory(uuid);
+    auto previous = directory;
+    previous += ".old";
+    std::error_code recovery_error;
+    if (!std::filesystem::exists(directory, recovery_error) && !recovery_error &&
+        std::filesystem::exists(previous, recovery_error) && !recovery_error) {
+        std::filesystem::rename(previous, directory, recovery_error);
+    }
+    if (recovery_error)
+        return core::Result<PlayerProfile>::failure("player_profile.recovery_failed",
+                                                    recovery_error.message());
     auto text = read_text(directory / "profile.dat", max_profile_file_bytes);
     if (!text) {
         return core::Result<PlayerProfile>::failure(text.error().code, text.error().message);

@@ -514,7 +514,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(!mod_index.has_errors());
     for (const auto& entry : pack_plan.value().entries) {
         auto pack_index = heartstead::assets::AssetCatalogBuilder::index_directory(
-            catalog, entry.manifest.root / "assets", entry.manifest.id,
+            catalog, entry.manifest.root / "assets", entry.manifest.target_namespace,
             heartstead::assets::AssetSourceKind::resource_pack, entry.manifest.id,
             entry.asset_priority);
         assert(!pack_index.has_errors());
@@ -529,16 +529,16 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(catalog.count_kind(heartstead::assets::AssetKind::shader) == 1);
     assert(catalog.count_kind(heartstead::assets::AssetKind::sound) == 1);
 
-    const auto* active = catalog.find_active("textures/items/raw_clay.txt");
+    const auto* active = catalog.find_active("base:textures/items/raw_clay.txt");
     assert(active != nullptr);
     assert(active->source_kind == heartstead::assets::AssetSourceKind::resource_pack);
     assert(active->source_id == "ultra_pack");
     assert(active->priority == heartstead::assets::default_resource_pack_priority_base +
                                    heartstead::assets::default_resource_pack_priority_step);
-    assert(active->virtual_path.to_string() == "ultra_pack:textures/items/raw_clay.txt");
+    assert(active->virtual_path.to_string() == "base:textures/items/raw_clay.txt");
     assert(!active->content_hash.empty());
 
-    auto all_raw_clay = catalog.records_for("textures/items/raw_clay.txt");
+    auto all_raw_clay = catalog.records_for("base:textures/items/raw_clay.txt");
     assert(all_raw_clay.size() == 3);
 
     heartstead::assets::VirtualFileSystem active_vfs;
@@ -555,7 +555,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(active_overlay_catalog.record_count() == 5);
     assert(active_overlay_catalog.active_count() == 5);
     const auto* active_overlay_texture =
-        active_overlay_catalog.find_active("textures/items/raw_clay.txt");
+        active_overlay_catalog.find_active("base:textures/items/raw_clay.txt");
     assert(active_overlay_texture != nullptr);
     assert(active_overlay_texture->virtual_path.to_string() == "base:textures/items/raw_clay.txt");
     assert(active_overlay_texture->source_path.string().find("resource_packs") !=
@@ -654,29 +654,30 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(cooked.value().count_kind(heartstead::assets::AssetKind::model) == 1);
     assert(cooked.value().count_kind(heartstead::assets::AssetKind::shader) == 1);
     assert(cooked.value().count_kind(heartstead::assets::AssetKind::sound) == 1);
-    const auto* cooked_raw_clay = cooked.value().find("textures/items/raw_clay.txt");
+    const auto* cooked_raw_clay = cooked.value().find("base:textures/items/raw_clay.txt");
     assert(cooked_raw_clay != nullptr);
     assert(cooked_raw_clay->source_id == "ultra_pack");
     assert(cooked_raw_clay->source_kind == heartstead::assets::AssetSourceKind::resource_pack);
     assert(cooked_raw_clay->active);
     assert(cooked_raw_clay->cooked_relative_path.generic_string() ==
-           "ultra_pack/development/texture/textures/items/raw_clay.txt.cooked");
+           "ultra_pack/development/texture/base/textures/items/raw_clay.txt.cooked");
     assert(!cooked_raw_clay->cooked_hash.empty());
     assert(cooked.value().validate());
 
     const auto encoded = heartstead::assets::CookedAssetManifestTextCodec::encode(cooked.value());
     auto decoded = heartstead::assets::CookedAssetManifestTextCodec::decode(encoded);
     assert(decoded);
+    assert(!heartstead::assets::CookedAssetManifestTextCodec::decode(encoded + "trailing=1\n"));
     assert(decoded.value().records.size() == 5);
-    assert(decoded.value().find("textures/items/raw_clay.txt") != nullptr);
-    assert(decoded.value().find("textures/items/raw_clay.txt")->source_id == "ultra_pack");
+    assert(decoded.value().find("base:textures/items/raw_clay.txt") != nullptr);
+    assert(decoded.value().find("base:textures/items/raw_clay.txt")->source_id == "ultra_pack");
 
     auto all_cooked = heartstead::assets::CookedAssetManifestBuilder::build(
         catalog, heartstead::assets::CookedAssetBuildConfig{"development", false, 1});
     assert(all_cooked);
     assert(all_cooked.value().records.size() == 7);
     assert(all_cooked.value().active_count() == 5);
-    assert(all_cooked.value().records_for("textures/items/raw_clay.txt").size() == 3);
+    assert(all_cooked.value().records_for("base:textures/items/raw_clay.txt").size() == 3);
 
     const auto dependency_assets = root / "dependency_assets";
     write_text(dependency_assets / "textures/items/clay.txt", "dependency texture");
@@ -690,7 +691,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
 
     heartstead::assets::AssetCatalog dependency_catalog;
     assert(dependency_catalog.add(heartstead::assets::AssetRecord{
-        "textures/items/clay.txt",
+        "base:textures/items/clay.txt",
         heartstead::assets::AssetKind::texture,
         dependency_texture_path.value(),
         heartstead::assets::AssetSourceKind::mod,
@@ -702,7 +703,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         {},
     }));
     assert(dependency_catalog.add(heartstead::assets::AssetRecord{
-        "materials/clay.mat",
+        "base:materials/clay.mat",
         heartstead::assets::AssetKind::material,
         dependency_material_path.value(),
         heartstead::assets::AssetSourceKind::mod,
@@ -717,8 +718,9 @@ void test_resource_pack_discovery_and_asset_catalog() {
     auto dependency_manifest =
         heartstead::assets::CookedAssetManifestBuilder::build(dependency_catalog);
     assert(dependency_manifest);
-    assert(dependency_manifest.value().find_active("textures/items/clay.txt") != nullptr);
-    const auto* material_record = dependency_manifest.value().find_active("materials/clay.mat");
+    assert(dependency_manifest.value().find_active("base:textures/items/clay.txt") != nullptr);
+    const auto* material_record =
+        dependency_manifest.value().find_active("base:materials/clay.mat");
     assert(material_record != nullptr);
     assert(material_record->dependencies.size() == 1);
     auto dependency_report = dependency_manifest.value().dependency_report();
@@ -731,7 +733,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         heartstead::assets::CookedAssetManifestTextCodec::decode(encoded_dependency_manifest);
     assert(decoded_dependency_manifest);
     assert(decoded_dependency_manifest.value()
-               .find_active("materials/clay.mat")
+               .find_active("base:materials/clay.mat")
                ->dependencies.front()
                .to_string() == "base:textures/items/clay.txt");
 
@@ -742,12 +744,12 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(dependency_cook_result);
     assert(dependency_cook_result.value().cooked_file_count == 2);
     assert(dependency_cook_result.value()
-               .manifest.find_active("materials/clay.mat")
+               .manifest.find_active("base:materials/clay.mat")
                ->dependencies.size() == 1);
 
     heartstead::assets::AssetCatalog missing_dependency_catalog;
     assert(missing_dependency_catalog.add(heartstead::assets::AssetRecord{
-        "materials/missing.mat",
+        "base:materials/missing.mat",
         heartstead::assets::AssetKind::material,
         heartstead::assets::VirtualPath::parse("base:materials/missing.mat").value(),
         heartstead::assets::AssetSourceKind::mod,
@@ -806,11 +808,11 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_texture_cook.value().manifest.profile == "production");
     assert(production_texture_cook.value().cooked_file_count == 3);
     const auto* production_png_record =
-        production_texture_cook.value().manifest.find("textures/items/raw_clay.png");
+        production_texture_cook.value().manifest.find("base:textures/items/raw_clay.png");
     const auto* production_ktx2_record =
-        production_texture_cook.value().manifest.find("textures/voxels/clay.ktx2");
+        production_texture_cook.value().manifest.find("base:textures/voxels/clay.ktx2");
     const auto* production_jpeg_record =
-        production_texture_cook.value().manifest.find("textures/ui/settlement_icon.jpeg");
+        production_texture_cook.value().manifest.find("base:textures/ui/settlement_icon.jpeg");
     assert(production_png_record != nullptr);
     assert(production_ktx2_record != nullptr);
     assert(production_jpeg_record != nullptr);
@@ -827,7 +829,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         heartstead::assets::CookedAssetStore::load(production_texture_cook_config.output_root);
     assert(production_texture_store);
     auto production_png_payload =
-        production_texture_store.value().load_payload("textures/items/raw_clay.png");
+        production_texture_store.value().load_payload("base:textures/items/raw_clay.png");
     assert(production_png_payload);
     assert(production_png_payload.value().kind == heartstead::assets::AssetKind::texture);
     assert(production_png_payload.value().backend == "texture_png_ktx2_jpeg_converter_v1");
@@ -838,13 +840,13 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_png_payload.value().metadata.at("texture.color_type") == "6");
     assert(production_png_payload.value().bytes.size() == minimal_png_bytes().size());
     auto production_ktx2_payload =
-        production_texture_store.value().load_payload("textures/voxels/clay.ktx2");
+        production_texture_store.value().load_payload("base:textures/voxels/clay.ktx2");
     assert(production_ktx2_payload);
     assert(production_ktx2_payload.value().metadata.at("texture.container") == "ktx2");
     assert(production_ktx2_payload.value().metadata.at("texture.level_count") == "1");
     assert(production_ktx2_payload.value().bytes.size() == minimal_ktx2_bytes().size());
     auto production_jpeg_payload =
-        production_texture_store.value().load_payload("textures/ui/settlement_icon.jpeg");
+        production_texture_store.value().load_payload("base:textures/ui/settlement_icon.jpeg");
     assert(production_jpeg_payload);
     assert(production_jpeg_payload.value().kind == heartstead::assets::AssetKind::texture);
     assert(production_jpeg_payload.value().backend == "texture_png_ktx2_jpeg_converter_v1");
@@ -904,9 +906,9 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_model_cook.value().manifest.profile == "production");
     assert(production_model_cook.value().cooked_file_count == 2);
     const auto* production_gltf_record =
-        production_model_cook.value().manifest.find("models/building/wall.gltf");
+        production_model_cook.value().manifest.find("base:models/building/wall.gltf");
     const auto* production_glb_record =
-        production_model_cook.value().manifest.find("models/building/gate.glb");
+        production_model_cook.value().manifest.find("base:models/building/gate.glb");
     assert(production_gltf_record != nullptr);
     assert(production_glb_record != nullptr);
     assert(production_gltf_record->kind == heartstead::assets::AssetKind::model);
@@ -918,7 +920,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         heartstead::assets::CookedAssetStore::load(production_model_cook_config.output_root);
     assert(production_model_store);
     auto production_gltf_payload =
-        production_model_store.value().load_payload("models/building/wall.gltf");
+        production_model_store.value().load_payload("base:models/building/wall.gltf");
     assert(production_gltf_payload);
     assert(production_gltf_payload.value().kind == heartstead::assets::AssetKind::model);
     assert(production_gltf_payload.value().backend == "model_gltf_runtime_converter_v1");
@@ -928,7 +930,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(std::string(production_gltf_payload.value().bytes.begin(),
                        production_gltf_payload.value().bytes.end()) == minimal_gltf_text());
     auto production_glb_payload =
-        production_model_store.value().load_payload("models/building/gate.glb");
+        production_model_store.value().load_payload("base:models/building/gate.glb");
     assert(production_glb_payload);
     assert(production_glb_payload.value().metadata.at("model.container") == "glb");
     assert(production_glb_payload.value().metadata.at("model.chunk_count") == "1");
@@ -973,21 +975,21 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_data_cook.value().manifest.profile == "production");
     assert(production_data_cook.value().cooked_file_count == 4);
     const auto* production_data_record =
-        production_data_cook.value().manifest.find("data/settings.toml");
+        production_data_cook.value().manifest.find("base:data/settings.toml");
     assert(production_data_record != nullptr);
     assert(production_data_record->cooked_relative_path.generic_string() ==
-           "base/production/data/data/settings.toml.cooked");
+           "base/production/data/base/data/settings.toml.cooked");
     assert(read_text(production_data_cook_config.output_root /
                      production_data_record->cooked_relative_path)
                .find("backend=data_runtime_converter_v1") != std::string::npos);
     const auto* production_locale_record =
-        production_data_cook.value().manifest.find("locale/en_us.toml");
+        production_data_cook.value().manifest.find("base:locale/en_us.toml");
     assert(production_locale_record != nullptr);
     assert(read_text(production_data_cook_config.output_root /
                      production_locale_record->cooked_relative_path)
                .find("backend=localization_runtime_converter_v1") != std::string::npos);
     const auto* production_material_record =
-        production_data_cook.value().manifest.find("materials/clay.mat");
+        production_data_cook.value().manifest.find("base:materials/clay.mat");
     assert(production_material_record != nullptr);
     assert(production_material_record->kind == heartstead::assets::AssetKind::material);
     assert(read_text(production_data_cook_config.output_root /
@@ -999,7 +1001,8 @@ void test_resource_pack_discovery_and_asset_catalog() {
     auto production_store =
         heartstead::assets::CookedAssetStore::load(production_data_cook_config.output_root);
     assert(production_store);
-    auto production_material_payload = production_store.value().load_payload("materials/clay.mat");
+    auto production_material_payload =
+        production_store.value().load_payload("base:materials/clay.mat");
     assert(production_material_payload);
     assert(production_material_payload.value().kind == heartstead::assets::AssetKind::material);
     assert(production_material_payload.value().backend == "material_runtime_converter_v1");
@@ -1032,13 +1035,13 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_audio_cook.value().manifest.profile == "production");
     assert(production_audio_cook.value().cooked_file_count == 4);
     const auto* production_sound_record =
-        production_audio_cook.value().manifest.find("sounds/tools/hammer.wav");
+        production_audio_cook.value().manifest.find("base:sounds/tools/hammer.wav");
     const auto* production_ogg_record =
-        production_audio_cook.value().manifest.find("sounds/tools/impact.ogg");
+        production_audio_cook.value().manifest.find("base:sounds/tools/impact.ogg");
     const auto* production_music_record =
-        production_audio_cook.value().manifest.find("music/theme.wav");
+        production_audio_cook.value().manifest.find("base:music/theme.wav");
     const auto* production_flac_record =
-        production_audio_cook.value().manifest.find("music/ambient.flac");
+        production_audio_cook.value().manifest.find("base:music/ambient.flac");
     assert(production_sound_record != nullptr);
     assert(production_ogg_record != nullptr);
     assert(production_music_record != nullptr);
@@ -1055,7 +1058,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         heartstead::assets::CookedAssetStore::load(production_audio_cook_config.output_root);
     assert(production_audio_store);
     auto production_sound_payload =
-        production_audio_store.value().load_payload("sounds/tools/hammer.wav");
+        production_audio_store.value().load_payload("base:sounds/tools/hammer.wav");
     assert(production_sound_payload);
     assert(production_sound_payload.value().kind == heartstead::assets::AssetKind::sound);
     assert(production_sound_payload.value().backend == "audio_runtime_converter_v1");
@@ -1066,18 +1069,19 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_sound_payload.value().metadata.at("audio.bits_per_sample") == "8");
     assert(production_sound_payload.value().bytes.size() == minimal_wav_bytes().size());
     auto production_ogg_payload =
-        production_audio_store.value().load_payload("sounds/tools/impact.ogg");
+        production_audio_store.value().load_payload("base:sounds/tools/impact.ogg");
     assert(production_ogg_payload);
     assert(production_ogg_payload.value().kind == heartstead::assets::AssetKind::sound);
     assert(production_ogg_payload.value().backend == "audio_runtime_converter_v1");
     assert(production_ogg_payload.value().metadata.at("audio.container") == "ogg");
     assert(production_ogg_payload.value().metadata.at("audio.first_page_payload_bytes") == "4");
     assert(production_ogg_payload.value().bytes.size() == minimal_ogg_bytes().size());
-    auto production_music_payload = production_audio_store.value().load_payload("music/theme.wav");
+    auto production_music_payload =
+        production_audio_store.value().load_payload("base:music/theme.wav");
     assert(production_music_payload);
     assert(production_music_payload.value().kind == heartstead::assets::AssetKind::music);
     auto production_flac_payload =
-        production_audio_store.value().load_payload("music/ambient.flac");
+        production_audio_store.value().load_payload("base:music/ambient.flac");
     assert(production_flac_payload);
     assert(production_flac_payload.value().kind == heartstead::assets::AssetKind::music);
     assert(production_flac_payload.value().backend == "audio_runtime_converter_v1");
@@ -1150,7 +1154,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_font_cook.value().manifest.profile == "production");
     assert(production_font_cook.value().cooked_file_count == 1);
     const auto* production_font_record =
-        production_font_cook.value().manifest.find("fonts/settlement.ttf");
+        production_font_cook.value().manifest.find("base:fonts/settlement.ttf");
     assert(production_font_record != nullptr);
     assert(production_font_record->kind == heartstead::assets::AssetKind::font);
     assert(read_text(production_font_cook_config.output_root /
@@ -1160,7 +1164,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         heartstead::assets::CookedAssetStore::load(production_font_cook_config.output_root);
     assert(production_font_store);
     auto production_font_payload =
-        production_font_store.value().load_payload("fonts/settlement.ttf");
+        production_font_store.value().load_payload("base:fonts/settlement.ttf");
     assert(production_font_payload);
     assert(production_font_payload.value().kind == heartstead::assets::AssetKind::font);
     assert(production_font_payload.value().backend == "font_runtime_converter_v1");
@@ -1205,7 +1209,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_shader_cook.value().manifest.profile == "production");
     assert(production_shader_cook.value().cooked_file_count == 1);
     const auto* production_shader_record =
-        production_shader_cook.value().manifest.find("shaders/minimal.vert.spv");
+        production_shader_cook.value().manifest.find("base:shaders/minimal.vert.spv");
     assert(production_shader_record != nullptr);
     assert(production_shader_record->kind == heartstead::assets::AssetKind::shader);
     assert(read_text(production_shader_cook_config.output_root /
@@ -1215,7 +1219,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         heartstead::assets::CookedAssetStore::load(production_shader_cook_config.output_root);
     assert(production_shader_store);
     auto production_shader_payload =
-        production_shader_store.value().load_payload("shaders/minimal.vert.spv");
+        production_shader_store.value().load_payload("base:shaders/minimal.vert.spv");
     assert(production_shader_payload);
     assert(production_shader_payload.value().kind == heartstead::assets::AssetKind::shader);
     assert(production_shader_payload.value().backend == "shader_spirv_runtime_passthrough_v1");
@@ -1265,11 +1269,11 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(cooked_result.value().manifest.active_count() == 5);
     assert(std::filesystem::exists(cooked_result.value().manifest_path));
 
-    const auto* cooked_model = cooked_result.value().manifest.find("models/building/wall.glb");
-    const auto* cooked_shader = cooked_result.value().manifest.find("shaders/wyrd_fog.slang");
-    const auto* cooked_sound = cooked_result.value().manifest.find("sounds/tools/hammer.wav");
+    const auto* cooked_model = cooked_result.value().manifest.find("base:models/building/wall.glb");
+    const auto* cooked_shader = cooked_result.value().manifest.find("base:shaders/wyrd_fog.slang");
+    const auto* cooked_sound = cooked_result.value().manifest.find("base:sounds/tools/hammer.wav");
     const auto* cooked_output_raw_clay =
-        cooked_result.value().manifest.find("textures/items/raw_clay.txt");
+        cooked_result.value().manifest.find("base:textures/items/raw_clay.txt");
     assert(cooked_output_raw_clay != nullptr);
     assert(cooked_model != nullptr);
     assert(cooked_shader != nullptr);
@@ -1292,7 +1296,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(!shader_compile.value().has_errors());
     assert(shader_compile.value().compiled_shader_count == 1);
     assert(shader_compile.value().records.size() == 1);
-    assert(shader_compile.value().records.front().logical_id == "shaders/wyrd_fog.slang");
+    assert(shader_compile.value().records.front().logical_id == "base:shaders/wyrd_fog.slang");
     assert(shader_compile.value().records.front().language ==
            heartstead::renderer::shaders::ShaderSourceLanguage::slang);
     assert(shader_compile.value().records.front().role ==
@@ -1306,7 +1310,8 @@ void test_resource_pack_discovery_and_asset_catalog() {
         heartstead::debug::Inspector::inspect(shader_compile.value().records.front());
     assert(shader_record_inspection.object_type == "compiled_shader_record");
     assert(shader_record_inspection.state == "compiled");
-    assert(shader_record_inspection.find_field("logical_id")->value == "shaders/wyrd_fog.slang");
+    assert(shader_record_inspection.find_field("logical_id")->value ==
+           "base:shaders/wyrd_fog.slang");
     assert(shader_record_inspection.find_field("language")->value == "slang");
     assert(shader_record_inspection.find_field("role")->value == "library");
     assert(shader_record_inspection.find_field("backend")->value == "slang_dev_validation_v1");
@@ -1354,7 +1359,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(production_shader_compile.value().compiled_shader_count == 1);
     assert(production_shader_compile.value().records.size() == 1);
     assert(production_shader_compile.value().records.front().logical_id ==
-           "shaders/minimal.vert.spv");
+           "base:shaders/minimal.vert.spv");
     assert(production_shader_compile.value().records.front().language ==
            heartstead::renderer::shaders::ShaderSourceLanguage::spirv);
     assert(production_shader_compile.value().records.front().role ==
@@ -1369,7 +1374,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
 
     heartstead::assets::AssetCatalog production_slang_catalog;
     assert(production_slang_catalog.add(heartstead::assets::AssetRecord{
-        "shaders/wyrd_fog.slang",
+        "base:shaders/wyrd_fog.slang",
         heartstead::assets::AssetKind::shader,
         heartstead::assets::VirtualPath::parse("base:shaders/wyrd_fog.slang").value(),
         heartstead::assets::AssetSourceKind::mod,
@@ -1415,7 +1420,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     auto bad_shader_path = heartstead::assets::VirtualPath::parse("base:shaders/bad.txt");
     assert(bad_shader_path);
     assert(invalid_shader_catalog.add(heartstead::assets::AssetRecord{
-        "shaders/bad.txt",
+        "base:shaders/bad.txt",
         heartstead::assets::AssetKind::shader,
         bad_shader_path.value(),
         heartstead::assets::AssetSourceKind::mod,
@@ -1438,9 +1443,9 @@ void test_resource_pack_discovery_and_asset_catalog() {
     auto store = heartstead::assets::CookedAssetStore::load(cooked_output);
     assert(store);
     assert(store.value().manifest().records.size() == 5);
-    auto raw_clay_payload = store.value().load_payload("textures/items/raw_clay.txt");
+    auto raw_clay_payload = store.value().load_payload("base:textures/items/raw_clay.txt");
     assert(raw_clay_payload);
-    assert(raw_clay_payload.value().logical_id == "textures/items/raw_clay.txt");
+    assert(raw_clay_payload.value().logical_id == "base:textures/items/raw_clay.txt");
     assert(raw_clay_payload.value().kind == heartstead::assets::AssetKind::texture);
     assert(raw_clay_payload.value().backend == "texture_dev_passthrough_v1");
     assert(raw_clay_payload.value().profile == "development");
@@ -1448,7 +1453,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(std::string(raw_clay_payload.value().bytes.begin(),
                        raw_clay_payload.value().bytes.end()) == "ultra resource pack texture");
 
-    auto missing_payload = store.value().load_payload("textures/items/missing.txt");
+    auto missing_payload = store.value().load_payload("base:textures/items/missing.txt");
     assert(!missing_payload);
     assert(missing_payload.error().code == "cooked_asset_store.asset_not_found");
 
@@ -1463,7 +1468,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(!tampered_body_bytes.empty());
     tampered_body_bytes.back() ^= 0x01U;
     write_bytes(raw_payload_path, tampered_body_bytes);
-    auto tampered_store_payload = store.value().load_payload("textures/items/raw_clay.txt");
+    auto tampered_store_payload = store.value().load_payload("base:textures/items/raw_clay.txt");
     assert(!tampered_store_payload);
     assert(tampered_store_payload.error().code == "cooked_asset_store.cooked_hash_mismatch");
     write_bytes(raw_payload_path, raw_payload_bytes);
@@ -2124,7 +2129,7 @@ void test_renderer_rhi() {
     auto clay_texture_asset =
         heartstead::assets::VirtualPath::parse("base:textures/voxels/clay.txt");
     auto hd_clay_texture_asset =
-        heartstead::assets::VirtualPath::parse("hd_pack:textures/voxels/clay.txt");
+        heartstead::assets::VirtualPath::parse("base:textures/voxels/clay.txt");
     auto moss_texture_asset =
         heartstead::assets::VirtualPath::parse("base:textures/voxels/moss.txt");
     assert(terrain_shader_asset);
@@ -2134,7 +2139,7 @@ void test_renderer_rhi() {
 
     heartstead::assets::AssetCatalog material_asset_catalog;
     assert(material_asset_catalog.add(heartstead::assets::AssetRecord{
-        terrain_shader_asset.value().relative_path.generic_string(),
+        heartstead::assets::asset_logical_id(terrain_shader_asset.value()),
         heartstead::assets::AssetKind::shader,
         terrain_shader_asset.value(),
         heartstead::assets::AssetSourceKind::mod,
@@ -2146,7 +2151,7 @@ void test_renderer_rhi() {
         {},
     }));
     assert(material_asset_catalog.add(heartstead::assets::AssetRecord{
-        clay_texture_asset.value().relative_path.generic_string(),
+        heartstead::assets::asset_logical_id(clay_texture_asset.value()),
         heartstead::assets::AssetKind::texture,
         clay_texture_asset.value(),
         heartstead::assets::AssetSourceKind::mod,
@@ -2158,7 +2163,7 @@ void test_renderer_rhi() {
         {},
     }));
     assert(material_asset_catalog.add(heartstead::assets::AssetRecord{
-        clay_texture_asset.value().relative_path.generic_string(),
+        heartstead::assets::asset_logical_id(hd_clay_texture_asset.value()),
         heartstead::assets::AssetKind::texture,
         hd_clay_texture_asset.value(),
         heartstead::assets::AssetSourceKind::resource_pack,
@@ -2191,7 +2196,7 @@ void test_renderer_rhi() {
         });
     assert(texture_reference != material_asset_report.references.end());
     assert(texture_reference->declared_path.to_string() == "base:textures/voxels/clay.txt");
-    assert(texture_reference->active_path.to_string() == "hd_pack:textures/voxels/clay.txt");
+    assert(texture_reference->active_path.to_string() == "base:textures/voxels/clay.txt");
     assert(texture_reference->source_kind == heartstead::assets::AssetSourceKind::resource_pack);
     assert(texture_reference->overridden);
     assert(material_asset_reference_kind_name(MaterialAssetReferenceKind::shader_template) ==
@@ -6655,7 +6660,7 @@ void test_debug_inspection() {
         inspected_catalog, debug_mod_assets, "base", heartstead::assets::AssetSourceKind::mod,
         "base", 0);
     auto inspected_pack_index = heartstead::assets::AssetCatalogBuilder::index_directory(
-        inspected_catalog, debug_pack_assets, "hd_pack",
+        inspected_catalog, debug_pack_assets, "base",
         heartstead::assets::AssetSourceKind::resource_pack, "hd_pack", 1000);
     assert(!inspected_mod_index.has_errors());
     assert(!inspected_pack_index.has_errors());
@@ -6685,13 +6690,13 @@ void test_debug_inspection() {
     assert(pack_plan_inspection.find_field("priority_order_valid")->value == "true");
     assert(pack_plan_inspection.issues.empty());
 
-    const auto* inspected_asset = inspected_catalog.find_active("textures/items/raw_clay.txt");
+    const auto* inspected_asset = inspected_catalog.find_active("base:textures/items/raw_clay.txt");
     assert(inspected_asset != nullptr);
     auto asset_record_inspection = heartstead::debug::Inspector::inspect(*inspected_asset);
     assert(asset_record_inspection.object_type == "asset_record");
     assert(asset_record_inspection.state == "source");
     assert(asset_record_inspection.find_field("logical_id")->value ==
-           "textures/items/raw_clay.txt");
+           "base:textures/items/raw_clay.txt");
     assert(asset_record_inspection.find_field("source_kind")->value == "resource_pack");
     assert(asset_record_inspection.find_field("source_id")->value == "hd_pack");
     assert(asset_record_inspection.find_field("content_hash")->value.size() == 16);
@@ -6711,7 +6716,7 @@ void test_debug_inspection() {
     assert(cooked_manifest_inspection.find_field("dependency_issue_count")->value == "0");
 
     const auto* inspected_cooked_asset =
-        inspected_cooked_manifest.value().find("textures/items/raw_clay.txt");
+        inspected_cooked_manifest.value().find("base:textures/items/raw_clay.txt");
     assert(inspected_cooked_asset != nullptr);
     auto cooked_record_inspection = heartstead::debug::Inspector::inspect(*inspected_cooked_asset);
     assert(cooked_record_inspection.object_type == "cooked_asset_record");
@@ -6719,7 +6724,7 @@ void test_debug_inspection() {
     assert(cooked_record_inspection.find_field("source_id")->value == "hd_pack");
     assert(cooked_record_inspection.find_field("cooked_hash")->value.size() == 16);
     assert(cooked_record_inspection.find_field("cooked_relative_path")->value ==
-           "hd_pack/development/texture/textures/items/raw_clay.txt.cooked");
+           "hd_pack/development/texture/base/textures/items/raw_clay.txt.cooked");
 
     auto invalid_cooked_record = *inspected_cooked_asset;
     invalid_cooked_record.cooked_hash.clear();
@@ -7797,6 +7802,7 @@ void test_world_simulation_subject_derivation() {
     assembly.root_build_piece_id = build_piece.object_id;
     assembly.prototype_id = assembly_prototype.value();
     assembly.operating = true;
+    assembly.state = heartstead::assemblies::AssemblyState::operating;
     assert(state.assemblies().insert(assembly));
 
     auto& storage_network =
@@ -8048,15 +8054,13 @@ void test_world_simulation_subject_derivation() {
     assert(chunk_only.value().front().kind ==
            heartstead::simulation::SimulationSubjectKind::chunk_region);
 
-    options.last_update_time_ms = -1;
-    auto invalid = heartstead::world::derive_simulation_subjects(state, options);
-    assert(!invalid);
-    assert(invalid.error().code == "simulation_subjects.invalid_last_update_time");
-
-    frame_options.subject_options = options;
-    auto invalid_world_plan = heartstead::world::plan_world_simulation_frame(state, frame_options);
-    assert(!invalid_world_plan);
-    assert(invalid_world_plan.error().code == "simulation_subjects.invalid_last_update_time");
+    heartstead::simulation::SimulationSubject far_time_subject;
+    far_time_subject.save_id = heartstead::core::SaveId::from_value(99999);
+    far_time_subject.last_update_time_ms = std::numeric_limits<std::uint64_t>::max();
+    auto far_time = heartstead::simulation::SimulationLodPlanner::classify(
+        far_time_subject, {}, {}, std::numeric_limits<std::uint64_t>::max());
+    assert(far_time);
+    assert(far_time.value().elapsed_since_update_ms == 0);
 }
 
 void test_world_replication_delta_planning() {
@@ -8125,6 +8129,7 @@ void test_world_replication_delta_planning() {
     assembly.root_build_piece_id = build_id;
     assembly.prototype_id = assembly_prototype.value();
     assembly.operating = true;
+    assembly.state = heartstead::assemblies::AssemblyState::operating;
     assert(state.assemblies().insert(assembly));
 
     heartstead::net::ReplicationBatch batch;
@@ -9536,6 +9541,10 @@ void test_command_payload_codec() {
     assert(!net::CommandPayloadTextCodec::decode("a=%GG"));
     assert(!net::CommandPayloadTextCodec::decode("Bad=x"));
     assert(!net::CommandPayloadTextCodec::decode("a=raw=value"));
+
+    net::CommandPayload aggregate_limited;
+    assert(aggregate_limited.set("a", std::string(32U * 1024U, 'x')));
+    assert(!aggregate_limited.set("b", std::string(32U * 1024U, 'y')));
 }
 
 void test_world_command_registry() {
@@ -9641,6 +9650,17 @@ void test_world_command_registry() {
     context.server_time_ms = 500;
     context.prototypes = &registry;
     context.world_state = &state;
+    heartstead::world::VoxelPalette command_palette;
+    heartstead::world::VoxelDefinition command_voxel;
+    command_voxel.type = 12;
+    command_voxel.prototype_id =
+        heartstead::core::PrototypeId::parse("base:voxels/command_test").value();
+    command_voxel.display_name = "Command Test";
+    command_voxel.terrain_material = "test";
+    command_voxel.mining_tool = "none";
+    command_voxel.light_emission = 7;
+    assert(command_palette.add(std::move(command_voxel)));
+    context.voxel_palette = &command_palette;
     state.chunks().get_or_create({0, 0, 0}).clear_all_dirty();
 
     heartstead::net::CommandEnvelope voxel_command;
@@ -9650,7 +9670,7 @@ void test_world_command_registry() {
     heartstead::net::CommandPayload voxel_payload;
     assert(voxel_payload.set("chunk", "0|0|0"));
     assert(voxel_payload.set("voxel", "2|3|4"));
-    assert(voxel_payload.set("cell", "12|7"));
+    assert(voxel_payload.set("prototype", "base:voxels/command_test"));
     voxel_command.payload = heartstead::net::CommandPayloadTextCodec::encode(voxel_payload);
     auto voxel_result = dispatcher.dispatch(voxel_command, context);
     assert(voxel_result);
@@ -9683,7 +9703,7 @@ void test_world_command_registry() {
     assert(build_result.value().reserved_ids.front() == heartstead::core::SaveId::from_value(3000));
     assert(build_result.value().events.front().type == "build_piece.placed");
 
-    const auto* placed = state.build_objects().find(heartstead::core::SaveId::from_value(3000));
+    auto* placed = state.build_objects().find(heartstead::core::SaveId::from_value(3000));
     assert(placed != nullptr);
     assert(placed->prototype_id == wall_id.value());
     assert(placed->transform.position.approximate_global().x == 1.5);
@@ -9721,6 +9741,8 @@ void test_world_command_registry() {
     assert(complete_build_result.value().events.front().type == "build_piece.completed");
     assert(complete_build_result.value().events.front().subject ==
            heartstead::core::SaveId::from_value(3000));
+    placed = state.build_objects().find(heartstead::core::SaveId::from_value(3000));
+    assert(placed != nullptr);
     assert(placed->construction_state == heartstead::build::ConstructionState::complete);
     assert(state.dirty_regions().count(heartstead::dirty::DirtyRegionKind::room_graph) == 1);
     assert(state.dirty_regions().count(
@@ -9950,6 +9972,8 @@ void test_world_command_registry() {
     assert(process_advance_result.value().events.size() == 1);
     assert(process_advance_result.value().events.front().type == "processes.advanced");
     assert(process_advance_result.value().events.front().message == "1");
+    owner_processes = state.processes().find_by_owner(heartstead::core::SaveId::from_value(3000));
+    assert(owner_processes.size() == 1);
     assert(owner_processes.front()->last_update_time_ms == 1200);
     assert(owner_processes.front()->accumulated_effective_work_ms == 1200);
     assert(owner_processes.front()->state == heartstead::processes::ProcessState::complete);
@@ -10588,6 +10612,8 @@ void test_network_transport() {
         duplicate_reassembler.accept_fragment(std::move(conflicting_fragment));
     assert(!conflicting_duplicate);
     assert(conflicting_duplicate.error().code == "transport_fragment.conflicting_duplicate");
+    assert(
+        duplicate_reassembler.accept_fragment(net::TransportPacketFragment{fragments.value()[0]}));
 
     net::TransportPacketReassembler reassembler(fragment_config);
     std::vector<net::TransportPacketFragment> reversed_fragments = fragments.value();
@@ -12239,6 +12265,12 @@ void test_assembly_validation() {
     auto duplicate_port_status = duplicate_port_record.validate_record();
     assert(!duplicate_port_status);
     assert(duplicate_port_status.error().code == "assembly.duplicate_port");
+
+    auto unknown_state_record = record;
+    unknown_state_record.state = static_cast<heartstead::assemblies::AssemblyState>(255);
+    auto unknown_state_status = unknown_state_record.validate_record();
+    assert(!unknown_state_status);
+    assert(unknown_state_status.error().code == "assembly.invalid_state");
 
     record.parts.pop_back();
     validation = heartstead::assemblies::AssemblyValidator::validate(definition, record);

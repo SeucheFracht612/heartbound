@@ -95,7 +95,7 @@ parse_required_ports(const modding::GenericPrototype& prototype) {
                 "required_ports contains invalid port name: " + std::string(port_name));
         }
         ports.push_back(
-            {std::string(port_name), networks::network_kind_for_port_name(port_name), {}, 1});
+            {std::string(port_name), networks::network_kind_for_port_name(port_name), {}, 1, {}});
     }
 
     return core::Result<std::vector<AssemblyPort>>::success(std::move(ports));
@@ -177,6 +177,34 @@ parse_capacity(const modding::GenericPrototype& prototype) {
     return core::Status::ok();
 }
 
+[[nodiscard]] core::Status apply_port_layouts(const modding::GenericPrototype& prototype,
+                                              std::vector<AssemblyPort>& ports) {
+    const auto* value = field(prototype, "port_layouts");
+    if (value == nullptr || value->empty())
+        return core::Status::ok();
+    for (const auto entry : split(*value, ',')) {
+        const auto parts = split(entry, '~');
+        if (parts.size() != 4)
+            return core::Status::failure("assembly_prototype.invalid_port_layout",
+                                         "port layout must be name~x~y~z");
+        const auto port = std::ranges::find_if(
+            ports, [name = parts[0]](const auto& candidate) { return candidate.name == name; });
+        if (port == ports.end())
+            return core::Status::failure("assembly_prototype.unknown_port_layout",
+                                         "port layout references an undeclared port");
+        const auto parse = [](std::string_view text, std::int64_t& output) {
+            const auto [end, error] =
+                std::from_chars(text.data(), text.data() + text.size(), output);
+            return error == std::errc{} && end == text.data() + text.size();
+        };
+        if (!parse(parts[1], port->relative_coord.x) || !parse(parts[2], port->relative_coord.y) ||
+            !parse(parts[3], port->relative_coord.z))
+            return core::Status::failure("assembly_prototype.invalid_port_layout",
+                                         "port layout contains invalid coordinates");
+    }
+    return core::Status::ok();
+}
+
 } // namespace
 
 core::Result<AssemblyDefinition>
@@ -245,6 +273,10 @@ assembly_definition_from_prototype(const modding::GenericPrototype& prototype) {
         return core::Result<AssemblyDefinition>::failure(layout_status.error().code,
                                                          layout_status.error().message);
     }
+    layout_status = apply_port_layouts(prototype, definition.required_ports);
+    if (!layout_status)
+        return core::Result<AssemblyDefinition>::failure(layout_status.error().code,
+                                                         layout_status.error().message);
 
     auto status = definition.validate();
     if (!status) {

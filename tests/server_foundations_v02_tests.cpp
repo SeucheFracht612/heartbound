@@ -200,6 +200,10 @@ void test_append_only_admin_and_chat_logs() {
     auto invalid_date = chat.value().front();
     invalid_date.real_timestamp_utc = "2026-99-09T20:57:31.000Z";
     assert(!ServerLogLineCodec::decode(ServerLogLineCodec::encode(invalid_date)));
+    auto excessive_metadata = chat.value().front();
+    for (std::size_t index = 0; index < 257; ++index)
+        excessive_metadata.metadata.emplace("field_" + std::to_string(index), "value");
+    assert(!excessive_metadata.validate());
 
     ServerLogFilter join_filter;
     join_filter.event_type = "join";

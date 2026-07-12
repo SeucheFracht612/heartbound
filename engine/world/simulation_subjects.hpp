@@ -17,14 +17,14 @@ struct WorldSimulationSubjectOptions {
     bool include_processes = true;
     bool include_networks = true;
     bool include_chunk_regions = true;
-    std::int64_t last_update_time_ms = 0;
+    simulation::WorldTick last_update_time_ms = 0;
 };
 
 struct WorldSimulationFramePlanOptions {
     WorldSimulationSubjectOptions subject_options;
     std::vector<simulation::SimulationViewer> viewers;
     simulation::SimulationLodPolicy policy;
-    std::int64_t now_ms = 0;
+    simulation::WorldTick now_ms = 0;
 };
 
 [[nodiscard]] core::Result<std::vector<simulation::SimulationSubject>>

@@ -14,7 +14,12 @@ namespace {
            kind == PrototypeKinds::assembly || kind == PrototypeKinds::workpiece ||
            kind == PrototypeKinds::pattern || kind == PrototypeKinds::process ||
            kind == PrototypeKinds::fire || kind == PrototypeKinds::room_descriptor ||
-           kind == PrototypeKinds::material || kind == PrototypeKinds::scenario;
+           kind == PrototypeKinds::material || kind == PrototypeKinds::scenario ||
+           kind == PrototypeKinds::recipe || kind == PrototypeKinds::biome ||
+           kind == PrototypeKinds::world_feature || kind == PrototypeKinds::crop ||
+           kind == PrototypeKinds::animal || kind == PrototypeKinds::map_layer ||
+           kind == PrototypeKinds::ui_panel || kind == PrototypeKinds::network ||
+           kind == PrototypeKinds::ward || kind == PrototypeKinds::admin_command;
 }
 
 } // namespace

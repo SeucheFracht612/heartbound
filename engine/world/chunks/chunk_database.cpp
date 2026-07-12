@@ -77,7 +77,12 @@ core::Status ChunkDatabase::insert_generated(VoxelChunk chunk) {
 
 core::Status ChunkDatabase::insert_generated(VoxelChunk chunk,
                                              dirty::DirtyRegionTracker& dirty_regions) {
-    return insert_generated_impl(std::move(chunk), &dirty_regions);
+    auto staged_dirty = dirty_regions;
+    auto status = insert_generated_impl(std::move(chunk), &staged_dirty);
+    if (status) {
+        dirty_regions = std::move(staged_dirty);
+    }
+    return status;
 }
 
 core::Status
@@ -90,7 +95,12 @@ core::Status
 ChunkDatabase::insert_generated_with_saved_edits(VoxelChunk chunk,
                                                  std::span<const VoxelEditRecord> edits,
                                                  dirty::DirtyRegionTracker& dirty_regions) {
-    return insert_generated_with_saved_edits_impl(std::move(chunk), edits, &dirty_regions);
+    auto staged_dirty = dirty_regions;
+    auto status = insert_generated_with_saved_edits_impl(std::move(chunk), edits, &staged_dirty);
+    if (status) {
+        dirty_regions = std::move(staged_dirty);
+    }
+    return status;
 }
 
 core::Result<VoxelCell> ChunkDatabase::get(ChunkCoord chunk_coord, VoxelCoord voxel_coord) const {
@@ -124,34 +134,29 @@ core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, 
 
 core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell,
                                 dirty::DirtyRegionTracker& dirty_regions) {
-    auto& chunk = get_or_create(chunk_coord);
-    auto previous = chunk.get(voxel_coord);
-    if (!previous) {
+    auto previous = find(chunk_coord) != nullptr ? find(chunk_coord)->get(voxel_coord)
+                                                 : VoxelChunk(chunk_coord).get(voxel_coord);
+    if (!previous)
         return core::Status::failure(previous.error().code, previous.error().message);
-    }
-    if (previous.value() == cell) {
+    if (previous.value() == cell)
         return core::Status::ok();
-    }
-
-    auto status = chunk.set(voxel_coord, cell);
-    if (!status) {
+    auto staged_dirty = dirty_regions;
+    auto status = set(chunk_coord, voxel_coord, cell);
+    if (!status)
         return status;
-    }
-
-    edit_log_.push_back(VoxelEditRecord{chunk_coord, voxel_coord, previous.value(), cell});
-    status = mark_chunk_rebuild_regions(dirty_regions, chunk_coord, "voxel edit");
-    if (!status) {
+    status = mark_chunk_rebuild_regions(staged_dirty, chunk_coord, "voxel edit");
+    if (!status)
         return status;
-    }
-    mark_neighbor_dirty_if_boundary(chunk_coord, voxel_coord, &dirty_regions);
+    mark_neighbor_dirty_if_boundary(chunk_coord, voxel_coord, &staged_dirty);
+    dirty_regions = std::move(staged_dirty);
     return core::Status::ok();
 }
 
 core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell,
                                 dirty::DirtyRegionTracker& dirty_regions,
                                 const VoxelPalette& palette) {
-    auto& chunk = get_or_create(chunk_coord);
-    auto previous = chunk.get(voxel_coord);
+    auto previous = find(chunk_coord) != nullptr ? find(chunk_coord)->get(voxel_coord)
+                                                 : VoxelChunk(chunk_coord).get(voxel_coord);
     if (!previous) {
         return core::Status::failure(previous.error().code, previous.error().message);
     }
@@ -159,21 +164,17 @@ core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, 
         return core::Status::ok();
     }
 
-    auto status = chunk.set(voxel_coord, cell);
-    if (!status) {
+    auto staged_dirty = dirty_regions;
+    auto status = set(chunk_coord, voxel_coord, cell, staged_dirty);
+    if (!status)
         return status;
-    }
-
-    edit_log_.push_back(VoxelEditRecord{chunk_coord, voxel_coord, previous.value(), cell});
-    status = mark_chunk_rebuild_regions(dirty_regions, chunk_coord, "voxel edit");
-    if (!status) {
-        return status;
-    }
-    mark_neighbor_dirty_if_boundary(chunk_coord, voxel_coord, &dirty_regions);
-
     const auto radius = std::max(palette.mesh_invalidation_radius(previous.value()),
                                  palette.mesh_invalidation_radius(cell));
-    return mark_rich_mesh_invalidation(chunk_coord, voxel_coord, radius, dirty_regions);
+    status = mark_rich_mesh_invalidation(chunk_coord, voxel_coord, radius, staged_dirty);
+    if (status) {
+        dirty_regions = std::move(staged_dirty);
+    }
+    return status;
 }
 
 core::Status ChunkDatabase::apply_saved_edits(std::span<const VoxelEditRecord> edits) {
@@ -182,7 +183,12 @@ core::Status ChunkDatabase::apply_saved_edits(std::span<const VoxelEditRecord> e
 
 core::Status ChunkDatabase::apply_saved_edits(std::span<const VoxelEditRecord> edits,
                                               dirty::DirtyRegionTracker& dirty_regions) {
-    return apply_saved_edits_impl(edits, &dirty_regions);
+    auto staged_dirty = dirty_regions;
+    auto status = apply_saved_edits_impl(edits, &staged_dirty);
+    if (status) {
+        dirty_regions = std::move(staged_dirty);
+    }
+    return status;
 }
 
 const std::vector<VoxelEditRecord>& ChunkDatabase::edit_log() const noexcept {
@@ -346,10 +352,10 @@ void ChunkDatabase::mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, Voxe
     }
 }
 
-core::Status
-ChunkDatabase::mark_rich_mesh_invalidation(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
-                                           std::uint16_t radius,
-                                           dirty::DirtyRegionTracker& dirty_regions) {
+core::Status ChunkDatabase::mark_rich_mesh_invalidation(ChunkCoord chunk_coord,
+                                                        VoxelCoord voxel_coord,
+                                                        std::uint16_t radius,
+                                                        dirty::DirtyRegionTracker& dirty_regions) {
     if (radius == 0) {
         return core::Status::ok();
     }

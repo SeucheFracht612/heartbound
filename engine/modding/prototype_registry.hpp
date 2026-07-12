@@ -26,6 +26,18 @@ struct PrototypeKinds {
     static constexpr std::string_view room_descriptor = "room_descriptor";
     static constexpr std::string_view material = "material";
     static constexpr std::string_view scenario = "scenario";
+    // Gameplay systems materialize these through their own public loaders.  The engine registry
+    // must still preserve, patch, fingerprint and inspect them before those systems exist.
+    static constexpr std::string_view recipe = "recipe";
+    static constexpr std::string_view biome = "biome";
+    static constexpr std::string_view world_feature = "world_feature";
+    static constexpr std::string_view crop = "crop";
+    static constexpr std::string_view animal = "animal";
+    static constexpr std::string_view map_layer = "map_layer";
+    static constexpr std::string_view ui_panel = "ui_panel";
+    static constexpr std::string_view network = "network";
+    static constexpr std::string_view ward = "ward";
+    static constexpr std::string_view admin_command = "admin_command";
 };
 
 struct PrototypeRegistryBuildResult {

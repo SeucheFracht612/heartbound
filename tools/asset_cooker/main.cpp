@@ -159,8 +159,8 @@ int main(int argc, char** argv) {
     for (const auto& entry : pack_plan.value().entries) {
         const auto assets_root = entry.manifest.root / "assets";
         auto indexed = assets::AssetCatalogBuilder::index_directory(
-            catalog, assets_root, entry.manifest.id, assets::AssetSourceKind::resource_pack,
-            entry.manifest.id, entry.asset_priority);
+            catalog, assets_root, entry.manifest.target_namespace,
+            assets::AssetSourceKind::resource_pack, entry.manifest.id, entry.asset_priority);
         for (const auto& diagnostic : indexed.diagnostics) {
             log_diagnostic(diagnostic);
         }

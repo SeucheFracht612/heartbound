@@ -20,6 +20,9 @@ constexpr std::string_view line_version = "v1";
 constexpr std::size_t max_log_text_bytes = 64U * 1024U;
 constexpr std::size_t max_encoded_log_line_bytes = 1024U * 1024U;
 constexpr std::uintmax_t max_query_file_bytes = 512U * 1024U * 1024U;
+constexpr std::size_t max_log_metadata_fields = 256;
+constexpr std::size_t max_query_entries = 1'000'000;
+constexpr std::size_t max_query_archives = 4096;
 constexpr std::string_view archive_magic = "HSLZ1";
 
 [[nodiscard]] bool is_hex(char value) noexcept {
@@ -156,6 +159,10 @@ decode_metadata(std::string_view value) {
     if (value.empty()) {
         return core::Result<std::map<std::string, std::string>>::success(std::move(result));
     }
+    if (static_cast<std::size_t>(std::ranges::count(value, ',')) >= max_log_metadata_fields) {
+        return core::Result<std::map<std::string, std::string>>::failure(
+            "server_log.invalid_metadata", "server log metadata has too many fields");
+    }
     for (const auto field : split(value, ',')) {
         const auto separator = field.find('=');
         if (separator == std::string_view::npos) {
@@ -278,6 +285,10 @@ core::Status ServerLogEntry::validate() const {
         return core::Status::failure("server_log.invalid_channel",
                                      "server log message channel must be a valid local id");
     }
+    if (metadata.size() > max_log_metadata_fields) {
+        return core::Status::failure("server_log.invalid_metadata",
+                                     "server log metadata has too many fields");
+    }
     for (const auto& [key, value] : metadata) {
         if (!core::is_valid_local_id(key) || !valid_free_text(value)) {
             return core::Status::failure("server_log.invalid_metadata",
@@ -327,6 +338,10 @@ std::string ServerLogLineCodec::encode(const ServerLogEntry& entry) {
 }
 
 core::Result<ServerLogEntry> ServerLogLineCodec::decode(std::string_view line) {
+    if (line.size() > max_encoded_log_line_bytes || std::ranges::count(line, '|') != 10) {
+        return core::Result<ServerLogEntry>::failure("server_log.invalid_line",
+                                                     "server log line has an invalid shape");
+    }
     if (!line.empty() && line.back() == '\r') {
         line.remove_suffix(1);
     }
@@ -471,6 +486,10 @@ FileServerLog::query_current(ServerLogCategory category, const ServerLogFilter& 
                                                                       entry.error().message);
         }
         if (filter.matches(entry.value())) {
+            if (result.size() >= max_query_entries)
+                return core::Result<std::vector<ServerLogEntry>>::failure(
+                    "server_log.query_too_large",
+                    "server log query exceeds its result-count limit");
             result.push_back(std::move(entry).value());
         }
     }
@@ -485,7 +504,15 @@ core::Result<std::vector<ServerLogEntry>>
 FileServerLog::query_all(ServerLogCategory category, const ServerLogFilter& filter) const {
     std::scoped_lock lock(mutex_);
     std::vector<ServerLogEntry> result;
-    const auto parse_text = [&result, &filter](std::string_view text) -> core::Status {
+    std::uintmax_t processed_bytes = 0;
+    const auto parse_text = [&result, &filter,
+                             &processed_bytes](std::string_view text) -> core::Status {
+        if (text.size() > max_query_file_bytes -
+                              std::min<std::uintmax_t>(max_query_file_bytes, processed_bytes)) {
+            return core::Status::failure("server_log.query_too_large",
+                                         "server log query exceeds its aggregate byte limit");
+        }
+        processed_bytes += text.size();
         std::size_t start = 0;
         while (start < text.size()) {
             const auto end = text.find('\n', start);
@@ -499,8 +526,13 @@ FileServerLog::query_all(ServerLogCategory category, const ServerLogFilter& filt
                 auto entry = ServerLogLineCodec::decode(line);
                 if (!entry)
                     return core::Status::failure(entry.error().code, entry.error().message);
-                if (filter.matches(entry.value()))
+                if (filter.matches(entry.value())) {
+                    if (result.size() >= max_query_entries)
+                        return core::Status::failure(
+                            "server_log.query_too_large",
+                            "server log query exceeds its result-count limit");
                     result.push_back(std::move(entry).value());
+                }
             }
             if (end == std::string_view::npos)
                 break;
@@ -533,6 +565,11 @@ FileServerLog::query_all(ServerLogCategory category, const ServerLogFilter& filt
             if (entry.is_regular_file() && entry.path().filename().string().contains(marker) &&
                 entry.path().extension() == ".hsz") {
                 archives.push_back(entry.path());
+                if (archives.size() > max_query_archives) {
+                    return core::Result<std::vector<ServerLogEntry>>::failure(
+                        "server_log.query_too_large",
+                        "server log query exceeds its archive-count limit");
+                }
             }
         }
         std::ranges::sort(archives);
@@ -658,9 +695,14 @@ core::Status FileServerLog::rotate_if_needed(ServerLogCategory category, std::si
     if (error) {
         return core::Status::failure("server_log.create_directory_failed", error.message());
     }
-    const auto filename = compact_timestamp(utc_now_iso8601()) + "." +
-                          std::string(server_log_category_name(category)) + "." +
-                          std::to_string(rotation_sequence_++) + ".log.hsz";
+    const auto filename_prefix = compact_timestamp(utc_now_iso8601()) + "." +
+                                 std::string(server_log_category_name(category)) + ".";
+    std::string filename;
+    do {
+        filename = filename_prefix + std::to_string(rotation_sequence_++) + ".log.hsz";
+    } while (std::filesystem::exists(rotated_dir / filename, error) && !error);
+    if (error)
+        return core::Status::failure("server_log.rotate_failed", error.message());
     std::ifstream input(current, std::ios::binary);
     if (!input)
         return core::Status::failure("server_log.rotate_failed",
@@ -682,18 +724,22 @@ core::Status FileServerLog::rotate_if_needed(ServerLogCategory category, std::si
     std::filesystem::rename(temporary, archive_path, error);
     if (error)
         return core::Status::failure("server_log.rotate_failed", error.message());
-    std::filesystem::remove(current, error);
-    if (error)
-        return core::Status::failure("server_log.rotate_failed", error.message());
     std::ofstream index(rotated_dir / "index.log", std::ios::app);
-    if (!index)
+    if (!index) {
+        std::filesystem::remove(archive_path, error);
         return core::Status::failure("server_log.index_failed", "failed to open rotated log index");
+    }
     index << filename << '|' << server_log_category_name(category) << '|' << current_day << '|'
           << incoming_day << '|' << text.size() << '|' << archive.size() << '\n';
     index.flush();
-    if (!index)
+    if (!index) {
+        std::filesystem::remove(archive_path, error);
         return core::Status::failure("server_log.index_failed",
                                      "failed to update rotated log index");
+    }
+    std::filesystem::remove(current, error);
+    if (error)
+        return core::Status::failure("server_log.rotate_failed", error.message());
     current_day = incoming_day;
     return core::Status::ok();
 }

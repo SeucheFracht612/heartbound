@@ -33,8 +33,7 @@ coord_from_network_coord(networks::NetworkCoord coord) noexcept {
     };
 }
 
-[[nodiscard]] core::Result<simulation::SimulationCoord>
-coord_from_chunk_coord(ChunkCoord coord) {
+[[nodiscard]] core::Result<simulation::SimulationCoord> coord_from_chunk_coord(ChunkCoord coord) {
     return chunk_local_to_block(coord, {});
 }
 
@@ -108,12 +107,6 @@ coord_for_saved_object(const WorldState& state, core::SaveId id) {
 
 core::Result<std::vector<simulation::SimulationSubject>>
 derive_simulation_subjects(const WorldState& state, WorldSimulationSubjectOptions options) {
-    if (options.last_update_time_ms < 0) {
-        return core::Result<std::vector<simulation::SimulationSubject>>::failure(
-            "simulation_subjects.invalid_last_update_time",
-            "derived simulation subjects need a non-negative last update time");
-    }
-
     std::vector<simulation::SimulationSubject> subjects;
 
     if (options.include_entities) {

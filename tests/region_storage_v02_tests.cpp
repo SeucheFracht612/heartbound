@@ -17,9 +17,8 @@ void test_negative_and_extreme_region_mapping() {
     assert(reconstructed);
     assert((reconstructed.value() == ChunkCoord{-1, -8, -9}));
 
-    for (const ChunkCoord coord :
-         {ChunkCoord{std::numeric_limits<std::int64_t>::min(), 0, 0},
-          ChunkCoord{std::numeric_limits<std::int64_t>::max(), 0, 0}}) {
+    for (const ChunkCoord coord : {ChunkCoord{std::numeric_limits<std::int64_t>::min(), 0, 0},
+                                   ChunkCoord{std::numeric_limits<std::int64_t>::max(), 0, 0}}) {
         const auto address = chunk_region_address(coord);
         auto round_trip = chunk_coord_from_region(address.region, address.local);
         assert(round_trip);
@@ -35,6 +34,11 @@ void test_cubic_region_codec_and_checksum() {
     assert(region.upsert({{7, 7, 7}, 12, 22, "opposite cubic chunk"}));
     assert(region.upsert({{0, 0, 0}, 13, 23, "updated cubic chunk"}));
     assert(region.chunks.size() == 2);
+    const auto before_invalid = region;
+    auto invalid = region.upsert({{8, 0, 0}, 1, 1, "invalid"});
+    assert(!invalid);
+    assert(region.chunks.size() == before_invalid.chunks.size());
+    assert(region.find({0, 0, 0})->encoded_chunk == "updated cubic chunk");
 
     auto encoded = ChunkRegionBinaryCodec::encode(region);
     assert(encoded);

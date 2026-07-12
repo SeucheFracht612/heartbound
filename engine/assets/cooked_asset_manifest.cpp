@@ -17,6 +17,10 @@ namespace heartstead::assets {
 namespace {
 
 constexpr std::string_view magic = "heartstead.cooked_assets.v1";
+constexpr std::size_t max_manifest_bytes = 64U * 1024U * 1024U;
+constexpr std::size_t max_manifest_line_bytes = 1024U * 1024U;
+constexpr std::size_t max_manifest_records = 1'000'000;
+constexpr std::size_t max_record_dependencies = 4096;
 
 [[nodiscard]] bool is_hex_digit(char value) noexcept {
     return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
@@ -157,7 +161,10 @@ constexpr std::string_view magic = "heartstead.cooked_assets.v1";
     path /= record.source_id;
     path /= config.profile;
     path /= std::string(asset_kind_name(record.kind));
-    path /= record.logical_id;
+    auto logical_path = asset_logical_path(record.logical_id);
+    if (!logical_path)
+        return {};
+    path /= logical_path.value();
     path += ".cooked";
     return path;
 }
@@ -194,6 +201,11 @@ constexpr std::string_view magic = "heartstead.cooked_assets.v1";
         return core::Result<std::vector<VirtualPath>>::success(std::move(dependencies));
     }
 
+    if (static_cast<std::size_t>(std::ranges::count(encoded, ',')) >= max_record_dependencies) {
+        return core::Result<std::vector<VirtualPath>>::failure(
+            "cooked_asset_manifest.too_many_dependencies",
+            "cooked asset record has too many dependencies");
+    }
     for (const auto part : split(encoded, ',')) {
         auto unescaped = percent_unescape(part);
         if (!unescaped) {
@@ -280,7 +292,7 @@ core::Status CookedAssetManifest::validate() const {
     }
 
     for (const auto& record : records) {
-        if (!core::is_valid_local_id(record.logical_id)) {
+        if (!core::PrototypeId::parse(record.logical_id)) {
             return core::Status::failure("cooked_asset_manifest.invalid_logical_id",
                                          "cooked asset logical id is invalid");
         }
@@ -365,7 +377,7 @@ CookedAssetDependencyReport CookedAssetManifest::dependency_report() const {
         }
 
         for (const auto& dependency : record.dependencies) {
-            const auto dependency_logical_id = dependency.relative_path.generic_string();
+            const auto dependency_logical_id = asset_logical_id(dependency);
             if (find_active(dependency_logical_id) != nullptr) {
                 continue;
             }
@@ -458,11 +470,16 @@ std::string CookedAssetManifestTextCodec::encode(const CookedAssetManifest& mani
 }
 
 core::Result<CookedAssetManifest> CookedAssetManifestTextCodec::decode(std::string_view text) {
+    if (text.size() > max_manifest_bytes) {
+        return core::Result<CookedAssetManifest>::failure(
+            "cooked_asset_manifest.too_large", "cooked asset manifest exceeds its size limit");
+    }
     CookedAssetManifest manifest;
     bool saw_magic = false;
     bool saw_end = false;
     bool saw_schema = false;
     bool saw_profile = false;
+    std::size_t consumed_bytes = 0;
 
     std::size_t line_start = 0;
     while (line_start <= text.size()) {
@@ -472,6 +489,11 @@ core::Result<CookedAssetManifest> CookedAssetManifestTextCodec::decode(std::stri
                         : text.substr(line_start, line_end - line_start);
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
+        }
+        if (line.size() > max_manifest_line_bytes) {
+            return core::Result<CookedAssetManifest>::failure(
+                "cooked_asset_manifest.too_large",
+                "cooked asset manifest line exceeds its size limit");
         }
 
         if (!saw_magic) {
@@ -483,6 +505,7 @@ core::Result<CookedAssetManifest> CookedAssetManifestTextCodec::decode(std::stri
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
+            consumed_bytes = line_end == std::string_view::npos ? text.size() : line_end + 1;
             break;
         } else if (!line.empty()) {
             const auto separator = line.find('=');
@@ -496,6 +519,10 @@ core::Result<CookedAssetManifest> CookedAssetManifestTextCodec::decode(std::stri
             const auto value = line.substr(separator + 1);
 
             if (key == "schema_version") {
+                if (saw_schema)
+                    return core::Result<CookedAssetManifest>::failure(
+                        "cooked_asset_manifest.duplicate_schema",
+                        "cooked asset manifest schema is duplicated");
                 auto parsed = parse_u32(value, key);
                 if (!parsed) {
                     return core::Result<CookedAssetManifest>::failure(parsed.error().code,
@@ -504,6 +531,10 @@ core::Result<CookedAssetManifest> CookedAssetManifestTextCodec::decode(std::stri
                 manifest.schema_version = parsed.value();
                 saw_schema = true;
             } else if (key == "profile") {
+                if (saw_profile)
+                    return core::Result<CookedAssetManifest>::failure(
+                        "cooked_asset_manifest.duplicate_profile",
+                        "cooked asset manifest profile is duplicated");
                 auto parsed = percent_unescape(value);
                 if (!parsed) {
                     return core::Result<CookedAssetManifest>::failure(parsed.error().code,
@@ -512,6 +543,11 @@ core::Result<CookedAssetManifest> CookedAssetManifestTextCodec::decode(std::stri
                 manifest.profile = std::move(parsed).value();
                 saw_profile = true;
             } else if (key == "record") {
+                if (manifest.records.size() >= max_manifest_records) {
+                    return core::Result<CookedAssetManifest>::failure(
+                        "cooked_asset_manifest.too_large",
+                        "cooked asset manifest has too many records");
+                }
                 auto parsed = parse_record(value);
                 if (!parsed) {
                     return core::Result<CookedAssetManifest>::failure(parsed.error().code,
@@ -535,6 +571,11 @@ core::Result<CookedAssetManifest> CookedAssetManifestTextCodec::decode(std::stri
         return core::Result<CookedAssetManifest>::failure(
             "cooked_asset_manifest.incomplete_manifest",
             "cooked asset manifest is missing required fields");
+    }
+    if (consumed_bytes != text.size()) {
+        return core::Result<CookedAssetManifest>::failure(
+            "cooked_asset_manifest.trailing_data",
+            "cooked asset manifest contains data after its end marker");
     }
 
     auto status = manifest.validate();

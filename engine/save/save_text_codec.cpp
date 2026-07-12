@@ -685,7 +685,8 @@ encode_assembly_parts(const std::vector<assemblies::AssemblyPart>& parts) {
         }
         const auto& part = parts[index];
         output << percent_escape(part.name) << '~' << part.build_piece_id.value() << '~'
-               << percent_escape(part.prototype_id.value());
+               << percent_escape(part.prototype_id.value()) << '~' << part.relative_coord.x << '~'
+               << part.relative_coord.y << '~' << part.relative_coord.z;
     }
     return output.str();
 }
@@ -699,9 +700,10 @@ parse_assembly_parts(std::string_view value) {
     }
     for (const auto entry : split(value, ',')) {
         const auto parts = split(entry, '~');
-        if (parts.size() != 3) {
+        if (parts.size() != 3 && parts.size() != 6) {
             return core::Result<std::vector<assemblies::AssemblyPart>>::failure(
-                "save_text.invalid_assembly_part", "assembly part record must contain 3 fields");
+                "save_text.invalid_assembly_part",
+                "assembly part record must contain 3 or 6 fields");
         }
         auto name = percent_unescape(parts[0]);
         auto build_piece_id = parse_u64(parts[1], "assembly_part_build_piece_id");
@@ -710,9 +712,19 @@ parse_assembly_parts(std::string_view value) {
             return core::Result<std::vector<assemblies::AssemblyPart>>::failure(
                 "save_text.invalid_assembly_part", "assembly part contains invalid fields");
         }
+        world::BlockCoord relative{};
+        if (parts.size() == 6) {
+            auto x = parse_i64(parts[3], "assembly_part_relative_x");
+            auto y = parse_i64(parts[4], "assembly_part_relative_y");
+            auto z = parse_i64(parts[5], "assembly_part_relative_z");
+            if (!x || !y || !z)
+                return core::Result<std::vector<assemblies::AssemblyPart>>::failure(
+                    "save_text.invalid_assembly_part", "assembly part position is invalid");
+            relative = {x.value(), y.value(), z.value()};
+        }
         parts_result.push_back(assemblies::AssemblyPart{
             std::move(name).value(), core::SaveId::from_value(build_piece_id.value()),
-            prototype.value()});
+            prototype.value(), relative});
     }
     return core::Result<std::vector<assemblies::AssemblyPart>>::success(std::move(parts_result));
 }
@@ -726,7 +738,9 @@ encode_assembly_ports(const std::vector<assemblies::AssemblyPort>& ports) {
         }
         output << percent_escape(ports[index].name) << '~'
                << save_network_kind_name(ports[index].kind) << '~'
-               << ports[index].source_build_piece_id.value() << '~' << ports[index].capacity;
+               << ports[index].source_build_piece_id.value() << '~' << ports[index].capacity << '~'
+               << ports[index].relative_coord.x << '~' << ports[index].relative_coord.y << '~'
+               << ports[index].relative_coord.z;
     }
     return output.str();
 }
@@ -739,7 +753,7 @@ parse_assembly_ports(std::string_view value) {
     }
     for (const auto entry : split(value, ',')) {
         const auto parts = split(entry, '~');
-        if (parts.size() != 2 && parts.size() != 4) {
+        if (parts.size() != 2 && parts.size() != 4 && parts.size() != 7) {
             return core::Result<std::vector<assemblies::AssemblyPort>>::failure(
                 "save_text.invalid_assembly_port",
                 "assembly port record must contain 2 or 4 fields");
@@ -752,7 +766,8 @@ parse_assembly_ports(std::string_view value) {
         }
         core::SaveId source_build_piece_id;
         std::uint32_t capacity = 1;
-        if (parts.size() == 4) {
+        world::BlockCoord relative{};
+        if (parts.size() >= 4) {
             auto source = parse_u64(parts[2], "assembly_port_source_build_piece_id");
             auto parsed_capacity = parse_u32(parts[3], "assembly_port_capacity");
             if (!source || !parsed_capacity) {
@@ -763,8 +778,17 @@ parse_assembly_ports(std::string_view value) {
             source_build_piece_id = core::SaveId::from_value(source.value());
             capacity = parsed_capacity.value();
         }
+        if (parts.size() == 7) {
+            auto x = parse_i64(parts[4], "assembly_port_relative_x");
+            auto y = parse_i64(parts[5], "assembly_port_relative_y");
+            auto z = parse_i64(parts[6], "assembly_port_relative_z");
+            if (!x || !y || !z)
+                return core::Result<std::vector<assemblies::AssemblyPort>>::failure(
+                    "save_text.invalid_assembly_port", "assembly port position is invalid");
+            relative = {x.value(), y.value(), z.value()};
+        }
         ports.push_back(assemblies::AssemblyPort{std::move(name).value(), kind.value(),
-                                                 source_build_piece_id, capacity});
+                                                 source_build_piece_id, capacity, relative});
     }
     return core::Result<std::vector<assemblies::AssemblyPort>>::success(std::move(ports));
 }
@@ -1004,7 +1028,8 @@ std::string SaveTextCodec::encode_snapshot(const SaveSnapshot& snapshot) {
                << encode_string_list(assembly.capabilities) << '|'
                << encode_process_ids(assembly.process_slots) << '|'
                << percent_escape(assembly.failure_reason) << '|'
-               << percent_escape(assembly.custom_state) << '\n';
+               << percent_escape(assembly.custom_state) << '|' << assembly.root_coord.x << '|'
+               << assembly.root_coord.y << '|' << assembly.root_coord.z << '\n';
     }
     for (const auto& process : snapshot.processes) {
         output << "process=" << process.process_id.value() << '|' << process.owner_id.value() << '|'
@@ -1042,6 +1067,12 @@ std::string SaveTextCodec::encode_snapshot(const SaveSnapshot& snapshot) {
 }
 
 core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text) {
+    constexpr std::size_t max_save_text_bytes = 512U * 1024U * 1024U;
+    constexpr std::size_t max_save_records = 1'000'000U;
+    constexpr std::size_t max_save_line_bytes = 16U * 1024U * 1024U;
+    if (text.size() > max_save_text_bytes)
+        return core::Result<SaveSnapshot>::failure("save_text.file_too_large",
+                                                   "text save exceeds its safety limit");
     SaveSnapshot snapshot;
     bool saw_magic = false;
     bool saw_end = false;
@@ -1049,6 +1080,8 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
     bool saw_game_version = false;
     bool saw_world_seed = false;
     bool saw_world_time = false;
+    std::size_t consumed_bytes = 0;
+    std::size_t record_count = 0;
 
     std::size_t line_start = 0;
     while (line_start <= text.size()) {
@@ -1059,6 +1092,9 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
+        if (line.size() > max_save_line_bytes || ++record_count > max_save_records)
+            return core::Result<SaveSnapshot>::failure(
+                "save_text.limit_exceeded", "text save exceeds its line or record limit");
 
         if (!saw_magic) {
             if (line != snapshot_magic_v1 && line != snapshot_magic_v2) {
@@ -1069,6 +1105,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
+            consumed_bytes = line_end == std::string_view::npos ? text.size() : line_end + 1U;
             break;
         } else if (!line.empty()) {
             const auto separator = line.find('=');
@@ -1333,7 +1370,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                                                committed});
             } else if (key == "assembly") {
                 const auto parts = split(value, '|');
-                if (parts.size() != 6 && parts.size() != 13) {
+                if (parts.size() != 6 && parts.size() != 13 && parts.size() != 16) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_assembly",
                         "assembly record must contain 6 legacy or 13 state-machine fields");
@@ -1357,7 +1394,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 record.operating = operating.value();
                 record.state = operating.value() ? assemblies::AssemblyState::operating
                                                  : assemblies::AssemblyState::ready;
-                if (parts.size() == 13) {
+                if (parts.size() >= 13) {
                     auto state = assemblies::parse_assembly_state(parts[6]);
                     auto stage = parse_u32(parts[7], "assembly_current_stage");
                     auto revision = parse_u64(parts[8], "assembly_revision");
@@ -1378,6 +1415,15 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                     record.process_slots = std::move(process_slots).value();
                     record.failure_reason = std::move(failure).value();
                     record.custom_state = std::move(custom).value();
+                }
+                if (parts.size() == 16) {
+                    auto x = parse_i64(parts[13], "assembly_root_x");
+                    auto y = parse_i64(parts[14], "assembly_root_y");
+                    auto z = parse_i64(parts[15], "assembly_root_z");
+                    if (!x || !y || !z)
+                        return core::Result<SaveSnapshot>::failure(
+                            "save_text.invalid_assembly", "assembly root anchor is invalid");
+                    record.root_coord = {x.value(), y.value(), z.value()};
                 }
                 snapshot.assemblies.push_back(std::move(record));
             } else if (key == "process") {
@@ -1506,6 +1552,9 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
         return core::Result<SaveSnapshot>::failure("save_text.incomplete_snapshot",
                                                    "save snapshot is missing required fields");
     }
+    if (consumed_bytes != text.size())
+        return core::Result<SaveSnapshot>::failure(
+            "save_text.trailing_data", "save snapshot contains data after its end marker");
 
     auto status = snapshot.metadata.validate();
     if (!status) {

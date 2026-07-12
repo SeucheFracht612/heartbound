@@ -264,7 +264,7 @@ std::vector<scripting::ScriptHostApiDesc> GameRuntime::default_script_host_apis(
             "world.set_voxel", ScriptStage::runtime_server, {ScriptPermission::emit_commands},
             {make_script_host_api_argument("chunk", scripting::ScriptValueKind::string),
              make_script_host_api_argument("voxel", scripting::ScriptValueKind::string),
-             make_script_host_api_argument("cell", scripting::ScriptValueKind::string)}),
+             make_script_host_api_argument("prototype", scripting::ScriptValueKind::string)}),
         make_script_host_api(
             "inventory.transfer", ScriptStage::runtime_server, {ScriptPermission::emit_commands},
             {make_script_host_api_argument("source_owner", scripting::ScriptValueKind::string),
@@ -296,7 +296,7 @@ std::vector<scripting::ScriptHostApiDesc> GameRuntime::default_script_host_apis(
 std::vector<ScriptHostCommandRoute> GameRuntime::default_script_host_command_routes() {
     return {
         make_script_host_command_route("world.set_voxel", "world.set_voxel",
-                                       {"chunk", "voxel", "cell"}),
+                                       {"chunk", "voxel", "prototype"}),
         make_script_host_command_route(
             "inventory.transfer", "inventory.transfer_items",
             {"source_owner", "destination_owner", "source_slot", "destination_slot", "count"}),

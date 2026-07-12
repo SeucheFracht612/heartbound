@@ -18,6 +18,8 @@ struct TransportPacketFragmentCodecConfig {
     std::uint32_t max_fragment_payload_bytes = 1200;
     std::uint32_t max_packet_bytes = 1024u * 1024u;
     std::uint32_t max_fragment_count = 1024;
+    std::uint32_t max_pending_packets = 64;
+    std::uint64_t max_pending_packet_bytes = 16u * 1024u * 1024u;
 };
 
 struct TransportPacketFragment {
@@ -78,6 +80,7 @@ class TransportPacketReassembler final {
 
     TransportPacketFragmentCodecConfig config_;
     std::unordered_map<std::uint64_t, PendingPacket> pending_;
+    std::uint64_t pending_packet_bytes_ = 0;
 };
 
 } // namespace heartstead::net

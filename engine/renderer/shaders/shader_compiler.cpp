@@ -50,7 +50,9 @@ constexpr std::string_view manifest_magic = "heartstead.shader_manifest.v1";
     path /= source.source_id;
     path /= config.profile;
     path /= std::string(shader_source_role_name(role));
-    path /= source.logical_id;
+    const auto logical_path = assets::asset_logical_path(source.logical_id);
+    if (logical_path)
+        path /= logical_path.value();
     path += ".shadercooked";
     return path;
 }

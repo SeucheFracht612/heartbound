@@ -1,5 +1,7 @@
 #include "engine/net/server_command.hpp"
 
+#include "engine/world/world_state.hpp"
+
 #include <utility>
 
 namespace heartstead::net {
@@ -101,6 +103,32 @@ ServerCommandDispatcher::dispatch_report(const CommandEnvelope& envelope,
                              "mutating command must execute on the authoritative server");
     }
 
+    // Mutating handlers execute against a staged value copy.  WorldOperation used to describe a
+    // rollback without undoing mutations that a handler had already made, which made a late
+    // validation/derived-update failure observable in the authoritative world.  Keep the public
+    // handler contract small while making the transaction real; a future write-set transaction
+    // can replace this correctness-first staging without changing commands.
+    std::optional<world::WorldState> staged_world;
+    CommandExecutionContext staged_context = context;
+    if (descriptor.mutates_world && context.world_state != nullptr) {
+        staged_world.emplace(*context.world_state);
+        staged_context.world_state = &*staged_world;
+        if (context.save_ids == &context.world_state->save_ids()) {
+            staged_context.save_ids = &staged_world->save_ids();
+        }
+    }
+
+    std::optional<save::SaveIdAllocator> external_save_ids_before;
+    if (descriptor.mutates_world && context.save_ids != nullptr &&
+        (context.world_state == nullptr || context.save_ids != &context.world_state->save_ids())) {
+        external_save_ids_before = *context.save_ids;
+    }
+    const auto restore_external_ids = [&]() {
+        if (external_save_ids_before.has_value()) {
+            *context.save_ids = *external_save_ids_before;
+        }
+    };
+
     world::WorldOperation operation(envelope.type);
     const auto validation = operation.validate(true, "registered command");
     if (!validation) {
@@ -110,8 +138,9 @@ ServerCommandDispatcher::dispatch_report(const CommandEnvelope& envelope,
         return report;
     }
 
-    const auto handler_status = descriptor.handler(envelope, context, operation);
+    const auto handler_status = descriptor.handler(envelope, staged_context, operation);
     if (!handler_status) {
+        restore_external_ids();
         operation.rollback(handler_status.error().message);
         auto report = failed_report(envelope.sequence, envelope.type, handler_status.error().code,
                                     handler_status.error().message);
@@ -128,11 +157,15 @@ ServerCommandDispatcher::dispatch_report(const CommandEnvelope& envelope,
     if (descriptor.mutates_world) {
         const auto commit_status = operation.commit();
         if (!commit_status) {
+            restore_external_ids();
             report.error = core::Error{commit_status.error().code, commit_status.error().message};
             report.operation_trace = trace_from_operation(operation);
             report.events = operation.events();
             report.reserved_ids = operation.reserved_ids();
             return report;
+        }
+        if (staged_world.has_value()) {
+            *context.world_state = std::move(*staged_world);
         }
         report.committed_world_mutation = true;
     }

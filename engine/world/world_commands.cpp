@@ -33,7 +33,7 @@ namespace {
 struct VoxelCommandPayload {
     ChunkCoord chunk;
     VoxelCoord voxel;
-    VoxelCell cell;
+    std::optional<core::PrototypeId> prototype_id;
 };
 
 struct BuildPieceCommandPayload {
@@ -292,27 +292,6 @@ parse_workpiece_cell_coord(std::string_view value) {
     return core::Result<workpieces::WorkpieceCellCoord>::success({x.value(), y.value(), z.value()});
 }
 
-[[nodiscard]] core::Result<VoxelCell> parse_voxel_cell(std::string_view value) {
-    const auto parts = split(value, '|');
-    if (parts.size() != 2 && parts.size() != 4) {
-        return core::Result<VoxelCell>::failure("world_command.invalid_voxel_cell",
-                                                "voxel cell must contain type|light and optional "
-                                                "state|metadata");
-    }
-    auto type = parse_u16(parts[0], "voxel_type");
-    auto light = parse_u8(parts[1], "voxel_light");
-    auto state = parts.size() == 4 ? parse_u16(parts[2], "voxel_state")
-                                   : core::Result<std::uint16_t>::success(0);
-    auto metadata = parts.size() == 4 ? parse_u32(parts[3], "voxel_metadata")
-                                      : core::Result<std::uint32_t>::success(0);
-    if (!type || !light || !state || !metadata) {
-        return core::Result<VoxelCell>::failure("world_command.invalid_voxel_cell",
-                                                "voxel cell contains invalid numbers");
-    }
-    return core::Result<VoxelCell>::success(
-        {type.value(), light.value(), state.value(), metadata.value()});
-}
-
 [[nodiscard]] core::Result<workpieces::WorkpieceCell> parse_workpiece_cell(std::string_view value) {
     const auto parts = split(value, '|');
     if (parts.size() != 2 && parts.size() != 4) {
@@ -414,8 +393,8 @@ parse_workpiece_operation_kind(std::string_view value) {
     const auto& decoded_fields = fields.value();
     auto chunk_value = decoded_fields.require("chunk");
     auto voxel_value = decoded_fields.require("voxel");
-    auto cell_value = decoded_fields.require("cell");
-    if (!chunk_value || !voxel_value || !cell_value) {
+    auto prototype_value = decoded_fields.require("prototype");
+    if (!chunk_value || !voxel_value || !prototype_value || decoded_fields.size() != 3) {
         return core::Result<VoxelCommandPayload>::failure(
             "command_payload.missing_required_key",
             "voxel command payload is missing a required key");
@@ -423,7 +402,6 @@ parse_workpiece_operation_kind(std::string_view value) {
 
     auto chunk = parse_chunk_coord(chunk_value.value());
     auto voxel = parse_voxel_coord(voxel_value.value());
-    auto cell = parse_voxel_cell(cell_value.value());
     if (!chunk) {
         return core::Result<VoxelCommandPayload>::failure(chunk.error().code,
                                                           chunk.error().message);
@@ -432,10 +410,16 @@ parse_workpiece_operation_kind(std::string_view value) {
         return core::Result<VoxelCommandPayload>::failure(voxel.error().code,
                                                           voxel.error().message);
     }
-    if (!cell) {
-        return core::Result<VoxelCommandPayload>::failure(cell.error().code, cell.error().message);
+    std::optional<core::PrototypeId> prototype_id;
+    if (prototype_value.value() != "air") {
+        prototype_id = core::PrototypeId::parse(prototype_value.value());
+        if (!prototype_id)
+            return core::Result<VoxelCommandPayload>::failure(
+                "world_command.invalid_voxel_prototype",
+                "voxel intent prototype must be a stable prototype id or air");
     }
-    return core::Result<VoxelCommandPayload>::success({chunk.value(), voxel.value(), cell.value()});
+    return core::Result<VoxelCommandPayload>::success(
+        {chunk.value(), voxel.value(), std::move(prototype_id)});
 }
 
 [[nodiscard]] core::Result<BuildPieceCommandPayload>
@@ -1018,6 +1002,7 @@ build_assembly_record(WorldState& state, const AssemblyCreateCommandPayload& pay
     record.assembly_id = assembly_id;
     record.root_build_piece_id = payload.root_build_piece_id;
     record.prototype_id = payload.prototype_id;
+    record.root_coord = root->transform.position.anchor;
     record.state = assemblies::AssemblyState::ready;
     record.capabilities = definition.capabilities;
     record.ports.reserve(definition.required_ports.size());
@@ -1038,8 +1023,21 @@ build_assembly_record(WorldState& state, const AssemblyCreateCommandPayload& pay
                 "world_command.incomplete_assembly_part",
                 "assembly part build piece must be complete: " + part_payload.name);
         }
-        record.parts.push_back(
-            {part_payload.name, part_payload.build_piece_id, part->prototype_id});
+        const auto requirement =
+            std::ranges::find_if(definition.part_requirements, [&part_payload](const auto& value) {
+                return value.name == part_payload.name;
+            });
+        if (requirement == definition.part_requirements.end())
+            return core::Result<assemblies::AssemblyRecord>::failure(
+                "world_command.unknown_assembly_part", "assembly part name is not in its layout");
+        const auto expected_anchor =
+            checked_block_coord_offset(record.root_coord, requirement->relative_coord);
+        if (!expected_anchor || part->transform.position.anchor != expected_anchor.value())
+            return core::Result<assemblies::AssemblyRecord>::failure(
+                "world_command.assembly_part_position_mismatch",
+                "assembly part does not occupy its prototype-defined relative coordinate");
+        record.parts.push_back({part_payload.name, part_payload.build_piece_id, part->prototype_id,
+                                requirement->relative_coord});
         build_parts.push_back(part);
     }
 
@@ -1048,7 +1046,7 @@ build_assembly_record(WorldState& state, const AssemblyCreateCommandPayload& pay
             const auto* build_port = find_build_piece_port(*part, required_port);
             if (build_port != nullptr) {
                 record.ports.push_back({required_port.name, required_port.kind, part->object_id,
-                                        build_port->capacity});
+                                        build_port->capacity, required_port.relative_coord});
                 break;
             }
         }
@@ -1175,38 +1173,27 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
             "world_command.chunk_not_loaded",
             "authoritative voxel edits require the target chunk to be loaded first");
     }
+    if (context.voxel_palette == nullptr)
+        return core::Status::failure("world_command.missing_voxel_palette",
+                                     "stable voxel intents require the authoritative palette");
 
-    auto cell = payload.value().cell;
-    if (context.voxel_palette != nullptr) {
-        if (cell.type == VoxelPalette::air_type) {
-            if (cell.state_bits != 0 || cell.metadata_handle != 0) {
-                return core::Status::failure(
-                    "world_command.invalid_air_state",
-                    "air cells cannot retain block state or sparse metadata handles");
-            }
-            cell.light = 0;
-        } else {
-            const auto* definition = context.voxel_palette->find_by_type(cell.type);
-            if (definition == nullptr) {
-                return core::Status::failure("world_command.unknown_voxel_type",
-                                             "voxel type is not present in the resolved palette");
-            }
-            if (definition->metadata_required && cell.metadata_handle == 0) {
-                return core::Status::failure(
-                    "world_command.missing_voxel_metadata",
-                    "voxel prototype requires a non-zero sparse metadata handle");
-            }
-            cell.light = definition->light_emission;
-        }
+    VoxelCell cell = VoxelCell::air();
+    if (payload.value().prototype_id.has_value()) {
+        const auto* definition =
+            context.voxel_palette->find_by_prototype(*payload.value().prototype_id);
+        if (definition == nullptr)
+            return core::Status::failure("world_command.unknown_voxel_prototype",
+                                         "voxel prototype is not present in the resolved palette");
+        if (definition->metadata_required)
+            return core::Status::failure(
+                "world_command.specialized_placement_required",
+                "metadata-backed blocks require a specialized authoritative placement command");
+        cell = {definition->type, definition->light_emission, 0, 0};
     }
 
-    auto status =
-        context.voxel_palette != nullptr
-            ? context.world_state->chunks().set(payload.value().chunk, payload.value().voxel, cell,
-                                                context.world_state->dirty_regions(),
-                                                *context.voxel_palette)
-            : context.world_state->chunks().set(payload.value().chunk, payload.value().voxel, cell,
-                                                context.world_state->dirty_regions());
+    auto status = context.world_state->chunks().set(payload.value().chunk, payload.value().voxel,
+                                                    cell, context.world_state->dirty_regions(),
+                                                    *context.voxel_palette);
     if (!status) {
         return status;
     }
@@ -1879,6 +1866,7 @@ handle_start_assembly_blueprint(const net::CommandEnvelope& envelope,
         id.value(), payload.value().root_build_piece_id, definition.value());
     if (!record)
         return core::Status::failure(record.error().code, record.error().message);
+    record.value().root_coord = root->transform.position.anchor;
     status = context.world_state->assemblies().insert(std::move(record).value());
     if (!status)
         return status;
@@ -1916,9 +1904,20 @@ handle_start_assembly_blueprint(const net::CommandEnvelope& envelope,
     auto definition = load_assembly_definition(context.prototypes, assembly->prototype_id);
     if (!definition)
         return core::Status::failure(definition.error().code, definition.error().message);
+    const auto requirement =
+        std::ranges::find_if(definition.value().part_requirements, [&payload](const auto& value) {
+            return value.name == payload.value().part_name;
+        });
+    if (requirement == definition.value().part_requirements.end())
+        return core::Status::failure("world_command.unknown_assembly_part",
+                                     "assembly part is not declared by the prototype");
+    auto expected = checked_block_coord_offset(assembly->root_coord, requirement->relative_coord);
+    if (!expected || part->transform.position.anchor != expected.value())
+        return core::Status::failure("world_command.assembly_part_position_mismatch",
+                                     "assembly part is outside its ghost blueprint slot");
     status = assemblies::AssemblyRuntime::place_part(
         *assembly, definition.value(),
-        {payload.value().part_name, payload.value().build_piece_id, part->prototype_id});
+        {payload.value().part_name, payload.value().build_piece_id, part->prototype_id, {}});
     if (!status)
         return status;
     status = mark_assembly_derived_dirty(*context.world_state, *assembly);

@@ -135,6 +135,18 @@ parse_boxes(const modding::GenericPrototype& prototype, BlockModelKind kind) {
     return std::abs(left - right) <= 0.0001F;
 }
 
+[[nodiscard]] std::uint16_t geometric_invalidation_radius(const math::Bounds3f& bounds) noexcept {
+    const auto outside = std::max({0.0F, -bounds.min.x, -bounds.min.y, -bounds.min.z,
+                                   bounds.max.x - 1.0F, bounds.max.y - 1.0F, bounds.max.z - 1.0F});
+    return static_cast<std::uint16_t>(std::ceil(outside));
+}
+
+[[nodiscard]] bool bounds_within_engine_limit(const math::Bounds3f& bounds) noexcept {
+    constexpr float limit = static_cast<float>(BlockModelDefinition::max_dependency_radius) + 1.0F;
+    return bounds.min.x >= -limit && bounds.min.y >= -limit && bounds.min.z >= -limit &&
+           bounds.max.x <= limit && bounds.max.y <= limit && bounds.max.z <= limit;
+}
+
 } // namespace
 
 core::Status BlockModelBox::validate() const {
@@ -158,6 +170,10 @@ core::Status BlockModelDefinition::validate() const {
         return core::Status::failure("block_model.invalid_render_bounds",
                                      "block model render bounds are invalid");
     }
+    if (!bounds_within_engine_limit(render_bounds)) {
+        return core::Status::failure("block_model.bounds_too_large",
+                                     "block model render bounds exceed the engine halo limit");
+    }
     if (neighbor_dependency_radius > max_dependency_radius ||
         mesh_invalidation_radius > max_dependency_radius) {
         return core::Status::failure("block_model.invalid_radius",
@@ -167,6 +183,11 @@ core::Status BlockModelDefinition::validate() const {
         return core::Status::failure(
             "block_model.invalidation_too_small",
             "mesh invalidation radius must cover the neighbor dependency radius");
+    }
+    if (mesh_invalidation_radius < geometric_invalidation_radius(render_bounds)) {
+        return core::Status::failure(
+            "block_model.invalidation_too_small",
+            "mesh invalidation radius must cover render geometry outside the owning cell");
     }
     if (kind == BlockModelKind::mesh && mesh_asset.empty()) {
         return core::Status::failure("block_model.missing_mesh_asset",
@@ -180,6 +201,11 @@ core::Status BlockModelDefinition::validate() const {
         auto status = box.validate();
         if (!status) {
             return status;
+        }
+        if (!bounds_within_engine_limit(box.bounds) ||
+            mesh_invalidation_radius < geometric_invalidation_radius(box.bounds)) {
+            return core::Status::failure("block_model.invalidation_too_small",
+                                         "mesh invalidation radius must cover every model box");
         }
     }
     return core::Status::ok();

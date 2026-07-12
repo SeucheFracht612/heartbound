@@ -18,13 +18,17 @@ namespace {
         return 0;
     }
 
-    constexpr auto max = std::numeric_limits<simulation::WorldTick>::max();
     const auto rate = static_cast<simulation::WorldTick>(rate_per_mille);
-    if (delta_ticks > max / rate) {
+    constexpr auto scale = simulation::WorldTick{1000};
+    constexpr auto max = std::numeric_limits<simulation::WorldTick>::max();
+    const auto whole = delta_ticks / scale;
+    const auto remainder = delta_ticks % scale;
+    if (whole > max / rate) {
         return max;
     }
-
-    return (delta_ticks * rate) / 1000U;
+    const auto whole_scaled = whole * rate;
+    const auto remainder_scaled = (remainder * rate) / scale;
+    return whole_scaled > max - remainder_scaled ? max : whole_scaled + remainder_scaled;
 }
 
 } // namespace
@@ -199,24 +203,30 @@ core::Result<ProcessInstance> ProcessRuntime::create(core::ProcessId process_id,
 
 core::Status ProcessRuntime::advance(ProcessInstance& instance, simulation::WorldTick world_time,
                                      ProcessModifiers modifiers) {
+    auto status = instance.validate();
+    if (!status)
+        return status;
+    if (world_time < instance.last_eval) {
+        return core::Status::failure("process.time_reversed", "process time cannot move backward");
+    }
     if (instance.state == ProcessState::complete || instance.state == ProcessState::interrupted) {
         return core::Status::ok();
     }
 
-    if (world_time < instance.last_eval) {
-        return core::Status::failure("process.time_reversed", "process time cannot move backward");
-    }
-
+    auto staged = instance;
     const auto delta_ticks = world_time - instance.last_eval;
     const auto effective_delta = scaled_delta(delta_ticks, modifiers.effective_rate_per_mille());
-    const auto applied_delta = std::min(instance.remaining_work_ticks(), effective_delta);
-    instance.accrued_work_ticks += applied_delta;
-    instance.last_eval = world_time;
+    const auto applied_delta = std::min(staged.remaining_work_ticks(), effective_delta);
+    staged.accrued_work_ticks += applied_delta;
+    staged.last_eval = world_time;
 
-    if (instance.accrued_work_ticks >= instance.required_work_ticks) {
-        instance.state = ProcessState::complete;
+    if (staged.accrued_work_ticks >= staged.required_work_ticks) {
+        staged.state = ProcessState::complete;
     }
-
+    status = staged.validate();
+    if (!status)
+        return status;
+    instance = std::move(staged);
     return core::Status::ok();
 }
 
@@ -228,7 +238,7 @@ core::Status ProcessRuntime::evaluate(ProcessInstance& instance, simulation::Wor
 }
 
 void ProcessRuntime::interrupt(ProcessInstance& instance, std::string reason) {
-    if (instance.state == ProcessState::complete) {
+    if (instance.state == ProcessState::complete || reason.empty()) {
         return;
     }
     if (instance.interruption_policy == ProcessInterruptionPolicy::reset) {

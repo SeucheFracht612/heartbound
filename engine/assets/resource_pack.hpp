@@ -31,6 +31,7 @@ struct ResourcePackManifest {
     std::string version;
     std::string description;
     std::filesystem::path root;
+    std::string target_namespace = "base";
     std::vector<ShaderExtensionPoint> shader_extensions;
     bool gameplay_content = false;
 };
