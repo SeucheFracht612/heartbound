@@ -64,6 +64,8 @@ target_sources(
     renderer/materials/material_definition.cpp
     renderer/materials/material_pipeline_layout.cpp
     renderer/materials/material_prototype_loader.cpp
+    renderer/camera/frustum.cpp
+    renderer/chunks/chunk_gpu_cache.cpp
     renderer/render_camera.cpp
     renderer/rhi/render_device.cpp
     renderer/rhi/render_frame_plan.cpp
@@ -191,6 +193,8 @@ target_sources(
       renderer/materials/material_definition.hpp
       renderer/materials/material_pipeline_layout.hpp
       renderer/materials/material_prototype_loader.hpp
+      renderer/camera/frustum.hpp
+      renderer/chunks/chunk_gpu_cache.hpp
       renderer/render_camera.hpp
       renderer/rhi/render_device.hpp
       renderer/rhi/render_frame_plan.hpp

@@ -36,6 +36,7 @@ heartstead_add_foundation_test(heartstead_workpiece_v02_tests workpiece_v02_test
 heartstead_add_foundation_test(heartstead_assembly_v02_tests assembly_v02_tests.cpp)
 heartstead_add_foundation_test(heartstead_infrastructure_v02_tests infrastructure_v02_tests.cpp)
 heartstead_add_foundation_test(heartstead_render_milestone_tests render_milestone_tests.cpp)
+heartstead_add_foundation_test(heartstead_renderer_frontend_tests renderer_frontend_tests.cpp)
 
 function(heartstead_add_smoke_test test_name target_name)
   if(TARGET ${target_name})
