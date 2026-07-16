@@ -22,7 +22,8 @@ Implemented in this repository:
 - C++23 engine library target
 - stable identity primitives
 - diagnostics, logging, and asserts
-- shared math primitives for vectors, transforms, and bounds
+- shared math primitives for vectors, transforms, bounds, and column-major camera/projection
+  matrices
 - job system boundary with immediate and thread-pool backends
 - backend-selectable platform abstraction with backend capabilities, headless smoke backend,
   optional X11 native windows, opaque native window handles, validated events, and retained input
@@ -38,15 +39,9 @@ Implemented in this repository:
 - shader compiler tool boundary with development validation backends and production SPIR-V
   passthrough for active shader assets
 - renderer RHI boundary with backend/device capabilities, material definitions, render frame
-  plans with renderer-neutral resource-use/dependency/state-transition execution planning,
-  headless smoke backend, optional Vulkan offscreen and surface-backed clear smoke backend with
-  private synchronization translation, offscreen all-resource barrier submission, and
-  planned-vs-submitted barrier accounting, renderer-owned buffer upload handles, private Vulkan
-  shader-module creation, material pipeline layout binding, private Vulkan descriptor set
-  layout/pipeline layout/descriptor set allocation, private Vulkan compute and graphics pipeline
-  creation, RGBA8 sampled image upload, uniform and sampled texture descriptor writes, mesh draw
-  binding with minimal offscreen Vulkan draw-command submission, and optional X11 surface ownership
-  boundary
+  plans plus pass-associated unified draw submissions, headless validation, explicit GPU terrain
+  vertices, checked-in SPIR-V loading, push constants, configurable graphics state, and optional
+  Vulkan rendering through offscreen color/depth targets into an X11 swapchain
 - physics world boundary with backend capabilities, headless integration, AABB query/contact
   plumbing, deterministic dynamic-body response and sleeping, and Jolt backend placeholder
 - backend-selectable network transport boundary with in-memory host implementation, POSIX UDP
@@ -174,10 +169,14 @@ Implemented in this repository:
 - game-side structured inspection data for script host command routes, dispatch reports, and
   dispatch batches
 - platform, renderer, physics, network, scripting, jobs, math, and mod sandbox samples
+- native Milestone 1 Vulkan application that generates, meshes, and renders a camera-relative
+  terrain chunk with indexed depth-tested drawing, camera controls, resize/minimize handling,
+  validation callbacks, and clean shutdown
 - CTest coverage for unit tests plus headless-safe sample and tool smoke tests
 
-Gameplay system rules, production renderer/physics/network/scripting backends, optimized
-chunk meshing, and real gameplay simulation are not implemented yet.
+Gameplay system rules, general multi-pass production rendering, production physics/networking/
+scripting backends, optimized chunk streaming/meshing, and real gameplay simulation are not
+implemented yet.
 
 The normative target and the implementation audit are in
 [`docs/architecture/engine_spec.md`](docs/architecture/engine_spec.md) and
@@ -233,6 +232,16 @@ Useful sample executables after building:
 ./build/default-debug/samples/room_sandbox/heartstead_room_sandbox
 ./build/default-debug/samples/world_state_sandbox/heartstead_world_state_sandbox
 ```
+
+Run the native Vulkan terrain milestone (requires X11 and a present-capable Vulkan device):
+
+```bash
+./build/default-debug/apps/render_smoke/heartstead_render_smoke
+```
+
+Use WASD and Space to move, hold the right mouse button to look, and press Escape or close the
+window to exit. See [`docs/dev/build_instructions.md`](docs/dev/build_instructions.md) for shader
+rebuild commands and validation details.
 
 Useful tools after building:
 

@@ -92,6 +92,32 @@ Run smoke samples:
 ./build/default-debug/samples/world_state_sandbox/heartstead_world_state_sandbox
 ```
 
+Run the Milestone 1 terrain renderer:
+
+```bash
+./build/default-debug/apps/render_smoke/heartstead_render_smoke
+```
+
+This application requires an X11 display and a Vulkan device that can present to it. It generates
+a known voxel chunk, meshes it with `ChunkMesher`, and renders it through the unified indexed-draw
+frame path. Use WASD to move, Space to rise, hold the right mouse button to look, and press Escape
+or close the window to exit. Resizing and minimizing the window preserve the uploaded chunk mesh.
+If `VK_LAYER_KHRONOS_validation` is installed, it is enabled automatically; otherwise startup
+continues with a visible warning.
+
+The checked-in shader sources and production SPIR-V are under
+`apps/render_smoke/assets/shaders`. To regenerate and validate them with external Khronos tools:
+
+```bash
+glslangValidator -V apps/render_smoke/assets/shaders/terrain.vert -o apps/render_smoke/assets/shaders/terrain.vert.spv
+glslangValidator -V apps/render_smoke/assets/shaders/terrain.frag -o apps/render_smoke/assets/shaders/terrain.frag.spv
+spirv-val apps/render_smoke/assets/shaders/terrain.vert.spv
+spirv-val apps/render_smoke/assets/shaders/terrain.frag.spv
+```
+
+The build copies these assets beside `heartstead_render_smoke`, and the application loads and
+checks the SPIR-V header before creating Vulkan shader modules.
+
 Run mod/prototype validation tools:
 
 ```bash

@@ -14,7 +14,8 @@ Implemented foundation:
   - exposes current output extent and completed frame count
   - validates resize and frame output extents
   - returns per-frame stats for smoke tests and debug tooling
-  - executes validated `RenderFramePlan` records as the frame-level renderer contract
+  - executes `RenderFrameSubmission` records that combine a validated `RenderFramePlan`, camera
+    data, and pass-associated indexed draw commands in one frame-level contract
   - owns opaque renderer resource handles for uploaded buffers and sampled images
   - can upload renderer-neutral CPU data, such as chunk mesh vertices, indices, and small RGBA8
     sampled images, without exposing backend handles to world/chunk/material systems
@@ -25,13 +26,10 @@ Implemented foundation:
     pipeline layouts without exposing backend pipeline handles
   - can write descriptor bindings for material scalar/color uniform buffers and sampled texture
     images without exposing backend descriptor set handles
-  - can structurally bind uploaded mesh buffers to material prototype ids without exposing backend
-    pipelines, descriptors, or Vulkan handles
-  - reports whether mesh draw binding also submitted backend draw commands, keeping command
-    execution observable without exposing command buffers
-  - builds renderer-neutral frame execution plans before smoke execution, so future Vulkan barriers
-    and image-layout transitions can be derived from the public RHI contract rather than hidden
-    backend inference
+  - retains the old material-based `bind_mesh_draws()` API only as a deprecated compatibility path;
+    visible rendering uses explicit pipeline handles through `execute_frame()`
+  - builds renderer-neutral frame execution plans so Vulkan barriers and image-layout transitions
+    are derived from the public RHI contract rather than hidden backend inference
   - can structurally bind material pipeline layouts, including shader template and descriptor slots,
     without exposing Vulkan pipeline layouts or descriptor sets through the public RHI
 
@@ -65,9 +63,9 @@ Implemented foundation:
   - compiles validated plans into a renderer-neutral execution plan with ordered pass names,
     per-resource access records, and explicit resource dependency edges for write/read,
     write/write, read/write, and present transitions
-  - derives renderer-neutral resource states and transition records, including `undefined`,
-    `external`, `shader_read`, color attachment write/read-write, and `present` states, so backend
-    synchronization can be tested without exposing Vulkan enums
+  - derives renderer-neutral transition records for `undefined`, `external`, `shader_read`,
+    color/depth attachment writes, and `present`, and defines transfer source/destination states for
+    backend copy operations without exposing Vulkan enums
   - models clear, world, post-process, UI, debug, and present pass kinds without exposing Vulkan
     objects
   - can be submitted to an `IRenderDevice` for smoke execution, with backend frame stats preserving
@@ -78,11 +76,19 @@ Implemented foundation:
 
 - Renderer-neutral chunk mesh data
   - `ChunkMesher` extracts CPU-side terrain surface meshes outside the renderer backend
-  - render backends can later upload this data without making chunks depend on Vulkan objects
-  - the smoke RHI can upload chunk mesh vertex and index buffers as renderer-owned resources before
-    a production draw pipeline exists
-  - mesh draw binding validates vertex/index resource usage and material ids while keeping chunks
-    independent from renderer handles
+  - `GpuChunkVertex` defines a stable 40-byte GPU ABI with asserted field offsets and explicit
+    float/integer shader locations, so compiler padding cannot silently change Vulkan input
+  - the renderer uploads converted vertex data and uint32 indices without making chunks depend on
+    Vulkan objects
+  - each terrain draw carries a camera-relative chunk origin while the exact world anchor remains in
+    `FloatingOrigin`
+
+- Camera and shader constants
+  - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention
+  - `RenderCamera` owns the local position, yaw/pitch perspective, resize-dependent aspect ratio,
+    and view-projection composition
+  - the first terrain binding uses an 80-byte vertex push-constant block: a 64-byte view-projection
+    matrix plus a 16-byte camera-relative chunk origin
 
 - `MaterialDefinition` and `MaterialRegistry`
   - describe renderer-facing material data with prototype ids, domains, blend modes, shader
@@ -125,19 +131,21 @@ Implemented foundation:
     resources
   - validates mesh draw bindings against uploaded buffer usage, material prototype ids, and
     material graphics pipeline availability without submitting GPU commands
+  - validates unified submissions, pass association, explicit pipeline/buffer handles, index
+    ranges, instance counts, finite camera data, push-constant coverage, and color/depth targets
   - gives tests and CI a renderer path before OS windows or Vulkan are required
 
 - Vulkan backend boundary
   - exists as an explicit backend factory
   - is compiled when CMake finds the Vulkan SDK/loader and `HEARTSTEAD_ENABLE_VULKAN` is enabled
-  - creates a Vulkan instance, selects a physical device with a graphics queue, and creates a
-    logical device for smoke validation
+  - creates a Vulkan instance, selects a graphics-and-present-capable physical device, and creates
+    the logical device and queue
   - can create and own an X11 `VkSurfaceKHR` from a platform-native window handle when the optional
     X11 backend is compiled
-  - owns a private command pool, command buffer, fence, sync semaphores, offscreen color image/view,
-    and optional swapchain for submitted clear-frame and draw-command smoke work
-  - can acquire, clear, and present a surface-backed swapchain image when a native window is
-    supplied; the offscreen path remains available for headless development and CI
+  - owns a private command pool, command buffer, fence, synchronization semaphores, offscreen color
+    and depth targets, and an optional swapchain
+  - selects a supported depth attachment format, preferring `D32_SFLOAT`, and recreates color,
+    depth, and swapchain targets when the output extent changes
   - can allocate host-visible Vulkan buffers and copy renderer-neutral upload bytes into them behind
     opaque RHI handles
   - can allocate private `VkShaderModule` objects from validated SPIR-V words behind opaque RHI
@@ -146,13 +154,14 @@ Implemented foundation:
     image view, and sampler behind opaque RHI handles
   - can allocate private compute `VkPipeline` objects from owned compute shader modules and bound
     material pipeline layouts
-  - can allocate private graphics `VkPipeline` objects from owned vertex/fragment shader modules
-    and bound material pipeline layouts through a smoke render pass
+  - creates private graphics pipelines with explicit topology, polygon/cull/front-face state,
+    depth test/write/compare state, blend mode, vertex attributes, and target formats
   - can update private material descriptor sets for uniform scalar/color bindings from uploaded
     uniform buffers and sampled texture bindings from uploaded sampled images
-  - can submit a minimal offscreen draw command buffer that binds a material graphics pipeline,
-    uploaded vertex/index buffers, dynamic viewport/scissor state, and indexed/non-indexed draw
-    calls against a private framebuffer
+  - executes the terrain pass and presentation in one command buffer and one queue submission:
+    acquire, draw indexed terrain into offscreen color plus depth, blit color into the acquired
+    swapchain image, transition it to present, and present once
+  - pushes the view-projection matrix and camera-relative chunk origin before each terrain draw
   - can execute dependency- and transition-planned frame plans structurally while the smoke backend
     maps them onto its existing clear/offscreen/present primitives
   - translates planned RHI resource states into private Vulkan image layouts, access masks, and
@@ -164,10 +173,8 @@ Implemented foundation:
     count without exposing Vulkan handles through the RHI
   - can allocate private `VkDescriptorSetLayout`, `VkPipelineLayout`, `VkDescriptorPool`, and
     descriptor set objects for material pipeline layouts without exposing their handles
-  - requires a material pipeline layout before mesh draw binding, so future draw execution has a
-    validated material-to-descriptor contract
-  - can validate mesh draw bindings against uploaded Vulkan buffer resources, material prototype
-    ids, and material graphics pipeline availability before submitting the offscreen draw smoke
+  - requests the Khronos validation layer and `VK_EXT_debug_utils` when available, routes warning
+    and error callbacks into engine logging, and degrades to a startup warning when unavailable
   - reports unavailable when Vulkan is not compiled in or no graphics-capable physical device is
     present
   - does not expose Vulkan handles through the RHI
@@ -178,22 +185,16 @@ backend-specific allocation details. Future render features should enter through
 engine-owned abstractions such as material definitions, asset handles, render passes,
 debug draw, and validated shader-pack extension points.
 
-The current Vulkan backend is a smoke backend, not the final renderer. It proves loader,
-instance, optional X11 surface, physical-device, logical-device, command submission,
-synchronization, offscreen clear-image lifetime, basic swapchain clear/present, host-visible buffer
-upload lifetime, private Vulkan shader-module creation, dependency- and transition-planned
-frame-plan execution with private Vulkan synchronization translation and offscreen all-resource
-barrier submission, private Vulkan descriptor-layout/pipeline-layout allocation, descriptor set
-allocation, private compute pipeline creation, RGBA8 sampled image upload, uniform and sampled
-texture descriptor writes, and private graphics pipeline creation behind the RHI, plus minimal
-offscreen draw command submission from validated mesh bindings. The smoke backend now distinguishes
-total planned synchronization barriers from backend-submitted barriers, and offscreen smoke frames
-submit planned barriers for all declared transient frame resources through temporary backend-owned
-images.
-Production submission of frame-plan transition records as full Vulkan render-pass/subpass
-execution, descriptor lifetime policy for material-bound shaders, broader staged GPU upload
-policy, compressed texture/KTX2 handling, and RenderDoc capture workflow still belong to later
-Vulkan integration slices.
+The Milestone 1 visible path is `apps/render_smoke`. It opens a native X11 window, generates and
+synchronously meshes a real far-world voxel chunk, loads checked-in validated SPIR-V, uploads the
+stable GPU vertex/index representation, and renders it with camera-relative positioning, depth
+testing, camera controls, resize/minimize handling, swapchain recreation, and clean shutdown. It
+uses only `execute_frame()`; no separate `bind_mesh_draws()` submission is required.
+
+The backend intentionally remains a one-frame-in-flight MVP and currently supports one
+draw-producing Vulkan pass per unified submission. General multi-pass Vulkan execution, staged
+device-local mesh uploads, descriptor lifetime policy for textured materials, compressed
+texture/KTX2 handling, and RenderDoc capture workflow belong to later integration slices.
 
 The current shader compiler has development validators plus a production SPIR-V passthrough
 profile. Development preserves source bytes behind explicit compiled-shader metadata and rejects
