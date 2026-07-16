@@ -119,6 +119,29 @@ void test_spirv_validation() {
     assert(invalid.error().code == "renderer.invalid_spirv_magic");
 }
 
+void test_render_environment_validation() {
+    using namespace heartstead::renderer::rhi;
+
+    const RenderEnvironmentData environment{};
+    assert(validate_render_environment(environment));
+
+    auto invalid_sun = environment;
+    invalid_sun.sun_direction = {};
+    const auto sun_status = validate_render_environment(invalid_sun);
+    assert(!sun_status);
+    assert(sun_status.error().code == "renderer.invalid_environment_range");
+
+    auto invalid_fog = environment;
+    invalid_fog.fog_end = invalid_fog.fog_start;
+    const auto fog_status = validate_render_environment(invalid_fog);
+    assert(!fog_status);
+    assert(fog_status.error().code == "renderer.invalid_environment_range");
+
+    auto invalid_color = environment;
+    invalid_color.ambient_color.x = -0.01F;
+    assert(!validate_render_environment(invalid_color));
+}
+
 void test_minimized_window_and_idempotent_quit() {
     using namespace heartstead::platform;
 
@@ -293,6 +316,7 @@ int main() {
     test_view_and_camera_resize();
     test_gpu_chunk_vertex_contract();
     test_spirv_validation();
+    test_render_environment_validation();
     test_minimized_window_and_idempotent_quit();
     test_unified_headless_frame_submission();
     test_immutable_chunk_meshing_snapshot();

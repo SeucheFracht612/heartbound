@@ -16,7 +16,8 @@ class FrameBuilder {
 
     [[nodiscard]] core::Result<rhi::RenderFramePlan> build_plan() const;
     [[nodiscard]] core::Result<rhi::RenderFrameSubmission> build(const RenderCamera& camera,
-                                                                 RenderCommandLists commands) const;
+                                                                 RenderCommandLists commands,
+                                                                 rhi::RenderEnvironmentData environment = {}) const;
 
     [[nodiscard]] rhi::RenderExtent extent() const noexcept;
 

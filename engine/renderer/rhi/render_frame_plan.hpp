@@ -137,6 +137,7 @@ struct RenderPassCommands {
 struct RenderFrameSubmission {
     RenderFramePlan plan;
     RenderCameraData camera;
+    RenderEnvironmentData environment;
     std::vector<RenderPassCommands> pass_commands;
 };
 
@@ -156,6 +157,7 @@ class RenderFramePlanBuilder {
                                                             ClearColor clear_color, bool present);
 [[nodiscard]] core::Status
 validate_render_frame_submission_shape(const RenderFrameSubmission& frame);
+[[nodiscard]] core::Status validate_render_environment(const RenderEnvironmentData& environment);
 
 [[nodiscard]] std::string_view
 render_resource_lifetime_name(RenderResourceLifetime lifetime) noexcept;

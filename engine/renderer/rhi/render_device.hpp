@@ -171,6 +171,9 @@ struct RenderFrameStats {
     std::size_t submitted_synchronization_barrier_count = 0;
     std::size_t draw_count = 0;
     std::size_t indexed_draw_count = 0;
+    std::size_t opaque_terrain_draw_count = 0;
+    std::size_t alpha_tested_terrain_draw_count = 0;
+    std::size_t transparent_terrain_draw_count = 0;
     std::size_t pipeline_bind_count = 0;
     std::size_t total_indices = 0;
     double cpu_command_recording_ms = 0.0;
@@ -182,6 +185,8 @@ struct RenderFrameStats {
     std::uint64_t gpu_upload_submission_serial = 0;
     double gpu_frame_ms = 0.0;
     double gpu_opaque_terrain_ms = 0.0;
+    double gpu_alpha_tested_terrain_ms = 0.0;
+    double gpu_transparent_terrain_ms = 0.0;
     double gpu_upload_ms = 0.0;
     double gpu_transfer_ms = 0.0;
     double gpu_final_copy_ms = 0.0;
@@ -494,16 +499,31 @@ struct RenderCameraData {
     math::Mat4f view_projection = math::Mat4f::identity();
 };
 
-// Shader-visible MVP constants. Mat4f is column-major and camera_relative_origin.w is reserved.
+struct RenderEnvironmentData {
+    math::Vec3f sun_direction{0.45F, 0.82F, 0.35F};
+    float sun_intensity = 0.68F;
+    math::Vec3f ambient_color{0.32F, 0.36F, 0.42F};
+    float fog_start = 384.0F;
+    math::Vec3f fog_color{0.055F, 0.09F, 0.14F};
+    float fog_end = 512.0F;
+};
+
+// Shader-visible constants. Mat4f is column-major and all vectors occupy complete 16-byte lanes.
 struct ChunkPushConstants {
     math::Mat4f view_projection = math::Mat4f::identity();
     float camera_relative_origin[4]{};
+    float sun_direction_intensity[4]{0.45F, 0.82F, 0.35F, 0.68F};
+    float ambient_color_fog_start[4]{0.32F, 0.36F, 0.42F, 384.0F};
+    float fog_color_fog_end[4]{0.055F, 0.09F, 0.14F, 512.0F};
 };
 
 static_assert(sizeof(math::Mat4f) == 64);
-static_assert(sizeof(ChunkPushConstants) == 80);
+static_assert(sizeof(ChunkPushConstants) == 128);
 static_assert(offsetof(ChunkPushConstants, view_projection) == 0);
 static_assert(offsetof(ChunkPushConstants, camera_relative_origin) == 64);
+static_assert(offsetof(ChunkPushConstants, sun_direction_intensity) == 80);
+static_assert(offsetof(ChunkPushConstants, ambient_color_fog_start) == 96);
+static_assert(offsetof(ChunkPushConstants, fog_color_fog_end) == 112);
 
 struct RendererBackendInfo {
     RenderBackend backend = RenderBackend::headless;

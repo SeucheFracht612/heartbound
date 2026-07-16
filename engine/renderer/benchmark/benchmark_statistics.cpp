@@ -150,6 +150,8 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
     double upload_total = 0.0;
     double gpu_wait_total = 0.0;
     double gpu_opaque_total = 0.0;
+    double gpu_alpha_tested_total = 0.0;
+    double gpu_transparent_total = 0.0;
     double gpu_transfer_total = 0.0;
     double gpu_final_copy_total = 0.0;
     for (const auto& sample : samples_) {
@@ -170,6 +172,8 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
         if (sample.gpu_timing_valid) {
             gpu_total += sample.gpu_frame_ms;
             gpu_opaque_total += sample.gpu_opaque_terrain_ms;
+            gpu_alpha_tested_total += sample.gpu_alpha_tested_terrain_ms;
+            gpu_transparent_total += sample.gpu_transparent_terrain_ms;
             gpu_transfer_total += sample.gpu_transfer_ms;
             gpu_final_copy_total += sample.gpu_final_copy_ms;
             ++summary.gpu_sample_count;
@@ -205,6 +209,10 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
         summary.mean_gpu_frame_ms = gpu_total / static_cast<double>(summary.gpu_sample_count);
         summary.mean_gpu_opaque_terrain_ms =
             gpu_opaque_total / static_cast<double>(summary.gpu_sample_count);
+        summary.mean_gpu_alpha_tested_terrain_ms =
+            gpu_alpha_tested_total / static_cast<double>(summary.gpu_sample_count);
+        summary.mean_gpu_transparent_terrain_ms =
+            gpu_transparent_total / static_cast<double>(summary.gpu_sample_count);
         summary.mean_gpu_transfer_ms =
             gpu_transfer_total / static_cast<double>(summary.gpu_sample_count);
         summary.mean_gpu_final_copy_ms =
@@ -262,6 +270,10 @@ std::string BenchmarkRecorder::to_json() const {
            << "    \"mean_upload_ms\": " << summary.mean_upload_ms << ",\n"
            << "    \"mean_gpu_wait_ms\": " << summary.mean_gpu_wait_ms << ",\n"
            << "    \"mean_gpu_opaque_terrain_ms\": " << summary.mean_gpu_opaque_terrain_ms << ",\n"
+           << "    \"mean_gpu_alpha_tested_terrain_ms\": "
+           << summary.mean_gpu_alpha_tested_terrain_ms << ",\n"
+           << "    \"mean_gpu_transparent_terrain_ms\": "
+           << summary.mean_gpu_transparent_terrain_ms << ",\n"
            << "    \"mean_gpu_transfer_ms\": " << summary.mean_gpu_transfer_ms << ",\n"
            << "    \"mean_gpu_final_copy_ms\": " << summary.mean_gpu_final_copy_ms << ",\n"
            << "    \"total_uploaded_bytes\": " << summary.total_uploaded_bytes << ",\n"
@@ -293,6 +305,8 @@ std::string BenchmarkRecorder::to_json() const {
                << ", \"gpu_upload_submission_serial\": " << sample.gpu_upload_submission_serial
                << ", \"gpu_upload_ms\": " << sample.gpu_upload_ms
                << ", \"gpu_opaque_ms\": " << sample.gpu_opaque_terrain_ms
+               << ", \"gpu_alpha_tested_ms\": " << sample.gpu_alpha_tested_terrain_ms
+               << ", \"gpu_transparent_ms\": " << sample.gpu_transparent_terrain_ms
                << ", \"gpu_transfer_ms\": " << sample.gpu_transfer_ms
                << ", \"gpu_final_copy_ms\": " << sample.gpu_final_copy_ms
                << ", \"extraction_ms\": " << sample.render_extraction_ms
@@ -314,6 +328,9 @@ std::string BenchmarkRecorder::to_json() const {
                << ", \"culled_chunks\": " << sample.culled_chunks
                << ", \"drawn_chunks\": " << sample.drawn_chunks
                << ", \"draw_calls\": " << sample.draw_calls
+               << ", \"opaque_terrain_draws\": " << sample.opaque_terrain_draws
+               << ", \"alpha_tested_terrain_draws\": " << sample.alpha_tested_terrain_draws
+               << ", \"transparent_terrain_draws\": " << sample.transparent_terrain_draws
                << ", \"pipeline_switches\": " << sample.pipeline_switches
                << ", \"resident_textures\": " << sample.resident_textures
                << ", \"runtime_materials\": " << sample.runtime_materials
@@ -342,12 +359,14 @@ std::string BenchmarkRecorder::to_csv() const {
               "p99_frame_ms,one_percent_low_fps,point_one_percent_low_fps,maximum_frame_ms,"
               "frame,submission_serial,completed_submission_serial,cpu_frame_ms,"
               "gpu_valid,gpu_timing_frame,gpu_latency_frames,gpu_frame_ms,gpu_upload_valid,"
-              "gpu_upload_submission_serial,gpu_upload_ms,gpu_opaque_ms,gpu_transfer_ms,"
-              "gpu_final_copy_ms,extraction_ms,"
+              "gpu_upload_submission_serial,gpu_upload_ms,gpu_opaque_ms,gpu_alpha_tested_ms,"
+              "gpu_transparent_ms,gpu_transfer_ms,gpu_final_copy_ms,extraction_ms,"
               "sync_ms,culling_ms,draw_list_ms,command_build_ms,command_recording_ms,snapshot_ms,"
               "meshing_ms,upload_preparation_ms,upload_ms,gpu_wait_ms,loaded_chunks,"
               "mesh_pending_chunks,upload_pending_chunks,resident_chunks,visible_chunks,"
-              "culled_chunks,drawn_chunks,draw_calls,pipeline_switches,resident_textures,"
+              "culled_chunks,drawn_chunks,draw_calls,opaque_terrain_draws,"
+              "alpha_tested_terrain_draws,transparent_terrain_draws,pipeline_switches,"
+              "resident_textures,"
               "runtime_materials,resident_pipelines,vertices,triangles,resident_texture_bytes,"
               "resident_mesh_bytes,"
               "gpu_arena_capacity_bytes,gpu_arena_used_bytes,gpu_arena_free_bytes,"
@@ -367,7 +386,8 @@ std::string BenchmarkRecorder::to_csv() const {
                << sample.gpu_timing_frame_index << ',' << sample.gpu_timing_latency_frames << ','
                << sample.gpu_frame_ms << ',' << (sample.gpu_upload_timing_valid ? 1 : 0) << ','
                << sample.gpu_upload_submission_serial << ',' << sample.gpu_upload_ms << ','
-               << sample.gpu_opaque_terrain_ms << ',' << sample.gpu_transfer_ms << ','
+               << sample.gpu_opaque_terrain_ms << ',' << sample.gpu_alpha_tested_terrain_ms << ','
+               << sample.gpu_transparent_terrain_ms << ',' << sample.gpu_transfer_ms << ','
                << sample.gpu_final_copy_ms << ',' << sample.render_extraction_ms << ','
                << sample.chunk_synchronization_ms << ',' << sample.culling_ms << ','
                << sample.draw_list_ms << ',' << sample.command_build_ms << ','
@@ -377,7 +397,9 @@ std::string BenchmarkRecorder::to_csv() const {
                << ',' << sample.mesh_pending_chunks << ',' << sample.upload_pending_chunks << ','
                << sample.resident_chunks << ',' << sample.visible_chunks << ','
                << sample.culled_chunks << ',' << sample.drawn_chunks << ',' << sample.draw_calls
-               << ',' << sample.pipeline_switches << ',' << sample.resident_textures << ','
+               << ',' << sample.opaque_terrain_draws << ',' << sample.alpha_tested_terrain_draws
+               << ',' << sample.transparent_terrain_draws << ',' << sample.pipeline_switches << ','
+               << sample.resident_textures << ','
                << sample.runtime_materials << ',' << sample.resident_pipelines << ','
                << sample.vertices << ',' << sample.triangles << ',' << sample.resident_texture_bytes
                << ',' << sample.resident_mesh_bytes << ',' << sample.gpu_arena_capacity_bytes << ','
@@ -407,7 +429,10 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     if (summary.gpu_sample_count == 0) {
         output << "unavailable";
     } else {
-        output << summary.mean_gpu_frame_ms << "ms";
+        output << summary.mean_gpu_frame_ms << "ms gpu_phases="
+               << summary.mean_gpu_opaque_terrain_ms << '/'
+               << summary.mean_gpu_alpha_tested_terrain_ms << '/'
+               << summary.mean_gpu_transparent_terrain_ms << "ms";
     }
     output << " gpu_upload=";
     if (summary.gpu_upload_sample_count == 0) {

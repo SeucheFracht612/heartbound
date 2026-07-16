@@ -469,6 +469,10 @@ core::Status validate_render_frame_submission_shape(const RenderFrameSubmission&
             "renderer.invalid_frame_camera",
             "render frame camera view-projection matrix must contain finite values");
     }
+    status = validate_render_environment(frame.environment);
+    if (!status) {
+        return status;
+    }
 
     std::unordered_set<std::size_t> commanded_passes;
     for (const auto& pass_commands : frame.pass_commands) {
@@ -532,6 +536,27 @@ core::Status validate_render_frame_submission_shape(const RenderFrameSubmission&
                     "render draw camera-relative origin must contain finite values");
             }
         }
+    }
+    return core::Status::ok();
+}
+
+core::Status validate_render_environment(const RenderEnvironmentData& environment) {
+    const auto nonnegative = [](math::Vec3f value) {
+        return value.x >= 0.0F && value.y >= 0.0F && value.z >= 0.0F;
+    };
+    if (!environment.sun_direction.is_finite() || !environment.ambient_color.is_finite() ||
+        !environment.fog_color.is_finite() || !std::isfinite(environment.sun_intensity) ||
+        !std::isfinite(environment.fog_start) || !std::isfinite(environment.fog_end)) {
+        return core::Status::failure("renderer.invalid_environment_finite",
+                                     "render environment values must be finite");
+    }
+    if (math::length_squared(environment.sun_direction) <= 0.0F ||
+        environment.sun_intensity < 0.0F || !nonnegative(environment.ambient_color) ||
+        !nonnegative(environment.fog_color) || environment.fog_start < 0.0F ||
+        environment.fog_end <= environment.fog_start) {
+        return core::Status::failure(
+            "renderer.invalid_environment_range",
+            "render environment lighting and fog values are outside their valid ranges");
     }
     return core::Status::ok();
 }

@@ -55,6 +55,8 @@ struct BenchmarkSummary {
     double mean_upload_ms = 0.0;
     double mean_gpu_wait_ms = 0.0;
     double mean_gpu_opaque_terrain_ms = 0.0;
+    double mean_gpu_alpha_tested_terrain_ms = 0.0;
+    double mean_gpu_transparent_terrain_ms = 0.0;
     double mean_gpu_transfer_ms = 0.0;
     double mean_gpu_final_copy_ms = 0.0;
     std::uint64_t total_uploaded_bytes = 0;

@@ -30,7 +30,8 @@ sum can exceed `cpu_frame_ms`. GPU upload timing is independent of the CPU `uplo
 ## GPU measurements
 
 The Vulkan backend uses timestamp queries without `VK_QUERY_RESULT_WAIT_BIT`. Three frame slots
-contain eight timestamps each: complete frame, opaque terrain, frame transfer, and final copy.
+contain twelve timestamps each: complete frame, opaque terrain, alpha-tested terrain, transparent
+terrain/fluids, frame transfer, and final copy.
 Completed queries are polled after normal frame-context completion and report both
 `gpu_timing_frame_index` and `gpu_timing_latency_frames`.
 
@@ -39,8 +40,8 @@ Each asynchronous upload context owns a separate two-query pool. A completed sam
 timestamp queues leave the validity flags false.
 
 `VK_EXT_debug_utils` is enabled independently of the validation layer when available. Command
-labels cover opaque terrain, frame transfer, final copy, batched buffer upload, and sampled-image
-upload. Cutout and transparent intervals will receive distinct queries when those passes exist.
+labels cover opaque, alpha-tested, rich/static, transparent/fluid, debug, and UI phases; frame
+transfer and final copy; batched buffer upload; and sampled-image upload.
 
 ## Counters and reporting
 
@@ -107,7 +108,9 @@ build/default-debug/apps/render_benchmark/heartstead_render_benchmark \
 ```
 
 All 32 measured frames carried valid GPU timings with one-frame latency. The intervals for complete
-frame, opaque terrain, transfer, and final copy were nonnegative.
+frame, opaque terrain, transfer, and final copy were nonnegative. The later phase implementation
+adds independently reported alpha-tested and transparent/fluid intervals to the same delayed
+sample contract.
 
 Native upload verification:
 

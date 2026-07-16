@@ -31,6 +31,7 @@ struct RendererInitDesc {
     ChunkRenderConfig chunk_config{};
     ChunkGpuCacheConfig chunk_gpu_cache_config{};
     rhi::ClearColor clear_color{0.055F, 0.09F, 0.14F, 1.0F};
+    rhi::RenderEnvironmentData environment{};
     bool development_shader_hot_reload = false;
 };
 
@@ -56,6 +57,7 @@ class Renderer {
 
     [[nodiscard]] core::Result<rhi::RenderFrameStats> render(const RenderCamera& camera);
     [[nodiscard]] core::Status resize(rhi::RenderExtent extent);
+    [[nodiscard]] core::Status set_environment(rhi::RenderEnvironmentData environment);
     [[nodiscard]] core::Status
     reload_terrain_shaders(std::span<const std::uint32_t> vertex_spirv,
                            std::span<const std::uint32_t> fragment_spirv);
@@ -91,6 +93,7 @@ class Renderer {
     profiling::CpuTimingRecorder cpu_timings_{};
     std::vector<rhi::RenderDrawCommand> chunk_draw_scratch_;
     RenderCommandLists draw_command_scratch_;
+    rhi::RenderEnvironmentData environment_{};
     RendererStats stats_{};
     std::chrono::steady_clock::time_point frame_started_at_{};
     bool frame_timing_active_ = false;

@@ -13,10 +13,14 @@ layout(location = 1) out vec2 fragment_uv;
 layout(location = 2) flat out uint fragment_voxel_type;
 layout(location = 3) flat out uint fragment_light;
 layout(location = 4) flat out uint fragment_state_bits;
+layout(location = 5) out vec3 fragment_world_position;
 
 layout(push_constant) uniform ChunkPushConstants {
     mat4 view_projection;
     vec4 camera_relative_origin;
+    vec4 sun_direction_intensity;
+    vec4 ambient_color_fog_start;
+    vec4 fog_color_fog_end;
 } chunk;
 
 void main() {
@@ -29,4 +33,5 @@ void main() {
     fragment_voxel_type = in_material;
     fragment_light = in_lighting.x;
     fragment_state_bits = in_state_bits;
+    fragment_world_position = world_position;
 }

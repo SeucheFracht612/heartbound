@@ -124,7 +124,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
     [[nodiscard]] core::Result<RenderFrameStats>
     execute_frame_plan(const RenderFramePlan& plan) override {
-        return execute_frame(RenderFrameSubmission{plan, {}, {}});
+        return execute_frame(RenderFrameSubmission{plan, {}, {}, {}});
     }
 
     [[nodiscard]] core::Result<RenderFrameStats>
@@ -159,6 +159,13 @@ class HeadlessRenderDevice final : public IRenderDevice {
             RenderResourceHandle bound_pipeline;
             for (const auto& pass_commands : frame.pass_commands) {
                 const auto& pass = frame.plan.passes[pass_commands.pass_index];
+                if (pass.name == "opaque_terrain") {
+                    stats.opaque_terrain_draw_count += pass_commands.draws.size();
+                } else if (pass.name == "alpha_tested_terrain") {
+                    stats.alpha_tested_terrain_draw_count += pass_commands.draws.size();
+                } else if (pass.name == "transparent_terrain") {
+                    stats.transparent_terrain_draw_count += pass_commands.draws.size();
+                }
                 for (const auto& draw : pass_commands.draws) {
                     const auto pipeline = graphics_pipelines_.find(draw.pipeline.value);
                     if (pipeline == graphics_pipelines_.end()) {
@@ -215,8 +222,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
                     if (!has_chunk_constants) {
                         return core::Result<RenderFrameStats>::failure(
                             "renderer.missing_chunk_push_constants",
-                            "render draw pipeline layout must expose 80 vertex push-constant "
-                            "bytes");
+                            "render draw pipeline layout must expose the chunk push-constant "
+                            "block to the vertex stage");
                     }
 
                     const auto has_color_target = std::ranges::any_of(

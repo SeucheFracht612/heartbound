@@ -64,9 +64,10 @@ make_terrain_shader_program(std::span<const std::uint32_t> vertex_spirv,
         {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true},
     };
     shader_program.interface.push_constant_ranges.push_back(
-        {rhi::RenderShaderStageFlags::vertex, 0, sizeof(rhi::ChunkPushConstants)});
+        {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
+         sizeof(rhi::ChunkPushConstants)});
     shader_program.dependencies = {"gpu_chunk_vertex_v1", "gpu_voxel_material_v1",
-                                   "chunk_push_constants_v1"};
+                                   "chunk_push_constants_v2"};
     return shader_program;
 }
 
@@ -90,6 +91,10 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         return config_status;
     }
     config_status = desc.chunk_gpu_cache_config.validate();
+    if (!config_status) {
+        return config_status;
+    }
+    config_status = rhi::validate_render_environment(desc.environment);
     if (!config_status) {
         return config_status;
     }
@@ -130,6 +135,7 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         return core::Status::failure(error.code, error.message);
     }
     frame_builder_ = std::make_unique<FrameBuilder>(device_->current_extent(), desc.clear_color);
+    environment_ = desc.environment;
     return core::Status::ok();
 }
 
@@ -177,6 +183,7 @@ core::Status Renderer::shutdown() {
     terrain_shader_program_ = {};
     terrain_texture_array_ = {};
     terrain_sampler_ = {};
+    environment_ = {};
     device_.reset();
     return first_failure;
 }
@@ -264,7 +271,7 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
     auto frame = [&]() {
         profiling::ScopedCpuTimingZone command_zone(cpu_timings_,
                                                     profiling::CpuTimingZone::command_build);
-        return frame_builder_->build(camera, std::move(command_lists));
+        return frame_builder_->build(camera, std::move(command_lists), environment_);
     }();
     if (!frame) {
         return core::Result<rhi::RenderFrameStats>::failure(frame.error().code,
@@ -349,6 +356,19 @@ core::Status Renderer::reload_terrain_shaders(std::span<const std::uint32_t> ver
     }
     terrain_pipelines_ = {rebuilt[0], rebuilt[1], rebuilt[2], rebuilt[3]};
     return chunk_system_->set_terrain_pipelines(terrain_pipelines_);
+}
+
+core::Status Renderer::set_environment(rhi::RenderEnvironmentData environment) {
+    if (!is_initialized()) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized before setting environment");
+    }
+    auto status = rhi::validate_render_environment(environment);
+    if (!status) {
+        return status;
+    }
+    environment_ = environment;
+    return core::Status::ok();
 }
 
 bool Renderer::is_initialized() const noexcept {
@@ -438,6 +458,15 @@ void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept
     stats_.completed_submission_serial = frame.completed_submission_serial;
     stats_.draw_calls = static_cast<std::uint32_t>(std::min(
         frame.draw_count, static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    stats_.opaque_terrain_draws = static_cast<std::uint32_t>(std::min(
+        frame.opaque_terrain_draw_count,
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    stats_.alpha_tested_terrain_draws = static_cast<std::uint32_t>(std::min(
+        frame.alpha_tested_terrain_draw_count,
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    stats_.transparent_terrain_draws = static_cast<std::uint32_t>(std::min(
+        frame.transparent_terrain_draw_count,
+        static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
     stats_.pipeline_switches = static_cast<std::uint32_t>(
         std::min(frame.pipeline_bind_count,
                  static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
@@ -450,6 +479,8 @@ void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept
     stats_.gpu_upload_submission_serial = frame.gpu_upload_submission_serial;
     stats_.gpu_frame_ms = frame.gpu_frame_ms;
     stats_.gpu_opaque_terrain_ms = frame.gpu_opaque_terrain_ms;
+    stats_.gpu_alpha_tested_terrain_ms = frame.gpu_alpha_tested_terrain_ms;
+    stats_.gpu_transparent_terrain_ms = frame.gpu_transparent_terrain_ms;
     stats_.gpu_upload_ms = frame.gpu_upload_ms;
     stats_.gpu_transfer_ms = frame.gpu_transfer_ms;
     stats_.gpu_final_copy_ms = frame.gpu_final_copy_ms;
@@ -587,7 +618,8 @@ core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> ve
         {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true},
     };
     layout.push_constant_ranges.push_back(
-        {rhi::RenderShaderStageFlags::vertex, 0, sizeof(rhi::ChunkPushConstants)});
+        {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
+         sizeof(rhi::ChunkPushConstants)});
     layout.debug_name = "terrain_layout";
 
     rhi::RenderGraphicsPipelineDesc pipeline;

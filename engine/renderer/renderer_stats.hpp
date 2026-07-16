@@ -30,6 +30,8 @@ struct RendererStats {
     double gpu_wait_ms = 0.0;
 
     double gpu_opaque_terrain_ms = 0.0;
+    double gpu_alpha_tested_terrain_ms = 0.0;
+    double gpu_transparent_terrain_ms = 0.0;
     double gpu_upload_ms = 0.0;
     double gpu_transfer_ms = 0.0;
     double gpu_final_copy_ms = 0.0;
@@ -43,6 +45,9 @@ struct RendererStats {
     std::uint32_t drawn_chunks = 0;
     std::uint32_t residency_suppressed_chunks = 0;
     std::uint32_t draw_calls = 0;
+    std::uint32_t opaque_terrain_draws = 0;
+    std::uint32_t alpha_tested_terrain_draws = 0;
+    std::uint32_t transparent_terrain_draws = 0;
     std::uint32_t pipeline_switches = 0;
     std::uint32_t resident_textures = 0;
     std::uint32_t runtime_materials = 0;

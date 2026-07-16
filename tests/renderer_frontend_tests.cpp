@@ -14,6 +14,7 @@
 #include <cmath>
 #include <ranges>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -54,6 +55,30 @@ void test_frustum_aabb_culling() {
 
     // Invalid bounds are deliberately conservative while renderer data is being debugged.
     assert(frustum.intersects({{1.0F, 1.0F, 1.0F}, {-1.0F, -1.0F, -1.0F}}));
+}
+
+void test_frame_builder_preserves_terrain_phase_commands() {
+    using namespace heartstead;
+    renderer::FrameBuilder builder({640, 360}, {0.1F, 0.2F, 0.3F, 1.0F});
+    renderer::RenderCamera camera;
+    assert(camera.set_aspect_ratio(640.0F / 360.0F));
+    const renderer::rhi::RenderDrawCommand draw{{1}, {2}, {3}, 3};
+    renderer::RenderCommandLists commands;
+    commands.opaque_terrain_draws.push_back(draw);
+    commands.alpha_tested_terrain_draws.push_back(draw);
+    commands.transparent_terrain_draws.push_back(draw);
+    auto frame = builder.build(camera, std::move(commands));
+    assert(frame);
+    assert(frame.value().plan.passes.size() == 8);
+    assert(frame.value().plan.passes[0].name == "sky");
+    assert(frame.value().plan.passes[1].name == "opaque_terrain");
+    assert(frame.value().plan.passes[2].name == "alpha_tested_terrain");
+    assert(frame.value().plan.passes[4].name == "transparent_terrain");
+    assert(frame.value().plan.passes[7].name == "present");
+    assert(frame.value().pass_commands.size() == 3);
+    assert(frame.value().pass_commands[0].pass_index == 1);
+    assert(frame.value().pass_commands[1].pass_index == 2);
+    assert(frame.value().pass_commands[2].pass_index == 4);
 }
 
 void test_chunk_gpu_cache_lifecycle() {
@@ -617,6 +642,15 @@ void test_renderer_frontend_submits_headless_frames() {
     // one shared sampler, and one GPU material-table buffer.
     assert(initialized_resource_count == 13);
 
+    renderer::rhi::RenderEnvironmentData invalid_environment;
+    invalid_environment.fog_end = invalid_environment.fog_start;
+    assert(!retained_renderer.set_environment(invalid_environment));
+    renderer::rhi::RenderEnvironmentData environment;
+    environment.sun_intensity = 0.75F;
+    environment.fog_start = 96.0F;
+    environment.fog_end = 160.0F;
+    assert(retained_renderer.set_environment(environment));
+
     auto invalid_spirv = test_spirv;
     invalid_spirv[0] = 0;
     assert(!retained_renderer.reload_terrain_shaders(invalid_spirv, test_spirv));
@@ -650,6 +684,9 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(first_frame);
     assert(first_frame.value().draw_count == 1);
     assert(first_frame.value().render_pass_count == 8);
+    assert(first_frame.value().opaque_terrain_draw_count == 1);
+    assert(first_frame.value().alpha_tested_terrain_draw_count == 0);
+    assert(first_frame.value().transparent_terrain_draw_count == 0);
     assert(first_frame.value().indexed_draw_count == 1);
     assert(first_frame.value().pipeline_bind_count == 1);
     assert(first_frame.value().total_indices > 0);
@@ -719,6 +756,7 @@ void test_renderer_frontend_submits_headless_frames() {
 int main() {
     test_scoped_cpu_timing_zones();
     test_frustum_aabb_culling();
+    test_frame_builder_preserves_terrain_phase_commands();
     test_chunk_gpu_cache_lifecycle();
     test_chunk_draws_use_phase_pipelines_and_transparent_ordering();
     test_chunk_gpu_cache_batches_device_local_arena_uploads();

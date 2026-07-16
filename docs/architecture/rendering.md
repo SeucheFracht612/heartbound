@@ -142,8 +142,14 @@ Implemented foundation:
   - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention
   - `RenderCamera` owns the local position, yaw/pitch perspective, resize-dependent aspect ratio,
     and view-projection composition
-  - the first terrain binding uses an 80-byte vertex push-constant block: a 64-byte view-projection
-    matrix plus a 16-byte camera-relative chunk origin
+  - terrain uses a 128-byte vertex/fragment push-constant block: a 64-byte view-projection matrix,
+    a 16-byte camera-relative chunk origin, and three 16-byte environment lanes carrying the sun,
+    ambient light, and distance-fog parameters
+  - terrain lighting is evaluated in linear space, the unorm scene target receives explicit sRGB
+    encoding, alpha-tested surfaces discard below the material cutoff, and transparent/fluid
+    surfaces blend without writing depth
+  - the unified terrain frame records sky, opaque, alpha-tested, rich/static, transparent/fluid,
+    debug, UI, and present phases; opaque/cutout/transparent terrain use separately prewarmed state
 
 - `MaterialDefinition` and `MaterialRegistry`
   - describe renderer-facing material data with prototype ids, domains, blend modes, shader

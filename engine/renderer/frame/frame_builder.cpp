@@ -82,7 +82,8 @@ core::Result<rhi::RenderFramePlan> FrameBuilder::build_plan() const {
 }
 
 core::Result<rhi::RenderFrameSubmission> FrameBuilder::build(const RenderCamera& camera,
-                                                             RenderCommandLists commands) const {
+                                                             RenderCommandLists commands,
+                                                             rhi::RenderEnvironmentData environment) const {
     auto plan = build_plan();
     if (!plan) {
         return core::Result<rhi::RenderFrameSubmission>::failure(plan.error().code,
@@ -92,6 +93,7 @@ core::Result<rhi::RenderFrameSubmission> FrameBuilder::build(const RenderCamera&
     rhi::RenderFrameSubmission result;
     result.plan = std::move(plan).value();
     result.camera.view_projection = camera.view_projection;
+    result.environment = environment;
     const auto append = [&result](std::size_t pass_index,
                                   std::vector<rhi::RenderDrawCommand>& draws) {
         if (!draws.empty()) {

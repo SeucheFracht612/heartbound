@@ -35,6 +35,9 @@ void test_benchmark_statistics() {
         if (index >= 2) {
             stats.gpu_timing_valid = true;
             stats.gpu_frame_ms = static_cast<double>(index);
+            stats.gpu_opaque_terrain_ms = 0.5;
+            stats.gpu_alpha_tested_terrain_ms = 0.25;
+            stats.gpu_transparent_terrain_ms = 0.125;
         }
         if (index >= 1) {
             stats.gpu_upload_timing_valid = true;
@@ -51,6 +54,9 @@ void test_benchmark_statistics() {
     assert(summary.gpu_sample_count == 2);
     assert(summary.gpu_upload_sample_count == 3);
     assert(std::abs(summary.mean_gpu_upload_ms - 0.5) < 0.0001);
+    assert(std::abs(summary.mean_gpu_opaque_terrain_ms - 0.5) < 0.0001);
+    assert(std::abs(summary.mean_gpu_alpha_tested_terrain_ms - 0.25) < 0.0001);
+    assert(std::abs(summary.mean_gpu_transparent_terrain_ms - 0.125) < 0.0001);
     assert(std::abs(summary.median_frame_ms - 2.5) < 0.0001);
     assert(std::abs(summary.p95_frame_ms - 85.45) < 0.0001);
     assert(std::abs(summary.p99_frame_ms - 97.09) < 0.0001);
@@ -68,6 +74,8 @@ void test_benchmark_statistics() {
     assert(recorder.to_json().find("\"p99_frame_ms\": 97.090000") != std::string::npos);
     assert(recorder.to_json().find("\"frames\": [") != std::string::npos);
     assert(recorder.to_json().find("\"gpu_upload_ms\": 0.750000") != std::string::npos);
+    assert(recorder.to_json().find("\"gpu_alpha_tested_ms\": 0.250000") !=
+           std::string::npos);
     assert(recorder.to_json().find("\"slowest_frame\": {\"frame\": 3") != std::string::npos);
     assert(
         recorder.to_csv().find(
