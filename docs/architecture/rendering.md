@@ -217,7 +217,8 @@ Implemented foundation:
   - requests the Khronos validation layer and `VK_EXT_debug_utils` when available, routes warning
     and error callbacks into engine logging, and degrades to a startup warning when unavailable
   - records delayed timestamp-query results for the complete GPU frame, opaque terrain pass,
-    transfer interval, and final swapchain copy without stalling to read the current frame
+    frame-transfer interval, final swapchain copy, and asynchronous buffer-upload batches without
+    stalling to read the current submission; upload timings retain their source submission serial
   - emits Vulkan debug labels around opaque terrain, frame transfer, final copy, and sampled-image
     upload command regions
   - reports unavailable when Vulkan is not compiled in or no graphics-capable physical device is

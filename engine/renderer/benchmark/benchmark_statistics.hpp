@@ -17,6 +17,7 @@ struct BenchmarkSummary {
     std::uint64_t seed = 0;
     std::size_t sample_count = 0;
     std::size_t gpu_sample_count = 0;
+    std::size_t gpu_upload_sample_count = 0;
 
     double median_frame_ms = 0.0;
     double p95_frame_ms = 0.0;
@@ -27,6 +28,7 @@ struct BenchmarkSummary {
 
     double mean_cpu_frame_ms = 0.0;
     double mean_gpu_frame_ms = 0.0;
+    double mean_gpu_upload_ms = 0.0;
     double mean_meshing_ms = 0.0;
     double mean_upload_ms = 0.0;
     double mean_gpu_wait_ms = 0.0;

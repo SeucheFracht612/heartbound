@@ -117,6 +117,7 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
     frame_times.reserve(samples_.size());
     double cpu_total = 0.0;
     double gpu_total = 0.0;
+    double gpu_upload_total = 0.0;
     double meshing_total = 0.0;
     double upload_total = 0.0;
     double gpu_wait_total = 0.0;
@@ -130,6 +131,10 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
         if (sample.gpu_timing_valid) {
             gpu_total += sample.gpu_frame_ms;
             ++summary.gpu_sample_count;
+        }
+        if (sample.gpu_upload_timing_valid) {
+            gpu_upload_total += sample.gpu_upload_ms;
+            ++summary.gpu_upload_sample_count;
         }
     }
     std::ranges::sort(frame_times);
@@ -147,6 +152,10 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
     if (summary.gpu_sample_count != 0) {
         summary.mean_gpu_frame_ms = gpu_total / static_cast<double>(summary.gpu_sample_count);
     }
+    if (summary.gpu_upload_sample_count != 0) {
+        summary.mean_gpu_upload_ms =
+            gpu_upload_total / static_cast<double>(summary.gpu_upload_sample_count);
+    }
     return summary;
 }
 
@@ -159,6 +168,7 @@ std::string BenchmarkRecorder::to_json() const {
            << "  \"summary\": {\n"
            << "    \"sample_count\": " << summary.sample_count << ",\n"
            << "    \"gpu_sample_count\": " << summary.gpu_sample_count << ",\n"
+           << "    \"gpu_upload_sample_count\": " << summary.gpu_upload_sample_count << ",\n"
            << "    \"median_frame_ms\": " << summary.median_frame_ms << ",\n"
            << "    \"p95_frame_ms\": " << summary.p95_frame_ms << ",\n"
            << "    \"p99_frame_ms\": " << summary.p99_frame_ms << ",\n"
@@ -167,6 +177,7 @@ std::string BenchmarkRecorder::to_json() const {
            << "    \"maximum_frame_ms\": " << summary.maximum_frame_ms << ",\n"
            << "    \"mean_cpu_frame_ms\": " << summary.mean_cpu_frame_ms << ",\n"
            << "    \"mean_gpu_frame_ms\": " << summary.mean_gpu_frame_ms << ",\n"
+           << "    \"mean_gpu_upload_ms\": " << summary.mean_gpu_upload_ms << ",\n"
            << "    \"mean_meshing_ms\": " << summary.mean_meshing_ms << ",\n"
            << "    \"mean_upload_ms\": " << summary.mean_upload_ms << ",\n"
            << "    \"mean_gpu_wait_ms\": " << summary.mean_gpu_wait_ms << ",\n"
@@ -182,6 +193,9 @@ std::string BenchmarkRecorder::to_json() const {
                << ", \"gpu_timing_frame\": " << sample.gpu_timing_frame_index
                << ", \"gpu_latency_frames\": " << sample.gpu_timing_latency_frames
                << ", \"gpu_frame_ms\": " << sample.gpu_frame_ms
+               << ", \"gpu_upload_valid\": " << (sample.gpu_upload_timing_valid ? "true" : "false")
+               << ", \"gpu_upload_submission_serial\": " << sample.gpu_upload_submission_serial
+               << ", \"gpu_upload_ms\": " << sample.gpu_upload_ms
                << ", \"gpu_opaque_ms\": " << sample.gpu_opaque_terrain_ms
                << ", \"gpu_transfer_ms\": " << sample.gpu_transfer_ms
                << ", \"gpu_final_copy_ms\": " << sample.gpu_final_copy_ms
@@ -222,8 +236,9 @@ std::string BenchmarkRecorder::to_csv() const {
     std::ostringstream output;
     output << std::fixed << std::setprecision(6);
     output << "scene,seed,frame,submission_serial,completed_submission_serial,cpu_frame_ms,"
-              "gpu_valid,gpu_timing_frame,gpu_latency_frames,"
-              "gpu_frame_ms,gpu_opaque_ms,gpu_transfer_ms,gpu_final_copy_ms,extraction_ms,"
+              "gpu_valid,gpu_timing_frame,gpu_latency_frames,gpu_frame_ms,gpu_upload_valid,"
+              "gpu_upload_submission_serial,gpu_upload_ms,gpu_opaque_ms,gpu_transfer_ms,"
+              "gpu_final_copy_ms,extraction_ms,"
               "sync_ms,culling_ms,draw_list_ms,command_build_ms,command_recording_ms,snapshot_ms,"
               "meshing_ms,upload_preparation_ms,upload_ms,gpu_wait_ms,loaded_chunks,"
               "mesh_pending_chunks,upload_pending_chunks,resident_chunks,visible_chunks,"
@@ -235,11 +250,13 @@ std::string BenchmarkRecorder::to_csv() const {
                << sample.submission_serial << ',' << sample.completed_submission_serial << ','
                << sample.cpu_frame_ms << ',' << (sample.gpu_timing_valid ? 1 : 0) << ','
                << sample.gpu_timing_frame_index << ',' << sample.gpu_timing_latency_frames << ','
-               << sample.gpu_frame_ms << ',' << sample.gpu_opaque_terrain_ms << ','
-               << sample.gpu_transfer_ms << ',' << sample.gpu_final_copy_ms << ','
-               << sample.render_extraction_ms << ',' << sample.chunk_synchronization_ms << ','
-               << sample.culling_ms << ',' << sample.draw_list_ms << ',' << sample.command_build_ms
-               << ',' << sample.command_recording_ms << ',' << sample.chunk_snapshot_ms << ','
+               << sample.gpu_frame_ms << ',' << (sample.gpu_upload_timing_valid ? 1 : 0) << ','
+               << sample.gpu_upload_submission_serial << ',' << sample.gpu_upload_ms << ','
+               << sample.gpu_opaque_terrain_ms << ',' << sample.gpu_transfer_ms << ','
+               << sample.gpu_final_copy_ms << ',' << sample.render_extraction_ms << ','
+               << sample.chunk_synchronization_ms << ',' << sample.culling_ms << ','
+               << sample.draw_list_ms << ',' << sample.command_build_ms << ','
+               << sample.command_recording_ms << ',' << sample.chunk_snapshot_ms << ','
                << sample.meshing_ms << ',' << sample.upload_preparation_ms << ','
                << sample.upload_ms << ',' << sample.gpu_wait_ms << ',' << sample.loaded_chunks
                << ',' << sample.mesh_pending_chunks << ',' << sample.upload_pending_chunks << ','
@@ -274,6 +291,12 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
         output << "unavailable";
     } else {
         output << summary.mean_gpu_frame_ms << "ms";
+    }
+    output << " gpu_upload=";
+    if (summary.gpu_upload_sample_count == 0) {
+        output << "unavailable";
+    } else {
+        output << summary.mean_gpu_upload_ms << "ms";
     }
     output << " mesh=" << summary.mean_meshing_ms << "ms upload=" << summary.mean_upload_ms
            << "ms wait=" << summary.mean_gpu_wait_ms << "ms";

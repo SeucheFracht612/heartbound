@@ -24,6 +24,11 @@ void test_benchmark_statistics() {
             stats.gpu_timing_valid = true;
             stats.gpu_frame_ms = static_cast<double>(index);
         }
+        if (index >= 1) {
+            stats.gpu_upload_timing_valid = true;
+            stats.gpu_upload_submission_serial = index + 10;
+            stats.gpu_upload_ms = 0.25 * static_cast<double>(index);
+        }
         recorder.record(stats);
     }
 
@@ -32,6 +37,8 @@ void test_benchmark_statistics() {
     assert(summary.seed == 77);
     assert(summary.sample_count == 4);
     assert(summary.gpu_sample_count == 2);
+    assert(summary.gpu_upload_sample_count == 3);
+    assert(std::abs(summary.mean_gpu_upload_ms - 0.5) < 0.0001);
     assert(std::abs(summary.median_frame_ms - 2.5) < 0.0001);
     assert(std::abs(summary.p95_frame_ms - 85.45) < 0.0001);
     assert(std::abs(summary.p99_frame_ms - 97.09) < 0.0001);
@@ -41,6 +48,7 @@ void test_benchmark_statistics() {
     assert(summary.total_uploaded_bytes == 64);
     assert(recorder.to_json().find("\"p99_frame_ms\": 97.090000") != std::string::npos);
     assert(recorder.to_json().find("\"frames\": [") != std::string::npos);
+    assert(recorder.to_json().find("\"gpu_upload_ms\": 0.750000") != std::string::npos);
     assert(recorder.to_csv().find(
                "scene,seed,frame,submission_serial,completed_submission_serial,cpu_frame_ms") == 0);
     assert(benchmark::format_benchmark_summary(summary).find("0.1%low=10.000fps") !=

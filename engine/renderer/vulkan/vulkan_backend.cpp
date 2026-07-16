@@ -1193,10 +1193,12 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         VkCommandPool command_pool = VK_NULL_HANDLE;
         VkCommandBuffer transfer_commands = VK_NULL_HANDLE;
         VkFence completion_fence = VK_NULL_HANDLE;
+        VkQueryPool timestamp_queries = VK_NULL_HANDLE;
         VulkanBufferResource fallback_staging;
         void* fallback_mapped = nullptr;
         std::uint64_t submission_serial = 0;
         bool in_flight = false;
+        bool timing_pending = false;
     };
 
     template <typename Resource> struct RetiredVulkanResource {
@@ -1484,6 +1486,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.transition_count = execution_plan.value().transitions.size();
         stats.synchronization_barrier_count = translated_transitions.value().size();
         stats.submitted_synchronization_barrier_count = submitted_barriers.value();
+        attach_latest_gpu_upload_timing(stats);
         ++completed_frame_count_;
         return core::Result<rhi::RenderFrameStats>::success(stats);
     }
@@ -1761,6 +1764,12 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     std::string(vk_result_name(result)));
         }
 
+        if (upload_context.timestamp_queries != VK_NULL_HANDLE) {
+            vkCmdResetQueryPool(upload_context.transfer_commands, upload_context.timestamp_queries,
+                                0, 2);
+            vkCmdWriteTimestamp(upload_context.transfer_commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                upload_context.timestamp_queries, 0);
+        }
         begin_debug_label(upload_context.transfer_commands, "Batched buffer upload", 0.92F, 0.56F,
                           0.16F);
         for (std::size_t index = 0; index < writes.size(); ++index) {
@@ -1808,6 +1817,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         vkCmdPipelineBarrier(
             upload_context.transfer_commands, VK_PIPELINE_STAGE_TRANSFER_BIT, destination_stages, 0,
             0, nullptr, static_cast<std::uint32_t>(barriers.size()), barriers.data(), 0, nullptr);
+        if (upload_context.timestamp_queries != VK_NULL_HANDLE) {
+            vkCmdWriteTimestamp(upload_context.transfer_commands,
+                                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                upload_context.timestamp_queries, 1);
+        }
         end_debug_label(upload_context.transfer_commands);
         result = vkEndCommandBuffer(upload_context.transfer_commands);
         if (result == VK_SUCCESS) {
@@ -1833,6 +1847,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         last_submission_serial_ = upload_serial;
         upload_context.submission_serial = upload_serial;
         upload_context.in_flight = true;
+        upload_context.timing_pending = upload_context.timestamp_queries != VK_NULL_HANDLE;
         next_upload_context_ = (next_upload_context_ + 1) % upload_contexts_.size();
 
         rhi::RenderBufferBatchUploadStats stats;
@@ -2751,6 +2766,19 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                                                               fence.error().message);
         }
         context.completion_fence = fence.value();
+        if (timestamp_valid_bits_ != 0 && properties_.limits.timestampPeriod > 0.0F) {
+            VkQueryPoolCreateInfo query_info{};
+            query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+            query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+            query_info.queryCount = 2;
+            const auto result =
+                vkCreateQueryPool(device_, &query_info, nullptr, &context.timestamp_queries);
+            if (result != VK_SUCCESS) {
+                context.timestamp_queries = VK_NULL_HANDLE;
+                core::log(core::LogLevel::warning, "Vulkan upload timestamp queries unavailable: " +
+                                                       std::string(vk_result_name(result)));
+            }
+        }
         return core::Result<VulkanUploadContext>::success(std::move(context));
     }
 
@@ -2799,6 +2827,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             vkUnmapMemory(device_, context.fallback_staging.memory);
         }
         destroy_buffer_resource(context.fallback_staging);
+        if (context.timestamp_queries != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(device_, context.timestamp_queries, nullptr);
+        }
         if (context.completion_fence != VK_NULL_HANDLE) {
             vkDestroyFence(device_, context.completion_fence, nullptr);
         }
@@ -2819,6 +2850,39 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         upload_contexts_.clear();
     }
 
+    void collect_completed_upload_timings() noexcept {
+        for (auto& context : upload_contexts_) {
+            if (!context.timing_pending ||
+                context.submission_serial > completed_submission_serial_) {
+                continue;
+            }
+            std::array<std::uint64_t, 2> values{};
+            const auto result =
+                vkGetQueryPoolResults(device_, context.timestamp_queries, 0, 2, sizeof(values),
+                                      values.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
+            if (result != VK_SUCCESS) {
+                continue;
+            }
+            context.timing_pending = false;
+            if (!latest_gpu_upload_timing_valid_ ||
+                context.submission_serial >= latest_gpu_upload_submission_serial_) {
+                latest_gpu_upload_submission_serial_ = context.submission_serial;
+                latest_gpu_upload_ms_ = timestamp_milliseconds(values[0], values[1]);
+                latest_gpu_upload_timing_valid_ = true;
+            }
+        }
+    }
+
+    void attach_latest_gpu_upload_timing(rhi::RenderFrameStats& stats) noexcept {
+        if (!latest_gpu_upload_timing_valid_) {
+            return;
+        }
+        stats.gpu_upload_timing_valid = true;
+        stats.gpu_upload_submission_serial = latest_gpu_upload_submission_serial_;
+        stats.gpu_upload_ms = latest_gpu_upload_ms_;
+        latest_gpu_upload_timing_valid_ = false;
+    }
+
     void advance_completed_submission(std::uint64_t submission_serial) noexcept {
         completed_submission_serial_ = std::max(completed_submission_serial_, submission_serial);
         while (!pending_frame_submissions_.empty() &&
@@ -2827,6 +2891,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             ++completed_frame_count_;
         }
         staging_ring_.release_completed(completed_submission_serial_);
+        collect_completed_upload_timings();
         for (auto& context : frame_contexts_) {
             if (context.framebuffer != VK_NULL_HANDLE &&
                 context.submission_serial <= completed_submission_serial_) {
@@ -4097,6 +4162,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.present_pass_count = 1;
         stats.synchronization_barrier_count = frame_transitions.size();
         stats.submitted_synchronization_barrier_count = frame_transitions.size();
+        attach_latest_gpu_upload_timing(stats);
         ++completed_frame_count_;
         return core::Result<rhi::RenderFrameStats>::success(stats);
     }
@@ -4323,6 +4389,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 stats.transition_count = execution_plan.value().transitions.size();
                 stats.cpu_gpu_wait_ms = gpu_wait_ms;
                 attach_gpu_timing(stats, gpu_timing, frame_index);
+                attach_latest_gpu_upload_timing(stats);
                 return core::Result<rhi::RenderFrameStats>::success(stats);
             }
             acquired_suboptimal = acquire_result == VK_SUBOPTIMAL_KHR;
@@ -4735,6 +4802,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.cpu_command_recording_ms = command_recording_ms;
         stats.cpu_gpu_wait_ms = gpu_wait_ms;
         attach_gpu_timing(stats, gpu_timing, frame_index);
+        attach_latest_gpu_upload_timing(stats);
         for (const auto& commands : frame.pass_commands) {
             stats.draw_count += commands.draws.size();
             stats.indexed_draw_count += commands.draws.size();
@@ -5249,6 +5317,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     std::uint64_t last_submission_serial_ = 0;
     std::uint64_t completed_submission_serial_ = 0;
     std::deque<std::uint64_t> pending_frame_submissions_;
+    bool latest_gpu_upload_timing_valid_ = false;
+    std::uint64_t latest_gpu_upload_submission_serial_ = 0;
+    double latest_gpu_upload_ms_ = 0.0;
 };
 
 } // namespace

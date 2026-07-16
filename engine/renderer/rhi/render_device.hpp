@@ -151,8 +151,11 @@ struct RenderFrameStats {
     bool gpu_timing_valid = false;
     std::uint64_t gpu_timing_frame_index = 0;
     std::uint32_t gpu_timing_latency_frames = 0;
+    bool gpu_upload_timing_valid = false;
+    std::uint64_t gpu_upload_submission_serial = 0;
     double gpu_frame_ms = 0.0;
     double gpu_opaque_terrain_ms = 0.0;
+    double gpu_upload_ms = 0.0;
     double gpu_transfer_ms = 0.0;
     double gpu_final_copy_ms = 0.0;
 };

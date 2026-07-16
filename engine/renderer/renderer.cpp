@@ -274,8 +274,11 @@ void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept
     stats_.gpu_timing_valid = frame.gpu_timing_valid;
     stats_.gpu_timing_frame_index = frame.gpu_timing_frame_index;
     stats_.gpu_timing_latency_frames = frame.gpu_timing_latency_frames;
+    stats_.gpu_upload_timing_valid = frame.gpu_upload_timing_valid;
+    stats_.gpu_upload_submission_serial = frame.gpu_upload_submission_serial;
     stats_.gpu_frame_ms = frame.gpu_frame_ms;
     stats_.gpu_opaque_terrain_ms = frame.gpu_opaque_terrain_ms;
+    stats_.gpu_upload_ms = frame.gpu_upload_ms;
     stats_.gpu_transfer_ms = frame.gpu_transfer_ms;
     stats_.gpu_final_copy_ms = frame.gpu_final_copy_ms;
 }
