@@ -250,14 +250,9 @@ int main() {
         }
         ++rendered_frames;
         if (rendered_frames <= 3 || rendered_frames % 180 == 0) {
-            const auto& stats = retained_renderer.chunk_stats();
             core::log(core::LogLevel::info,
                       "Retained frame " + std::to_string(rendered_frames) + ": " +
-                          std::to_string(stats.cache.resident_chunk_count) + " resident, " +
-                          std::to_string(stats.visible_chunk_count) + " visible, " +
-                          std::to_string(stats.culled_chunk_count) + " culled, " +
-                          std::to_string(stats.pending_mesh_count + stats.pending_upload_count) +
-                          " pending");
+                          renderer::format_renderer_stats(retained_renderer.stats()));
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }

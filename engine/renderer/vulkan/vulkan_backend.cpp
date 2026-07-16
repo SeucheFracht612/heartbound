@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -346,6 +347,7 @@ struct SelectedPhysicalDevice {
     VkPhysicalDevice physical_device = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties properties{};
     std::uint32_t graphics_queue_family = 0;
+    std::uint32_t timestamp_valid_bits = 0;
     VkFormat depth_format = VK_FORMAT_UNDEFINED;
 };
 
@@ -557,6 +559,7 @@ choose_present_mode(const std::vector<VkPresentModeKHR>& present_modes,
         }
         selected.graphics_queue_family =
             static_cast<std::uint32_t>(std::distance(queue_families.begin(), graphics_family));
+        selected.timestamp_valid_bits = graphics_family->timestampValidBits;
         return core::Result<SelectedPhysicalDevice>::success(selected);
     }
 
@@ -1138,6 +1141,29 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
 
+    static constexpr std::uint32_t timestamp_slot_count = 3;
+    static constexpr std::uint32_t timestamps_per_slot = 8;
+
+    enum TimestampIndex : std::uint32_t {
+        frame_start_timestamp = 0,
+        opaque_start_timestamp = 1,
+        opaque_end_timestamp = 2,
+        transfer_start_timestamp = 3,
+        final_copy_start_timestamp = 4,
+        final_copy_end_timestamp = 5,
+        transfer_end_timestamp = 6,
+        frame_end_timestamp = 7,
+    };
+
+    struct VulkanGpuTimingSample {
+        bool valid = false;
+        std::uint64_t frame_index = 0;
+        double frame_ms = 0.0;
+        double opaque_ms = 0.0;
+        double transfer_ms = 0.0;
+        double final_copy_ms = 0.0;
+    };
+
   public:
     VulkanSmokeDevice(rhi::RenderDeviceDesc desc, VulkanInstanceResource instance,
                       SelectedPhysicalDevice selected, VkDevice device, VkQueue queue,
@@ -1150,10 +1176,13 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
           debug_utils_enabled_(instance.debug_utils_enabled),
           physical_device_(selected.physical_device), properties_(selected.properties),
           graphics_queue_family_(selected.graphics_queue_family),
-          depth_format_(selected.depth_format), device_(device), queue_(queue), surface_(surface),
+          depth_format_(selected.depth_format), device_(device), queue_(queue),
+          timestamp_valid_bits_(selected.timestamp_valid_bits), surface_(surface),
           command_pool_(command_pool), command_buffer_(command_buffer), fence_(fence),
           image_available_semaphore_(image_available_semaphore),
-          render_finished_semaphore_(render_finished_semaphore) {}
+          render_finished_semaphore_(render_finished_semaphore) {
+        initialize_instrumentation();
+    }
 
     ~VulkanSmokeDevice() override {
         if (device_ != VK_NULL_HANDLE) {
@@ -1166,6 +1195,10 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             destroy_pipeline_layout_resources();
             destroy_swapchain();
             destroy_offscreen_target();
+            if (timestamp_query_pool_ != VK_NULL_HANDLE) {
+                vkDestroyQueryPool(device_, timestamp_query_pool_, nullptr);
+                timestamp_query_pool_ = VK_NULL_HANDLE;
+            }
             if (render_finished_semaphore_ != VK_NULL_HANDLE) {
                 vkDestroySemaphore(device_, render_finished_semaphore_, nullptr);
             }
@@ -2313,6 +2346,162 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     }
 
   private:
+    void initialize_instrumentation() noexcept {
+        if (debug_utils_enabled_) {
+            begin_debug_label_ = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
+                vkGetDeviceProcAddr(device_, "vkCmdBeginDebugUtilsLabelEXT"));
+            end_debug_label_ = reinterpret_cast<PFN_vkCmdEndDebugUtilsLabelEXT>(
+                vkGetDeviceProcAddr(device_, "vkCmdEndDebugUtilsLabelEXT"));
+        }
+
+        if (timestamp_valid_bits_ == 0 || properties_.limits.timestampPeriod <= 0.0F) {
+            core::log(core::LogLevel::warning,
+                      "Vulkan queue does not support timestamp-query instrumentation");
+            return;
+        }
+        VkQueryPoolCreateInfo query_info{};
+        query_info.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        query_info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        query_info.queryCount = timestamp_slot_count * timestamps_per_slot;
+        const auto result =
+            vkCreateQueryPool(device_, &query_info, nullptr, &timestamp_query_pool_);
+        if (result != VK_SUCCESS) {
+            timestamp_query_pool_ = VK_NULL_HANDLE;
+            core::log(core::LogLevel::warning,
+                      "Vulkan timestamp query pool unavailable: " +
+                          std::string(vk_result_name(result)));
+        }
+    }
+
+    void begin_debug_label(VkCommandBuffer command_buffer, const char* name, float red,
+                           float green, float blue) const noexcept {
+        if (begin_debug_label_ == nullptr) {
+            return;
+        }
+        VkDebugUtilsLabelEXT label{};
+        label.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT;
+        label.pLabelName = name;
+        label.color[0] = red;
+        label.color[1] = green;
+        label.color[2] = blue;
+        label.color[3] = 1.0F;
+        begin_debug_label_(command_buffer, &label);
+    }
+
+    void end_debug_label(VkCommandBuffer command_buffer) const noexcept {
+        if (end_debug_label_ != nullptr) {
+            end_debug_label_(command_buffer);
+        }
+    }
+
+    [[nodiscard]] std::uint32_t timestamp_base(std::uint64_t frame_index) const noexcept {
+        const auto slot = static_cast<std::uint32_t>(frame_index % timestamp_slot_count);
+        return slot * timestamps_per_slot;
+    }
+
+    void begin_timestamp_frame(VkCommandBuffer command_buffer,
+                               std::uint64_t frame_index) noexcept {
+        if (timestamp_query_pool_ == VK_NULL_HANDLE) {
+            return;
+        }
+        const auto slot = static_cast<std::size_t>(frame_index % timestamp_slot_count);
+        timestamp_pending_[slot] = false;
+        timestamp_frame_indices_[slot] = frame_index;
+        const auto base = timestamp_base(frame_index);
+        vkCmdResetQueryPool(command_buffer, timestamp_query_pool_, base, timestamps_per_slot);
+        vkCmdWriteTimestamp(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            timestamp_query_pool_, base + frame_start_timestamp);
+    }
+
+    void write_timestamp(VkCommandBuffer command_buffer, std::uint64_t frame_index,
+                         TimestampIndex index, VkPipelineStageFlagBits stage) const noexcept {
+        if (timestamp_query_pool_ == VK_NULL_HANDLE) {
+            return;
+        }
+        vkCmdWriteTimestamp(command_buffer, stage, timestamp_query_pool_,
+                            timestamp_base(frame_index) + index);
+    }
+
+    void mark_timestamp_frame_pending(std::uint64_t frame_index) noexcept {
+        if (timestamp_query_pool_ == VK_NULL_HANDLE) {
+            return;
+        }
+        timestamp_pending_[static_cast<std::size_t>(frame_index % timestamp_slot_count)] = true;
+    }
+
+    [[nodiscard]] std::uint64_t timestamp_delta(std::uint64_t start,
+                                                std::uint64_t end) const noexcept {
+        if (timestamp_valid_bits_ >= 64) {
+            return end - start;
+        }
+        const auto mask = (std::uint64_t{1} << timestamp_valid_bits_) - 1;
+        return (end - start) & mask;
+    }
+
+    [[nodiscard]] double timestamp_milliseconds(std::uint64_t start,
+                                                std::uint64_t end) const noexcept {
+        const auto nanoseconds = static_cast<double>(timestamp_delta(start, end)) *
+                                 static_cast<double>(properties_.limits.timestampPeriod);
+        return nanoseconds / 1'000'000.0;
+    }
+
+    [[nodiscard]] VulkanGpuTimingSample collect_latest_gpu_timing() noexcept {
+        VulkanGpuTimingSample newest;
+        if (timestamp_query_pool_ == VK_NULL_HANDLE) {
+            return newest;
+        }
+        for (std::size_t slot = 0; slot < timestamp_pending_.size(); ++slot) {
+            if (!timestamp_pending_[slot]) {
+                continue;
+            }
+            std::array<std::uint64_t, timestamps_per_slot> values{};
+            const auto result = vkGetQueryPoolResults(
+                device_, timestamp_query_pool_, static_cast<std::uint32_t>(slot) *
+                                                   timestamps_per_slot,
+                timestamps_per_slot, sizeof(values), values.data(), sizeof(std::uint64_t),
+                VK_QUERY_RESULT_64_BIT);
+            if (result != VK_SUCCESS) {
+                continue;
+            }
+            timestamp_pending_[slot] = false;
+            VulkanGpuTimingSample sample;
+            sample.valid = true;
+            sample.frame_index = timestamp_frame_indices_[slot];
+            sample.frame_ms = timestamp_milliseconds(values[frame_start_timestamp],
+                                                     values[frame_end_timestamp]);
+            sample.opaque_ms = timestamp_milliseconds(values[opaque_start_timestamp],
+                                                      values[opaque_end_timestamp]);
+            sample.transfer_ms = timestamp_milliseconds(values[transfer_start_timestamp],
+                                                        values[transfer_end_timestamp]);
+            sample.final_copy_ms = timestamp_milliseconds(values[final_copy_start_timestamp],
+                                                          values[final_copy_end_timestamp]);
+            if (!newest.valid || sample.frame_index > newest.frame_index) {
+                newest = sample;
+            }
+        }
+        return newest;
+    }
+
+    static void attach_gpu_timing(rhi::RenderFrameStats& stats,
+                                  const VulkanGpuTimingSample& timing,
+                                  std::uint64_t current_frame) noexcept {
+        if (!timing.valid) {
+            return;
+        }
+        stats.gpu_timing_valid = true;
+        stats.gpu_timing_frame_index = timing.frame_index;
+        const auto latency = current_frame >= timing.frame_index
+                                 ? current_frame - timing.frame_index
+                                 : std::uint64_t{0};
+        stats.gpu_timing_latency_frames = static_cast<std::uint32_t>(
+            std::min(latency, static_cast<std::uint64_t>(
+                                  std::numeric_limits<std::uint32_t>::max())));
+        stats.gpu_frame_ms = timing.frame_ms;
+        stats.gpu_opaque_terrain_ms = timing.opaque_ms;
+        stats.gpu_transfer_ms = timing.transfer_ms;
+        stats.gpu_final_copy_ms = timing.final_copy_ms;
+    }
+
     [[nodiscard]] VulkanGraphicsPipelineResource*
     find_graphics_pipeline_for_material(const core::PrototypeId& material_id) noexcept {
         const auto found =
@@ -2752,6 +2941,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                                          "failed to begin Vulkan command buffer: " +
                                              std::string(vk_result_name(result)));
         }
+        begin_debug_label(command_buffer_, "Sampled image upload", 0.92F, 0.56F, 0.16F);
 
         const VkImageSubresourceRange image_range{
             VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1,
@@ -2798,6 +2988,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                              VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &to_shader_read);
+        end_debug_label(command_buffer_);
 
         result = vkEndCommandBuffer(command_buffer_);
         if (result != VK_SUCCESS) {
@@ -3291,6 +3482,14 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
     [[nodiscard]] core::Result<rhi::RenderFrameStats>
     execute_submitted_frame(const rhi::RenderFrameSubmission& frame) {
+        using Clock = std::chrono::steady_clock;
+        const auto gpu_timing = collect_latest_gpu_timing();
+        double gpu_wait_ms = 0.0;
+        const auto accumulate_wait = [&gpu_wait_ms](Clock::time_point started) noexcept {
+            gpu_wait_ms +=
+                std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+        };
+
         auto resource_status = validate_submitted_frame_resources(frame);
         if (!resource_status) {
             return core::Result<rhi::RenderFrameStats>::failure(resource_status.error().code,
@@ -3310,7 +3509,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         }
         if (desc_.initial_extent.width != frame.plan.extent.width ||
             desc_.initial_extent.height != frame.plan.extent.height) {
+            const auto wait_started = Clock::now();
             const auto idle_result = vkDeviceWaitIdle(device_);
+            accumulate_wait(wait_started);
             if (idle_result != VK_SUCCESS) {
                 return core::Result<rhi::RenderFrameStats>::failure(
                     "renderer.vulkan_wait_idle_failed",
@@ -3333,11 +3534,15 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             // A finite timeout keeps the native event loop responsive when a compositor stops
             // releasing images for an occluded or minimized FIFO swapchain.
             constexpr std::uint64_t acquire_timeout_nanoseconds = 50'000'000;
+            auto wait_started = Clock::now();
             auto acquire_result =
                 vkAcquireNextImageKHR(device_, swapchain_, acquire_timeout_nanoseconds,
                                       image_available_semaphore_, VK_NULL_HANDLE, &image_index);
+            accumulate_wait(wait_started);
             if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
+                wait_started = Clock::now();
                 const auto idle_result = vkDeviceWaitIdle(device_);
+                accumulate_wait(wait_started);
                 if (idle_result != VK_SUCCESS) {
                     return core::Result<rhi::RenderFrameStats>::failure(
                         "renderer.vulkan_wait_idle_failed",
@@ -3350,9 +3555,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     return core::Result<rhi::RenderFrameStats>::failure(status.error().code,
                                                                         status.error().message);
                 }
+                wait_started = Clock::now();
                 acquire_result =
                     vkAcquireNextImageKHR(device_, swapchain_, acquire_timeout_nanoseconds,
                                           image_available_semaphore_, VK_NULL_HANDLE, &image_index);
+                accumulate_wait(wait_started);
             }
             if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
                 rhi::RenderFrameStats stats;
@@ -3366,6 +3573,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 stats.resource_use_count = execution_plan.value().resource_uses.size();
                 stats.dependency_count = execution_plan.value().dependencies.size();
                 stats.transition_count = execution_plan.value().transitions.size();
+                stats.cpu_gpu_wait_ms = gpu_wait_ms;
+                attach_gpu_timing(stats, gpu_timing, completed_frame_count_);
                 return core::Result<rhi::RenderFrameStats>::success(stats);
             }
             acquired_suboptimal = acquire_result == VK_SUBOPTIMAL_KHR;
@@ -3426,6 +3635,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "renderer.vulkan_reset_fence_failed",
                 "failed to reset Vulkan terrain fence: " + std::string(vk_result_name(result)));
         }
+        const auto command_recording_started = Clock::now();
         result = vkResetCommandBuffer(command_buffer_, 0);
         if (result != VK_SUCCESS) {
             destroy_framebuffer();
@@ -3434,7 +3644,6 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "failed to reset Vulkan terrain command buffer: " +
                     std::string(vk_result_name(result)));
         }
-
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -3446,6 +3655,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "failed to begin Vulkan terrain command buffer: " +
                     std::string(vk_result_name(result)));
         }
+        begin_timestamp_frame(command_buffer_, completed_frame_count_);
 
         const VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         VkImageMemoryBarrier color_to_attachment{};
@@ -3511,6 +3721,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         render_pass_begin.renderArea.extent = VkExtent2D{target_extent.width, target_extent.height};
         render_pass_begin.clearValueCount = first_pipeline.uses_depth ? 2U : 1U;
         render_pass_begin.pClearValues = clear_values.data();
+        begin_debug_label(command_buffer_, "Opaque terrain pass", 0.20F, 0.72F, 0.28F);
+        write_timestamp(command_buffer_, completed_frame_count_, opaque_start_timestamp,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         vkCmdBeginRenderPass(command_buffer_, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
 
         VkViewport viewport{};
@@ -3548,6 +3761,13 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                              draw.first_index, draw.vertex_offset, draw.first_instance);
         }
         vkCmdEndRenderPass(command_buffer_);
+        write_timestamp(command_buffer_, completed_frame_count_, opaque_end_timestamp,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        end_debug_label(command_buffer_);
+
+        begin_debug_label(command_buffer_, "Frame transfer", 0.30F, 0.48F, 0.92F);
+        write_timestamp(command_buffer_, completed_frame_count_, transfer_start_timestamp,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
 
         VkImageMemoryBarrier color_to_transfer_source{};
         color_to_transfer_source.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -3564,6 +3784,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                              &color_to_transfer_source);
         ++submitted_barrier_count;
 
+        begin_debug_label(command_buffer_, "Final copy", 0.72F, 0.34F, 0.90F);
+        write_timestamp(command_buffer_, completed_frame_count_, final_copy_start_timestamp,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         if (present) {
             VkImageMemoryBarrier swapchain_to_transfer{};
             swapchain_to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -3610,6 +3833,14 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                                  &swapchain_to_present);
             submitted_barrier_count += 2;
         }
+        write_timestamp(command_buffer_, completed_frame_count_, final_copy_end_timestamp,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        end_debug_label(command_buffer_);
+        write_timestamp(command_buffer_, completed_frame_count_, transfer_end_timestamp,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        end_debug_label(command_buffer_);
+        write_timestamp(command_buffer_, completed_frame_count_, frame_end_timestamp,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
         result = vkEndCommandBuffer(command_buffer_);
         if (result != VK_SUCCESS) {
@@ -3619,6 +3850,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "failed to end Vulkan terrain command buffer: " +
                     std::string(vk_result_name(result)));
         }
+        const auto command_recording_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - command_recording_started)
+                .count();
 
         const VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
         VkSubmitInfo submit_info{};
@@ -3641,8 +3875,10 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     std::string(vk_result_name(result)));
         }
 
+        const auto fence_wait_started = Clock::now();
         const auto wait_result = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
                                                  std::numeric_limits<std::uint64_t>::max());
+        accumulate_wait(fence_wait_started);
         destroy_framebuffer();
         if (wait_result != VK_SUCCESS) {
             return core::Result<rhi::RenderFrameStats>::failure(
@@ -3650,6 +3886,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "failed to wait for unified Vulkan terrain frame: " +
                     std::string(vk_result_name(wait_result)));
         }
+        mark_timestamp_frame_pending(completed_frame_count_);
 
         // This MVP deliberately has one frame in flight. The fence makes command-buffer and
         // acquire-semaphore reuse safe. Presentation still waits on a semaphore owned by the
@@ -3685,7 +3922,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         if (present && (present_result == VK_ERROR_OUT_OF_DATE_KHR ||
                         present_result == VK_SUBOPTIMAL_KHR || acquired_suboptimal)) {
             presented = present_result != VK_ERROR_OUT_OF_DATE_KHR;
+            const auto wait_started = Clock::now();
             const auto queue_idle_result = vkQueueWaitIdle(queue_);
+            accumulate_wait(wait_started);
             if (queue_idle_result != VK_SUCCESS) {
                 return core::Result<rhi::RenderFrameStats>::failure(
                     "renderer.vulkan_wait_idle_failed",
@@ -3713,6 +3952,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.transition_count = execution_plan.value().transitions.size();
         stats.synchronization_barrier_count = execution_plan.value().transitions.size();
         stats.submitted_synchronization_barrier_count = submitted_barrier_count;
+        stats.cpu_command_recording_ms = command_recording_ms;
+        stats.cpu_gpu_wait_ms = gpu_wait_ms;
+        attach_gpu_timing(stats, gpu_timing, completed_frame_count_);
         for (const auto& commands : frame.pass_commands) {
             stats.draw_count += commands.draws.size();
             stats.indexed_draw_count += commands.draws.size();
@@ -4176,6 +4418,12 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     VkFormat depth_format_ = VK_FORMAT_UNDEFINED;
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue queue_ = VK_NULL_HANDLE;
+    std::uint32_t timestamp_valid_bits_ = 0;
+    VkQueryPool timestamp_query_pool_ = VK_NULL_HANDLE;
+    std::array<bool, timestamp_slot_count> timestamp_pending_{};
+    std::array<std::uint64_t, timestamp_slot_count> timestamp_frame_indices_{};
+    PFN_vkCmdBeginDebugUtilsLabelEXT begin_debug_label_ = nullptr;
+    PFN_vkCmdEndDebugUtilsLabelEXT end_debug_label_ = nullptr;
     VkSurfaceKHR surface_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     VkCommandBuffer command_buffer_ = VK_NULL_HANDLE;
