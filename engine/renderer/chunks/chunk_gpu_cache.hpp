@@ -46,6 +46,9 @@ struct ChunkGpuEntry {
 
     math::Bounds3f local_bounds{};
     ChunkGpuState state = ChunkGpuState::missing;
+    std::uint64_t last_visible_epoch = 0;
+    std::size_t last_resident_bytes = 0;
+    bool residency_suppressed = false;
 
     [[nodiscard]] bool has_drawable_mesh() const noexcept;
     [[nodiscard]] std::size_t resident_bytes() const noexcept;
@@ -116,6 +119,7 @@ class ChunkGpuCache {
 
     [[nodiscard]] core::Status insert(world::ChunkIdentity identity);
     [[nodiscard]] core::Status erase(world::ChunkIdentity identity);
+    [[nodiscard]] core::Status release_mesh(world::ChunkIdentity identity);
     [[nodiscard]] core::Status clear();
 
     [[nodiscard]] bool contains(world::ChunkIdentity identity) const noexcept;
@@ -127,6 +131,7 @@ class ChunkGpuCache {
     void mark_cpu_mesh_ready(world::ChunkIdentity identity) noexcept;
     void mark_upload_pending(world::ChunkIdentity identity) noexcept;
     void mark_failed(world::ChunkIdentity identity) noexcept;
+    void mark_visible(world::ChunkIdentity identity, std::uint64_t epoch) noexcept;
 
     [[nodiscard]] core::Result<ChunkGpuUploadResult>
     replace_mesh(world::ChunkIdentity identity, std::uint64_t content_revision,

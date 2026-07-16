@@ -354,6 +354,7 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
     stats_.visible_chunks = saturating_u32(chunks.visible_chunk_count);
     stats_.culled_chunks = saturating_u32(chunks.culled_chunk_count);
     stats_.drawn_chunks = saturating_u32(chunks.drawn_chunk_count);
+    stats_.residency_suppressed_chunks = saturating_u32(chunks.residency_suppressed_chunk_count);
     if (texture_manager_ != nullptr) {
         stats_.resident_textures = saturating_u32(texture_manager_->stats().resident_texture_count);
         stats_.resident_texture_bytes = texture_manager_->stats().resident_texture_bytes;
@@ -368,6 +369,9 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
     stats_.vertices = chunks.visible_vertex_count;
     stats_.triangles = chunks.visible_index_count / 3;
     stats_.resident_mesh_bytes = chunks.cache.resident_bytes;
+    stats_.gpu_terrain_budget_bytes = chunks.gpu_terrain_budget_bytes;
+    stats_.distance_evicted_meshes = chunks.distance_evicted_mesh_count;
+    stats_.memory_pressure_evicted_meshes = chunks.memory_pressure_evicted_mesh_count;
     stats_.gpu_arena_capacity_bytes =
         chunks.cache.vertex_arena.capacity_bytes + chunks.cache.index_arena.capacity_bytes;
     stats_.gpu_arena_used_bytes =

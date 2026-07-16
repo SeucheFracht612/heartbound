@@ -6,6 +6,7 @@
 #include "engine/renderer/chunks/chunk_gpu_cache.hpp"
 #include "engine/renderer/chunks/chunk_mesh_scheduler.hpp"
 #include "engine/renderer/render_camera.hpp"
+#include "engine/renderer/renderer_config.hpp"
 #include "engine/renderer/rhi/render_frame_plan.hpp"
 #include "engine/world/streaming/chunk_streamer.hpp"
 #include "engine/world/world_state.hpp"
@@ -19,6 +20,7 @@
 namespace heartstead::renderer {
 
 struct ChunkRenderConfig {
+    WorldRenderDistances distances{};
     std::size_t max_chunks_meshed_per_frame = 4;
     std::size_t max_chunks_uploaded_per_frame = 4;
     std::size_t max_bytes_uploaded_per_frame = 8 * 1024 * 1024;
@@ -28,6 +30,7 @@ struct ChunkRenderConfig {
     std::size_t max_concurrent_mesh_jobs = 4;
     std::size_t max_cached_snapshot_buffers = 8;
     std::size_t max_cached_mesh_buffers = 8;
+    std::size_t gpu_terrain_budget_bytes = 192U * 1024U * 1024U;
     ChunkMeshingMode meshing_mode = ChunkMeshingMode::greedy;
 
     [[nodiscard]] core::Status validate() const;
@@ -57,10 +60,18 @@ struct ChunkRenderStats {
 
     std::size_t visible_chunk_count = 0;
     std::size_t culled_chunk_count = 0;
+    std::size_t distance_culled_chunk_count = 0;
+    std::size_t frustum_culled_chunk_count = 0;
     std::size_t drawn_chunk_count = 0;
     std::size_t draw_count = 0;
     std::size_t visible_vertex_count = 0;
     std::size_t visible_index_count = 0;
+    std::size_t distance_evicted_mesh_count = 0;
+    std::size_t distance_evicted_mesh_bytes = 0;
+    std::size_t memory_pressure_evicted_mesh_count = 0;
+    std::size_t memory_pressure_evicted_mesh_bytes = 0;
+    std::size_t residency_suppressed_chunk_count = 0;
+    std::size_t gpu_terrain_budget_bytes = 0;
 
     double culling_ms = 0.0;
     double draw_list_ms = 0.0;
@@ -74,6 +85,8 @@ struct ChunkDrawList {
     std::vector<rhi::RenderDrawCommand> draws;
     std::size_t visible_chunk_count = 0;
     std::size_t culled_chunk_count = 0;
+    std::size_t distance_culled_chunk_count = 0;
+    std::size_t frustum_culled_chunk_count = 0;
     std::size_t drawn_chunk_count = 0;
     std::size_t vertex_count = 0;
     std::size_t index_count = 0;
@@ -132,10 +145,13 @@ class ChunkRenderSystem {
 
     void enqueue_mesh(world::ChunkIdentity identity, bool forced);
     void remove_pending(world::ChunkIdentity identity);
-    [[nodiscard]] core::Status reconcile_loaded_chunks(world::WorldState& world);
-    void consume_dirty_regions(world::WorldState& world);
-    [[nodiscard]] core::Status refresh_render_table(world::WorldState& world);
-    [[nodiscard]] core::Status process_completed_meshes(world::WorldState& world);
+    [[nodiscard]] core::Status reconcile_loaded_chunks(world::WorldState& world,
+                                                       const RenderCamera& camera);
+    void consume_dirty_regions(world::WorldState& world, const RenderCamera& camera);
+    [[nodiscard]] core::Status refresh_render_table(world::WorldState& world,
+                                                    const RenderCamera& camera);
+    [[nodiscard]] core::Status process_completed_meshes(world::WorldState& world,
+                                                        const RenderCamera& camera);
     [[nodiscard]] core::Status schedule_mesh_jobs(world::WorldState& world,
                                                   const RenderCamera& camera);
     [[nodiscard]] core::Status process_upload_queue(world::WorldState& world,
@@ -151,6 +167,16 @@ class ChunkRenderSystem {
     void recycle_upload_storage(PendingUpload& upload) noexcept;
     [[nodiscard]] bool is_visible(world::ChunkCoord coord, math::Bounds3f local_bounds,
                                   const RenderCamera& camera) const;
+    [[nodiscard]] bool within_mesh_distance(world::ChunkCoord coord,
+                                            const RenderCamera& camera) const;
+    [[nodiscard]] bool within_visible_distance(world::ChunkCoord coord,
+                                               const RenderCamera& camera) const;
+    [[nodiscard]] bool within_gpu_retention_distance(world::ChunkCoord coord,
+                                                     const RenderCamera& camera) const;
+    [[nodiscard]] core::Status enforce_distance_residency(const RenderCamera& camera);
+    [[nodiscard]] core::Status enforce_gpu_residency_budget(const RenderCamera& camera);
+    [[nodiscard]] bool should_restore_suppressed_residency(const ChunkGpuEntry& entry,
+                                                           const RenderCamera& camera) const;
     [[nodiscard]] float distance_squared(world::ChunkCoord coord, math::Bounds3f local_bounds,
                                          const RenderCamera& camera) const;
     [[nodiscard]] static core::Result<math::Vec3f>
@@ -169,6 +195,7 @@ class ChunkRenderSystem {
     std::unique_ptr<ChunkMeshScheduler> mesh_scheduler_;
     std::shared_ptr<const world::BlockRenderTableSnapshot> render_table_;
     std::uint64_t next_sequence_ = 1;
+    std::uint64_t visibility_epoch_ = 0;
     ChunkRenderStats stats_{};
     profiling::CpuTimingRecorder timings_{};
 };

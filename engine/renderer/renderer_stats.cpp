@@ -28,8 +28,11 @@ std::string format_renderer_stats(const RendererStats& stats) {
            << " pipelines=" << stats.pipeline_switches << " textures=" << stats.resident_textures
            << '/' << stats.resident_texture_bytes << " materials=" << stats.runtime_materials
            << " triangles=" << stats.triangles << " resident_bytes=" << stats.resident_mesh_bytes
-           << " arena=" << stats.gpu_arena_used_bytes << '/' << stats.gpu_arena_capacity_bytes
-           << " arena_frag=" << stats.gpu_arena_fragmentation;
+           << '/' << stats.gpu_terrain_budget_bytes
+           << " suppressed=" << stats.residency_suppressed_chunks
+           << " evicted=" << stats.distance_evicted_meshes << '/'
+           << stats.memory_pressure_evicted_meshes << " arena=" << stats.gpu_arena_used_bytes << '/'
+           << stats.gpu_arena_capacity_bytes << " arena_frag=" << stats.gpu_arena_fragmentation;
     return stream.str();
 }
 

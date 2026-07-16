@@ -230,6 +230,7 @@ target_sources(
       renderer/memory/gpu_buffer_arena.hpp
       renderer/memory/staging_ring.hpp
       renderer/renderer.hpp
+      renderer/renderer_config.hpp
       renderer/renderer_stats.hpp
       renderer/render_camera.hpp
       renderer/rhi/render_device.hpp

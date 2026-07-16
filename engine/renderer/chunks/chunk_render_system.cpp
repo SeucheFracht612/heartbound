@@ -4,6 +4,7 @@
 #include "engine/world/blocks/block_model.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <ranges>
 #include <string>
@@ -32,9 +33,64 @@ namespace {
     return {{0.0F, 0.0F, 0.0F}, {edge, edge, edge}};
 }
 
+[[nodiscard]] std::uint64_t axis_distance(std::int64_t left, std::int64_t right) noexcept {
+    if (left >= right) {
+        return static_cast<std::uint64_t>(left) - static_cast<std::uint64_t>(right);
+    }
+    return static_cast<std::uint64_t>(right) - static_cast<std::uint64_t>(left);
+}
+
+[[nodiscard]] core::Result<world::ChunkCoord>
+camera_chunk_coordinate(const RenderCamera& camera) noexcept {
+    if (!camera.local_position.is_finite()) {
+        return core::Result<world::ChunkCoord>::failure("renderer.invalid_camera_position",
+                                                        "camera local position must be finite");
+    }
+    const auto floor_axis = [](float value) -> core::Result<std::int64_t> {
+        const auto floored = std::floor(static_cast<long double>(value));
+        constexpr auto minimum = static_cast<long double>(std::numeric_limits<std::int64_t>::min());
+        constexpr auto maximum = static_cast<long double>(std::numeric_limits<std::int64_t>::max());
+        if (floored < minimum || floored > maximum) {
+            return core::Result<std::int64_t>::failure(
+                "renderer.camera_local_position_overflow",
+                "camera local position does not fit an exact block offset");
+        }
+        return core::Result<std::int64_t>::success(static_cast<std::int64_t>(floored));
+    };
+    auto x = floor_axis(camera.local_position.x);
+    auto y = floor_axis(camera.local_position.y);
+    auto z = floor_axis(camera.local_position.z);
+    if (!x || !y || !z) {
+        const auto& error = !x ? x.error() : (!y ? y.error() : z.error());
+        return core::Result<world::ChunkCoord>::failure(error.code, error.message);
+    }
+    auto block = world::checked_block_coord_offset(camera.floating_origin.block,
+                                                   {x.value(), y.value(), z.value()});
+    if (!block) {
+        return core::Result<world::ChunkCoord>::failure(block.error().code, block.error().message);
+    }
+    return core::Result<world::ChunkCoord>::success(world::chunk_coord_for_block(block.value()));
+}
+
+[[nodiscard]] bool within_cylinder(world::ChunkCoord coord, world::ChunkCoord center,
+                                   std::uint16_t horizontal_radius,
+                                   std::uint16_t vertical_radius) noexcept {
+    const auto dx = axis_distance(coord.x, center.x);
+    const auto dy = axis_distance(coord.y, center.y);
+    const auto dz = axis_distance(coord.z, center.z);
+    const auto horizontal = static_cast<std::uint64_t>(horizontal_radius);
+    return dx <= horizontal && dz <= horizontal &&
+           dy <= static_cast<std::uint64_t>(vertical_radius) &&
+           dx * dx + dz * dz <= horizontal * horizontal;
+}
+
 } // namespace
 
 core::Status ChunkRenderConfig::validate() const {
+    auto distance_status = distances.validate();
+    if (!distance_status) {
+        return distance_status;
+    }
     if (max_chunks_meshed_per_frame == 0 || max_chunks_uploaded_per_frame == 0) {
         return core::Status::failure("renderer.invalid_chunk_mesh_budget",
                                      "chunk mesh and upload budgets must allow at least one chunk");
@@ -42,6 +98,10 @@ core::Status ChunkRenderConfig::validate() const {
     if (max_bytes_uploaded_per_frame == 0) {
         return core::Status::failure("renderer.invalid_chunk_upload_budget",
                                      "chunk upload budget must allow at least one byte");
+    }
+    if (gpu_terrain_budget_bytes == 0) {
+        return core::Status::failure("renderer.invalid_gpu_terrain_budget",
+                                     "GPU terrain residency budget must allow at least one byte");
     }
     constexpr auto maximum_snapshot_side =
         static_cast<std::size_t>(world::VoxelChunk::edge_length) +
@@ -211,20 +271,29 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
     stats_.meshing_ms = 0.0;
     timings_.reset();
 
-    status = refresh_render_table(world);
+    status = refresh_render_table(world, camera);
     if (!status) {
         return status;
     }
-    status = reconcile_loaded_chunks(world);
+    status = reconcile_loaded_chunks(world, camera);
     if (!status) {
         return status;
     }
-    consume_dirty_regions(world);
+    consume_dirty_regions(world, camera);
 
-    core::Status first_failure = process_completed_meshes(world);
+    status = enforce_distance_residency(camera);
+    if (!status) {
+        return status;
+    }
+
+    core::Status first_failure = process_completed_meshes(world, camera);
     auto upload_status = process_upload_queue(world, camera);
     if (!upload_status && first_failure) {
         first_failure = upload_status;
+    }
+    auto residency_status = enforce_gpu_residency_budget(camera);
+    if (!residency_status && first_failure) {
+        first_failure = residency_status;
     }
     auto scheduling_status = schedule_mesh_jobs(world, camera);
     if (!scheduling_status && first_failure) {
@@ -260,6 +329,10 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
     visible_chunks_scratch_.reserve(cache_->stats().entry_count);
     result.draws.reserve(cache_->stats().resident_section_count);
     const auto frustum = RenderFrustum::from_view_projection(camera.view_projection);
+    ++visibility_epoch_;
+    if (visibility_epoch_ == 0) {
+        ++visibility_epoch_;
+    }
     {
         profiling::ScopedCpuTimingZone culling_zone(timings_,
                                                     profiling::CpuTimingZone::visibility_culling);
@@ -267,13 +340,20 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
             if (entry->state != ChunkGpuState::resident) {
                 continue;
             }
+            if (!within_visible_distance(entry->identity.coordinate, camera)) {
+                ++result.culled_chunk_count;
+                ++result.distance_culled_chunk_count;
+                continue;
+            }
             const auto origin = camera_relative_chunk_origin(entry->identity.coordinate, camera);
             if (!origin ||
                 !frustum.intersects(translated_bounds(entry->local_bounds, origin.value()))) {
                 ++result.culled_chunk_count;
+                ++result.frustum_culled_chunk_count;
                 continue;
             }
             ++result.visible_chunk_count;
+            cache_->mark_visible(entry->identity, visibility_epoch_);
             visible_chunks_scratch_.push_back({entry, origin.value()});
         }
     }
@@ -313,6 +393,8 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
     }
     stats_.visible_chunk_count = result.visible_chunk_count;
     stats_.culled_chunk_count = result.culled_chunk_count;
+    stats_.distance_culled_chunk_count = result.distance_culled_chunk_count;
+    stats_.frustum_culled_chunk_count = result.frustum_culled_chunk_count;
     stats_.drawn_chunk_count = result.drawn_chunk_count;
     stats_.draw_count = result.draws.size();
     stats_.visible_vertex_count = result.vertex_count;
@@ -352,7 +434,8 @@ void ChunkRenderSystem::remove_pending(world::ChunkIdentity identity) {
     });
 }
 
-core::Status ChunkRenderSystem::reconcile_loaded_chunks(world::WorldState& world) {
+core::Status ChunkRenderSystem::reconcile_loaded_chunks(world::WorldState& world,
+                                                        const RenderCamera& camera) {
     const auto loaded = world.chunks().identities();
     for (const auto identity : loaded) {
         const auto* existing = cache_->find_by_coordinate(identity.coordinate);
@@ -370,13 +453,27 @@ core::Status ChunkRenderSystem::reconcile_loaded_chunks(world::WorldState& world
             if (!insert_status) {
                 return insert_status;
             }
-            enqueue_mesh(identity, false);
+            if (within_mesh_distance(identity.coordinate, camera)) {
+                enqueue_mesh(identity, false);
+            }
+        }
+
+        if (!within_mesh_distance(identity.coordinate, camera)) {
+            mesh_scheduler_->cancel(identity);
+            remove_pending(identity);
+            continue;
         }
 
         const auto* chunk = world.chunks().find(identity.coordinate);
-        const auto* entry = cache_->find(identity);
+        auto* entry = cache_->find(identity);
         if (chunk == nullptr || entry == nullptr || chunk->identity() != identity) {
             continue;
+        }
+        if (entry->residency_suppressed) {
+            if (!should_restore_suppressed_residency(*entry, camera)) {
+                continue;
+            }
+            entry->residency_suppressed = false;
         }
         const auto queued_upload =
             std::ranges::find_if(pending_uploads_, [identity](const PendingUpload& pending) {
@@ -411,13 +508,18 @@ core::Status ChunkRenderSystem::reconcile_loaded_chunks(world::WorldState& world
     return process_chunk_evictions(unloaded);
 }
 
-void ChunkRenderSystem::consume_dirty_regions(world::WorldState& world) {
+void ChunkRenderSystem::consume_dirty_regions(world::WorldState& world,
+                                              const RenderCamera& camera) {
     const auto regions = world.dirty_regions().consume_kind(dirty::DirtyRegionKind::chunk_mesh);
     if (regions.empty()) {
         return;
     }
     for (const auto identity : world.chunks().identities()) {
-        if (std::ranges::any_of(regions, [identity](const dirty::DirtyRegion& region) {
+        const auto* entry = cache_->find(identity);
+        const bool residency_allows_work = entry == nullptr || !entry->residency_suppressed ||
+                                           should_restore_suppressed_residency(*entry, camera);
+        if (within_mesh_distance(identity.coordinate, camera) && residency_allows_work &&
+            std::ranges::any_of(regions, [identity](const dirty::DirtyRegion& region) {
                 return region_contains(region, identity.coordinate);
             })) {
             enqueue_mesh(identity, true);
@@ -425,7 +527,8 @@ void ChunkRenderSystem::consume_dirty_regions(world::WorldState& world) {
     }
 }
 
-core::Status ChunkRenderSystem::refresh_render_table(world::WorldState& world) {
+core::Status ChunkRenderSystem::refresh_render_table(world::WorldState& world,
+                                                     const RenderCamera& camera) {
     const auto current_revision =
         palette_ == nullptr ? std::uint64_t{1} : palette_->render_revision();
     if (render_table_ != nullptr && render_table_->revision == current_revision) {
@@ -443,7 +546,9 @@ core::Status ChunkRenderSystem::refresh_render_table(world::WorldState& world) {
     render_table_ =
         std::make_shared<const world::BlockRenderTableSnapshot>(std::move(rebuilt).value());
     for (const auto identity : world.chunks().identities()) {
-        enqueue_mesh(identity, true);
+        if (within_mesh_distance(identity.coordinate, camera)) {
+            enqueue_mesh(identity, true);
+        }
     }
     return core::Status::ok();
 }
@@ -484,10 +589,12 @@ bool ChunkRenderSystem::pending_upload_is_current(const PendingUpload& upload,
            world::dependency_revisions_match(world.chunks(), upload.dependency_revisions);
 }
 
-core::Status ChunkRenderSystem::process_completed_meshes(world::WorldState& world) {
-    const auto requeue_latest = [this, &world](world::ChunkCoord coordinate) {
+core::Status ChunkRenderSystem::process_completed_meshes(world::WorldState& world,
+                                                         const RenderCamera& camera) {
+    const auto requeue_latest = [this, &world, &camera](world::ChunkCoord coordinate) {
         const auto* chunk = world.chunks().find(coordinate);
-        if (chunk != nullptr && cache_->contains(chunk->identity())) {
+        if (chunk != nullptr && cache_->contains(chunk->identity()) &&
+            within_mesh_distance(coordinate, camera)) {
             enqueue_mesh(chunk->identity(), true);
         }
     };
@@ -508,7 +615,11 @@ core::Status ChunkRenderSystem::process_completed_meshes(world::WorldState& worl
                                                    result.error_code + ": " + result.error_message);
             continue;
         }
-        if (!mesh_result_is_current(result, world)) {
+        const auto* result_entry = cache_->find(result.identity);
+        if ((result_entry != nullptr && result_entry->residency_suppressed &&
+             !should_restore_suppressed_residency(*result_entry, camera)) ||
+            !within_mesh_distance(result.identity.coordinate, camera) ||
+            !mesh_result_is_current(result, world)) {
             ++stats_.stale_mesh_result_count;
             if (result.mesh.has_value()) {
                 mesh_scheduler_->recycle_mesh(std::move(*result.mesh));
@@ -571,8 +682,11 @@ core::Status ChunkRenderSystem::schedule_mesh_jobs(world::WorldState& world,
         ++attempted;
 
         auto* chunk = world.chunks().find(pending.identity.coordinate);
+        const auto* pending_entry = cache_->find(pending.identity);
         if (chunk == nullptr || chunk->identity() != pending.identity ||
-            !cache_->contains(pending.identity)) {
+            !cache_->contains(pending.identity) ||
+            (pending_entry != nullptr && pending_entry->residency_suppressed) ||
+            !within_mesh_distance(pending.identity.coordinate, camera)) {
             continue;
         }
         if (mesh_scheduler_->has_in_flight(pending.identity)) {
@@ -682,6 +796,16 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
             if (newest != nullptr && cache_->contains(newest->identity())) {
                 enqueue_mesh(newest->identity(), true);
             }
+            recycle_upload_storage(pending);
+            continue;
+        }
+        if (!within_mesh_distance(pending.identity.coordinate, camera)) {
+            recycle_upload_storage(pending);
+            continue;
+        }
+        const auto* pending_entry = cache_->find(pending.identity);
+        if (pending_entry != nullptr && pending_entry->residency_suppressed &&
+            !should_restore_suppressed_residency(*pending_entry, camera)) {
             recycle_upload_storage(pending);
             continue;
         }
@@ -819,12 +943,170 @@ void ChunkRenderSystem::recycle_upload_storage(PendingUpload& upload) noexcept {
 
 bool ChunkRenderSystem::is_visible(world::ChunkCoord coord, math::Bounds3f local_bounds,
                                    const RenderCamera& camera) const {
+    if (!within_visible_distance(coord, camera)) {
+        return false;
+    }
     const auto origin = camera_relative_chunk_origin(coord, camera);
     if (!origin) {
         return false;
     }
     const auto frustum = RenderFrustum::from_view_projection(camera.view_projection);
     return frustum.intersects(translated_bounds(local_bounds, origin.value()));
+}
+
+bool ChunkRenderSystem::within_mesh_distance(world::ChunkCoord coord,
+                                             const RenderCamera& camera) const {
+    const auto center = camera_chunk_coordinate(camera);
+    return center &&
+           within_cylinder(coord, center.value(), config_.distances.mesh_horizontal_radius,
+                           config_.distances.mesh_vertical_radius);
+}
+
+bool ChunkRenderSystem::within_visible_distance(world::ChunkCoord coord,
+                                                const RenderCamera& camera) const {
+    const auto center = camera_chunk_coordinate(camera);
+    return center &&
+           within_cylinder(coord, center.value(), config_.distances.visible_horizontal_radius,
+                           config_.distances.visible_vertical_radius);
+}
+
+bool ChunkRenderSystem::within_gpu_retention_distance(world::ChunkCoord coord,
+                                                      const RenderCamera& camera) const {
+    const auto center = camera_chunk_coordinate(camera);
+    if (!center) {
+        return false;
+    }
+    const auto horizontal =
+        static_cast<std::uint16_t>(config_.distances.gpu_resident_horizontal_radius +
+                                   config_.distances.gpu_resident_hysteresis);
+    const auto vertical = static_cast<std::uint16_t>(
+        config_.distances.gpu_resident_vertical_radius + config_.distances.gpu_resident_hysteresis);
+    return within_cylinder(coord, center.value(), horizontal, vertical);
+}
+
+core::Status ChunkRenderSystem::enforce_distance_residency(const RenderCamera& camera) {
+    std::vector<world::ChunkIdentity> releases;
+    for (const auto* entry : cache_->entries()) {
+        if (entry->state == ChunkGpuState::resident &&
+            !within_gpu_retention_distance(entry->identity.coordinate, camera)) {
+            releases.push_back(entry->identity);
+        }
+    }
+    for (const auto identity : releases) {
+        const auto* entry = cache_->find(identity);
+        if (entry != nullptr) {
+            ++stats_.distance_evicted_mesh_count;
+            stats_.distance_evicted_mesh_bytes += entry->resident_bytes();
+        }
+        auto status = cache_->release_mesh(identity);
+        if (!status) {
+            return status;
+        }
+        auto* released = cache_->find(identity);
+        if (released != nullptr) {
+            released->residency_suppressed = false;
+        }
+    }
+    return core::Status::ok();
+}
+
+core::Status ChunkRenderSystem::enforce_gpu_residency_budget(const RenderCamera& camera) {
+    while (cache_->stats().resident_bytes > config_.gpu_terrain_budget_bytes) {
+        std::vector<const ChunkGpuEntry*> candidates;
+        for (const auto* entry : cache_->entries()) {
+            if (entry->state == ChunkGpuState::resident && entry->resident_bytes() > 0) {
+                candidates.push_back(entry);
+            }
+        }
+        if (candidates.empty()) {
+            return core::Status::failure(
+                "renderer.gpu_terrain_budget_unrecoverable",
+                "resident terrain bytes exceed the budget without an evictable mesh");
+        }
+        std::ranges::stable_sort(
+            candidates, [this, &camera](const ChunkGpuEntry* left, const ChunkGpuEntry* right) {
+                const bool left_visible =
+                    is_visible(left->identity.coordinate, left->local_bounds, camera);
+                const bool right_visible =
+                    is_visible(right->identity.coordinate, right->local_bounds, camera);
+                if (left_visible != right_visible) {
+                    return !left_visible;
+                }
+                if (left->last_visible_epoch != right->last_visible_epoch) {
+                    return left->last_visible_epoch < right->last_visible_epoch;
+                }
+                const auto left_distance =
+                    distance_squared(left->identity.coordinate, left->local_bounds, camera);
+                const auto right_distance =
+                    distance_squared(right->identity.coordinate, right->local_bounds, camera);
+                if (left_distance != right_distance) {
+                    return left_distance > right_distance;
+                }
+                return left->identity < right->identity;
+            });
+        const auto identity = candidates.front()->identity;
+        const auto bytes = candidates.front()->resident_bytes();
+        auto status = cache_->release_mesh(identity);
+        if (!status) {
+            return status;
+        }
+        auto* released = cache_->find(identity);
+        if (released != nullptr) {
+            released->residency_suppressed = true;
+        }
+        mesh_scheduler_->cancel(identity);
+        remove_pending(identity);
+        ++stats_.memory_pressure_evicted_mesh_count;
+        stats_.memory_pressure_evicted_mesh_bytes += bytes;
+    }
+    return core::Status::ok();
+}
+
+bool ChunkRenderSystem::should_restore_suppressed_residency(const ChunkGpuEntry& entry,
+                                                            const RenderCamera& camera) const {
+    const auto resident_bytes = cache_->stats().resident_bytes;
+    if (entry.last_resident_bytes <=
+        config_.gpu_terrain_budget_bytes -
+            std::min(config_.gpu_terrain_budget_bytes, resident_bytes)) {
+        return true;
+    }
+    if (!is_visible(entry.identity.coordinate, entry.local_bounds, camera)) {
+        return false;
+    }
+
+    const ChunkGpuEntry* least_useful_resident = nullptr;
+    for (const auto* candidate : cache_->entries()) {
+        if (candidate->state != ChunkGpuState::resident || candidate->resident_bytes() == 0) {
+            continue;
+        }
+        if (least_useful_resident == nullptr) {
+            least_useful_resident = candidate;
+            continue;
+        }
+        const bool candidate_visible =
+            is_visible(candidate->identity.coordinate, candidate->local_bounds, camera);
+        const bool current_visible = is_visible(least_useful_resident->identity.coordinate,
+                                                least_useful_resident->local_bounds, camera);
+        const auto candidate_distance =
+            distance_squared(candidate->identity.coordinate, candidate->local_bounds, camera);
+        const auto current_distance = distance_squared(least_useful_resident->identity.coordinate,
+                                                       least_useful_resident->local_bounds, camera);
+        if ((!candidate_visible && current_visible) ||
+            (candidate_visible == current_visible && candidate_distance > current_distance)) {
+            least_useful_resident = candidate;
+        }
+    }
+    if (least_useful_resident == nullptr) {
+        return true;
+    }
+    const bool resident_visible = is_visible(least_useful_resident->identity.coordinate,
+                                             least_useful_resident->local_bounds, camera);
+    if (!resident_visible) {
+        return true;
+    }
+    return distance_squared(entry.identity.coordinate, entry.local_bounds, camera) <
+           distance_squared(least_useful_resident->identity.coordinate,
+                            least_useful_resident->local_bounds, camera);
 }
 
 float ChunkRenderSystem::distance_squared(world::ChunkCoord coord, math::Bounds3f local_bounds,
@@ -869,6 +1151,11 @@ void ChunkRenderSystem::refresh_queue_stats() noexcept {
     stats_.pending_upload_bytes = 0;
     for (const auto& upload : pending_uploads_) {
         stats_.pending_upload_bytes += upload.byte_size();
+    }
+    stats_.gpu_terrain_budget_bytes = config_.gpu_terrain_budget_bytes;
+    stats_.residency_suppressed_chunk_count = 0;
+    for (const auto* entry : cache_->entries()) {
+        stats_.residency_suppressed_chunk_count += entry->residency_suppressed ? 1U : 0U;
     }
 }
 

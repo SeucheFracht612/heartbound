@@ -161,6 +161,24 @@ core::Status ChunkGpuCache::erase(world::ChunkIdentity identity) {
     return retirement;
 }
 
+core::Status ChunkGpuCache::release_mesh(world::ChunkIdentity identity) {
+    auto* entry = find(identity);
+    if (entry == nullptr) {
+        return core::Status::failure("chunk_gpu_cache.missing_identity",
+                                     "cannot release a mesh for an uncached chunk");
+    }
+    auto retirement = retire_entry_allocations(*entry, device_->last_submission_serial());
+    entry->last_resident_bytes = entry->resident_bytes();
+    entry->resident_content_revision = 0;
+    entry->resident_render_table_revision = 0;
+    entry->resident_dependency_revisions.clear();
+    entry->mesh = {};
+    entry->state = ChunkGpuState::missing;
+    collect_retired();
+    refresh_current_stats();
+    return retirement;
+}
+
 core::Status ChunkGpuCache::clear() {
     core::Status first_failure = core::Status::ok();
     for (const auto& [_, entry] : entries_) {
@@ -225,6 +243,13 @@ void ChunkGpuCache::mark_failed(world::ChunkIdentity identity) noexcept {
     auto* entry = find(identity);
     if (entry != nullptr && entry->state != ChunkGpuState::resident) {
         entry->state = ChunkGpuState::failed;
+    }
+}
+
+void ChunkGpuCache::mark_visible(world::ChunkIdentity identity, std::uint64_t epoch) noexcept {
+    auto* entry = find(identity);
+    if (entry != nullptr) {
+        entry->last_visible_epoch = epoch;
     }
 }
 
@@ -427,6 +452,8 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
         entry->resident_dependency_revisions.assign(upload.dependency_revisions.begin(),
                                                     upload.dependency_revisions.end());
         entry->mesh = prepared[index].mesh;
+        entry->last_resident_bytes = prepared[index].uploaded_bytes;
+        entry->residency_suppressed = false;
         entry->local_bounds = upload.local_bounds;
         entry->state = ChunkGpuState::resident;
 

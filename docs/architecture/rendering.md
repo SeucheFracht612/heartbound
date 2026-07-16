@@ -106,14 +106,23 @@ Implemented foundation:
   - mesh dirty regions have one renderer consumer; mesh dirtiness clears only after the requested
     identity, content revision, render-table revision, and all neighbor dependencies remain current
     following a successful upload
-  - six Vulkan-depth frustum planes cull camera-relative chunk AABBs, including rich-model bounds,
-    before opaque terrain commands are built
+  - `WorldRenderDistances` separates simulation, loaded, mesh, GPU-resident, and visible cylinders,
+    each with independent horizontal and vertical radii; validation keeps inner tiers within outer
+    tiers
+  - distance rejection runs before six-plane frustum testing of camera-relative chunk AABBs,
+    including rich-model bounds, before opaque terrain commands are built
+  - GPU meshes leaving the residency cylinder plus hysteresis are retired without removing their
+    renderer-owned loaded-chunk records, so returning chunks can rebuild without world reload churn
+  - a configurable terrain byte budget evicts far, nonvisible, and least-recently-visible meshes
+    first; memory-pressure suppression prevents evicted records from immediately rebuilding until
+    capacity exists or their camera priority exceeds a current resident
   - evictions and replacements return ranges through serial-tagged retirement and collect them
     only after the RHI's completed submission serial reaches the last submission that could have
     referenced the old range
   - debug statistics expose resident/empty counts and bytes, arena capacity/usage/free space and
-    fragmentation, pending mesh/upload work, batched writes, visible/culled chunks, draws,
-    pipeline binds, vertices, and indices
+    fragmentation, the residency budget and distance/memory-pressure evictions, pending mesh/upload
+    work, batched writes, visible/distance-culled/frustum-culled chunks, draws, pipeline binds,
+    vertices, and indices
 
 - Runtime render assets and materials
   - `ShaderManager`, `TextureManager`, `SamplerCache`, `MaterialRuntimeCache`, and `PipelineCache`

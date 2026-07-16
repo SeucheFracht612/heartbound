@@ -123,6 +123,14 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(cache.stats().uint16_index_chunk_count == 0);
     assert(cache.stats().uint32_index_chunk_count == 1);
 
+    assert(cache.release_mesh(identity));
+    assert(cache.contains(identity));
+    assert(cache.find(identity)->state == renderer::ChunkGpuState::missing);
+    assert(cache.find(identity)->last_resident_bytes > 0);
+    assert(cache.stats().resident_chunk_count == 0);
+    assert(cache.stats().vertex_arena.used_bytes == 0);
+    assert(cache.stats().index_arena.used_bytes == 0);
+
     auto empty_replacement = cache.replace_mesh(identity, 8, {}, {}, {});
     assert(empty_replacement);
     assert(empty_replacement.value().empty);
@@ -148,6 +156,172 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(device.value()->live_resource_count() == baseline_resources + 2);
     assert(cache.shutdown());
     assert(device.value()->live_resource_count() == baseline_resources);
+}
+
+void test_chunk_render_distances_and_residency_hysteresis() {
+    using namespace heartstead;
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+    renderer::ChunkGpuCache cache(*device.value());
+    assert(cache.initialize());
+
+    renderer::ChunkRenderConfig config;
+    config.max_chunks_meshed_per_frame = 4;
+    config.distances.simulation_radius = 1;
+    config.distances.loaded_horizontal_radius = 4;
+    config.distances.loaded_vertical_radius = 2;
+    config.distances.mesh_horizontal_radius = 2;
+    config.distances.mesh_vertical_radius = 1;
+    config.distances.gpu_resident_horizontal_radius = 2;
+    config.distances.gpu_resident_vertical_radius = 1;
+    config.distances.visible_horizontal_radius = 1;
+    config.distances.visible_vertical_radius = 1;
+    config.distances.gpu_resident_hysteresis = 1;
+    renderer::ChunkRenderSystem chunks(cache, {9002}, nullptr, config);
+
+    constexpr std::int64_t large = 1'000'000'000;
+    const world::ChunkCoord center{large, 0, -large};
+    const world::ChunkCoord ahead{large, 0, -large - 1};
+    const world::ChunkCoord resident_shell{large + 2, 0, -large};
+    const world::ChunkCoord loaded_only{large + 4, 0, -large};
+    world::WorldState world;
+    assert(world.chunks().set(center, {1, 1, 1}, world::VoxelCell{1, 255}));
+    assert(world.chunks().set(ahead, {1, 1, 1}, world::VoxelCell{1, 255}));
+    assert(world.chunks().set(resident_shell, {1, 1, 1}, world::VoxelCell{1, 255}));
+    assert(world.chunks().set(loaded_only, {1, 1, 1}, world::VoxelCell{1, 255}));
+
+    const auto center_identity = world.chunks().find(center)->identity();
+    const auto loaded_only_identity = world.chunks().find(loaded_only)->identity();
+    renderer::RenderCamera camera;
+    auto camera_block = world::chunk_local_to_block(center, {16, 16, 16});
+    assert(camera_block);
+    camera.floating_origin.block = camera_block.value();
+    camera.far_plane = 512.0F;
+    assert(camera.update_matrices());
+
+    const auto synchronize_until = [&](const auto& predicate) {
+        for (std::size_t attempt = 0; attempt < 5'000; ++attempt) {
+            assert(chunks.synchronize(world, camera));
+            if (predicate()) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(false && "distance-budgeted chunk renderer did not settle");
+    };
+    synchronize_until([&] {
+        return cache.stats().resident_chunk_count == 3 &&
+               cache.find(loaded_only_identity) != nullptr &&
+               cache.find(loaded_only_identity)->state == renderer::ChunkGpuState::missing;
+    });
+    assert(cache.stats().entry_count == 4);
+    auto draws = chunks.build_draw_list(camera);
+    assert(draws.distance_culled_chunk_count >= 1);
+    assert(draws.culled_chunk_count ==
+           draws.distance_culled_chunk_count + draws.frustum_culled_chunk_count);
+
+    camera_block = world::chunk_local_to_block(loaded_only, {16, 16, 16});
+    assert(camera_block);
+    camera.floating_origin.block = camera_block.value();
+    assert(camera.update_matrices());
+    synchronize_until([&] {
+        return cache.find(loaded_only_identity)->state == renderer::ChunkGpuState::resident &&
+               cache.find(center_identity)->state == renderer::ChunkGpuState::missing;
+    });
+    assert(cache.stats().entry_count == 4);
+    assert(chunks.stats().distance_evicted_mesh_count > 0);
+
+    camera_block = world::chunk_local_to_block(center, {16, 16, 16});
+    assert(camera_block);
+    camera.floating_origin.block = camera_block.value();
+    assert(camera.update_matrices());
+    synchronize_until([&] {
+        return cache.find(center_identity)->state == renderer::ChunkGpuState::resident &&
+               cache.find(loaded_only_identity)->state == renderer::ChunkGpuState::missing;
+    });
+
+    chunks.shutdown();
+    assert(cache.shutdown());
+}
+
+void test_chunk_gpu_residency_budget_prefers_near_visible_meshes() {
+    using namespace heartstead;
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+    renderer::ChunkGpuCache cache(*device.value());
+    assert(cache.initialize());
+
+    renderer::ChunkRenderConfig config;
+    config.max_chunks_meshed_per_frame = 3;
+    config.max_chunks_uploaded_per_frame = 3;
+    config.gpu_terrain_budget_bytes = 700;
+    config.distances.simulation_radius = 1;
+    config.distances.loaded_horizontal_radius = 4;
+    config.distances.loaded_vertical_radius = 1;
+    config.distances.mesh_horizontal_radius = 4;
+    config.distances.mesh_vertical_radius = 1;
+    config.distances.gpu_resident_horizontal_radius = 4;
+    config.distances.gpu_resident_vertical_radius = 1;
+    config.distances.visible_horizontal_radius = 4;
+    config.distances.visible_vertical_radius = 1;
+    config.distances.gpu_resident_hysteresis = 0;
+    renderer::ChunkRenderSystem chunks(cache, {9003}, nullptr, config);
+
+    const world::ChunkCoord near_coord{0, 0, -1};
+    const world::ChunkCoord middle_coord{0, 0, -2};
+    const world::ChunkCoord far_coord{0, 0, -3};
+    world::WorldState world;
+    assert(world.chunks().set(near_coord, {1, 1, 1}, world::VoxelCell{1, 255}));
+    assert(world.chunks().set(middle_coord, {1, 1, 1}, world::VoxelCell{1, 255}));
+    assert(world.chunks().set(far_coord, {1, 1, 1}, world::VoxelCell{1, 255}));
+    const auto near_identity = world.chunks().find(near_coord)->identity();
+    const auto middle_identity = world.chunks().find(middle_coord)->identity();
+    const auto far_identity = world.chunks().find(far_coord)->identity();
+
+    renderer::RenderCamera camera;
+    camera.floating_origin.block = {16, 16, 16};
+    camera.far_plane = 512.0F;
+    assert(camera.update_matrices());
+    const auto synchronize_until = [&](const auto& predicate) {
+        for (std::size_t attempt = 0; attempt < 5'000; ++attempt) {
+            assert(chunks.synchronize(world, camera));
+            if (predicate()) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(false && "GPU-residency-budgeted chunk renderer did not settle");
+    };
+    synchronize_until([&] {
+        return cache.stats().resident_chunk_count == 1 &&
+               chunks.stats().residency_suppressed_chunk_count == 2 &&
+               chunks.stats().pending_mesh_count == 0 && chunks.stats().pending_upload_count == 0;
+    });
+    assert(cache.stats().resident_bytes <= config.gpu_terrain_budget_bytes);
+    assert(cache.find(near_identity)->state == renderer::ChunkGpuState::resident);
+    assert(cache.find(middle_identity)->residency_suppressed);
+    assert(cache.find(far_identity)->residency_suppressed);
+    assert(chunks.stats().memory_pressure_evicted_mesh_count >= 2);
+
+    auto camera_block = world::chunk_local_to_block(far_coord, {16, 16, 16});
+    assert(camera_block);
+    camera.floating_origin.block = camera_block.value();
+    camera.floating_origin.block.z -= 32;
+    camera.yaw_radians = 3.14159265F;
+    assert(camera.update_matrices());
+    synchronize_until([&] {
+        return cache.find(near_identity)->residency_suppressed &&
+               (cache.find(middle_identity)->state == renderer::ChunkGpuState::resident ||
+                cache.find(far_identity)->state == renderer::ChunkGpuState::resident) &&
+               chunks.stats().pending_mesh_count == 0;
+    });
+    assert(cache.stats().resident_bytes <= config.gpu_terrain_budget_bytes);
+    assert(chunks.stats().memory_pressure_evicted_mesh_count >= 3);
+
+    chunks.shutdown();
+    assert(cache.shutdown());
 }
 
 void test_chunk_gpu_cache_batches_device_local_arena_uploads() {
@@ -491,6 +665,8 @@ int main() {
     test_frustum_aabb_culling();
     test_chunk_gpu_cache_lifecycle();
     test_chunk_gpu_cache_batches_device_local_arena_uploads();
+    test_chunk_render_distances_and_residency_hysteresis();
+    test_chunk_gpu_residency_budget_prefers_near_visible_meshes();
     test_chunk_render_system_retains_rebuilds_and_culls();
     test_renderer_frontend_submits_headless_frames();
     return 0;
