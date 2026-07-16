@@ -204,10 +204,10 @@ create_instance(const rhi::RenderDeviceDesc& desc) {
     }
     const auto debug_utils_available =
         instance_extension_available(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    const auto enable_debug_utils = desc.enable_validation && debug_utils_available;
-    if (desc.enable_validation && !debug_utils_available) {
+    const auto enable_debug_utils = debug_utils_available;
+    if (!debug_utils_available) {
         core::log(core::LogLevel::warning,
-                  "Vulkan debug utils were requested but VK_EXT_debug_utils is unavailable");
+                  "VK_EXT_debug_utils is unavailable; Vulkan command labels are disabled");
     }
 
     VkApplicationInfo app_info{};
@@ -242,16 +242,16 @@ create_instance(const rhi::RenderDeviceDesc& desc) {
             "failed to create Vulkan instance: " + std::string(vk_result_name(result)));
     }
     resource.validation_enabled = enable_validation;
+    resource.debug_utils_enabled = enable_debug_utils;
     if (enable_debug_utils) {
         const auto create_debug_messenger = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
             vkGetInstanceProcAddr(resource.instance, "vkCreateDebugUtilsMessengerEXT"));
         if (create_debug_messenger != nullptr &&
             create_debug_messenger(resource.instance, &debug_info, nullptr,
                                    &resource.debug_messenger) == VK_SUCCESS) {
-            resource.debug_utils_enabled = true;
         } else {
             core::log(core::LogLevel::warning,
-                      "Vulkan debug utils extension is present but messenger creation failed");
+                      "Vulkan debug utils extension is present but the optional messenger failed");
         }
     }
     return core::Result<VulkanInstanceResource>::success(std::move(resource));

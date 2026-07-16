@@ -240,8 +240,10 @@ Implemented foundation:
     count without exposing Vulkan handles through the RHI
   - can allocate private `VkDescriptorSetLayout`, `VkPipelineLayout`, `VkDescriptorPool`, and
     descriptor set objects for material pipeline layouts without exposing their handles
-  - requests the Khronos validation layer and `VK_EXT_debug_utils` when available, routes warning
-    and error callbacks into engine logging, and degrades to a startup warning when unavailable
+  - requests the Khronos validation layer when configured and enables `VK_EXT_debug_utils`
+    independently when available, so pass/upload labels remain active in non-validation benchmark
+    runs; warning and error callbacks route into engine logging, with graceful fallback when either
+    facility is unavailable
   - records delayed timestamp-query results for the complete GPU frame, opaque terrain pass,
     frame-transfer interval, final swapchain copy, and asynchronous buffer-upload batches without
     stalling to read the current submission; upload timings retain their source submission serial
