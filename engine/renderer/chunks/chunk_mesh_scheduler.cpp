@@ -1,9 +1,9 @@
 #include "engine/renderer/chunks/chunk_mesh_scheduler.hpp"
 
+#include "engine/profiling/cpu_timing.hpp"
 #include "engine/world/meshing/greedy_chunk_mesher.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <deque>
 #include <exception>
 #include <limits>
@@ -250,9 +250,9 @@ core::Status ChunkMeshScheduler::submit(ChunkMeshRequest request) {
             return core::Status::ok();
         }
 
-        const auto started = std::chrono::steady_clock::now();
         try {
             auto mesh = [&]() {
+                profiling::ScopedCpuTimer timer(result.meshing_ms);
                 if (meshing_mode == ChunkMeshingMode::reference) {
                     return world::ChunkMesher::build_surface_mesh(request.neighborhood,
                                                                   *request.render_table);
@@ -261,9 +261,6 @@ core::Status ChunkMeshScheduler::submit(ChunkMeshRequest request) {
                 return world::GreedyChunkMesher::build_surface_mesh(
                     request.neighborhood, *request.render_table, std::move(reusable_mesh));
             }();
-            result.meshing_ms = std::chrono::duration<double, std::milli>(
-                                    std::chrono::steady_clock::now() - started)
-                                    .count();
             if (mesh) {
                 result.state = ChunkMeshResultState::succeeded;
                 result.mesh = std::move(mesh).value();

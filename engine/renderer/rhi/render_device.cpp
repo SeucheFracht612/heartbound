@@ -1,10 +1,10 @@
 #include "engine/renderer/rhi/render_device.hpp"
 
+#include "engine/profiling/cpu_timing.hpp"
 #include "engine/renderer/rhi/render_frame_plan.hpp"
 #include "engine/renderer/vulkan/vulkan_backend.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -129,7 +129,6 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
     [[nodiscard]] core::Result<RenderFrameStats>
     execute_frame(const RenderFrameSubmission& frame) override {
-        const auto command_started = std::chrono::steady_clock::now();
         auto shape_status = validate_render_frame_submission_shape(frame);
         if (!shape_status) {
             return core::Result<RenderFrameStats>::failure(shape_status.error().code,
@@ -155,97 +154,100 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.synchronization_barrier_count = execution_plan.value().transitions.size();
         stats.submitted_synchronization_barrier_count = execution_plan.value().transitions.size();
 
-        RenderResourceHandle bound_pipeline;
-        for (const auto& pass_commands : frame.pass_commands) {
-            const auto& pass = frame.plan.passes[pass_commands.pass_index];
-            for (const auto& draw : pass_commands.draws) {
-                const auto pipeline = graphics_pipelines_.find(draw.pipeline.value);
-                if (pipeline == graphics_pipelines_.end()) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.unknown_graphics_pipeline",
-                        "render draw references a graphics pipeline not owned by this device");
-                }
-                const auto vertex = resources_.find(draw.vertex_buffer.value);
-                if (vertex == resources_.end()) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.unknown_vertex_buffer",
-                        "render draw references a vertex buffer not owned by this device");
-                }
-                if (vertex->second.usage != RenderBufferUsage::vertex) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.invalid_vertex_buffer_usage",
-                        "render draw vertex buffer has non-vertex usage");
-                }
-                const auto index = resources_.find(draw.index_buffer.value);
-                if (index == resources_.end()) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.unknown_index_buffer",
-                        "render draw references an index buffer not owned by this device");
-                }
-                if (index->second.usage != RenderBufferUsage::index) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.invalid_index_buffer_usage",
-                        "render draw index buffer has non-index usage");
-                }
-                const auto available_indices =
-                    index->second.byte_size / render_index_type_size(draw.index_type);
-                const auto end_index = static_cast<std::size_t>(draw.first_index) +
-                                       static_cast<std::size_t>(draw.index_count);
-                if (end_index > available_indices) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.draw_index_range_out_of_bounds",
-                        "render draw index range exceeds its index buffer");
-                }
+        {
+            profiling::ScopedCpuTimer command_timer(stats.cpu_command_recording_ms);
+            RenderResourceHandle bound_pipeline;
+            for (const auto& pass_commands : frame.pass_commands) {
+                const auto& pass = frame.plan.passes[pass_commands.pass_index];
+                for (const auto& draw : pass_commands.draws) {
+                    const auto pipeline = graphics_pipelines_.find(draw.pipeline.value);
+                    if (pipeline == graphics_pipelines_.end()) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.unknown_graphics_pipeline",
+                            "render draw references a graphics pipeline not owned by this device");
+                    }
+                    const auto vertex = resources_.find(draw.vertex_buffer.value);
+                    if (vertex == resources_.end()) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.unknown_vertex_buffer",
+                            "render draw references a vertex buffer not owned by this device");
+                    }
+                    if (vertex->second.usage != RenderBufferUsage::vertex) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.invalid_vertex_buffer_usage",
+                            "render draw vertex buffer has non-vertex usage");
+                    }
+                    const auto index = resources_.find(draw.index_buffer.value);
+                    if (index == resources_.end()) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.unknown_index_buffer",
+                            "render draw references an index buffer not owned by this device");
+                    }
+                    if (index->second.usage != RenderBufferUsage::index) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.invalid_index_buffer_usage",
+                            "render draw index buffer has non-index usage");
+                    }
+                    const auto available_indices =
+                        index->second.byte_size / render_index_type_size(draw.index_type);
+                    const auto end_index = static_cast<std::size_t>(draw.first_index) +
+                                           static_cast<std::size_t>(draw.index_count);
+                    if (end_index > available_indices) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.draw_index_range_out_of_bounds",
+                            "render draw index range exceeds its index buffer");
+                    }
 
-                const auto layout = pipeline_layouts_.find(pipeline->second.material_id.value());
-                if (layout == pipeline_layouts_.end()) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.unbound_graphics_pipeline_layout",
-                        "render draw graphics pipeline layout is no longer bound");
-                }
-                const auto has_chunk_constants = std::ranges::any_of(
-                    layout->second.push_constant_ranges, [](const RenderPushConstantRange& range) {
-                        return any(range.stages & RenderShaderStageFlags::vertex) &&
-                               range.byte_offset == 0 &&
-                               range.byte_size >= sizeof(ChunkPushConstants);
-                    });
-                if (!has_chunk_constants) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.missing_chunk_push_constants",
-                        "render draw pipeline layout must expose 80 vertex push-constant bytes");
-                }
+                    const auto layout =
+                        pipeline_layouts_.find(pipeline->second.material_id.value());
+                    if (layout == pipeline_layouts_.end()) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.unbound_graphics_pipeline_layout",
+                            "render draw graphics pipeline layout is no longer bound");
+                    }
+                    const auto has_chunk_constants = std::ranges::any_of(
+                        layout->second.push_constant_ranges,
+                        [](const RenderPushConstantRange& range) {
+                            return any(range.stages & RenderShaderStageFlags::vertex) &&
+                                   range.byte_offset == 0 &&
+                                   range.byte_size >= sizeof(ChunkPushConstants);
+                        });
+                    if (!has_chunk_constants) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.missing_chunk_push_constants",
+                            "render draw pipeline layout must expose 80 vertex push-constant "
+                            "bytes");
+                    }
 
-                const auto has_color_target = std::ranges::any_of(
-                    pass.writes, [&frame, &pipeline](const std::string& resource_name) {
-                        const auto* resource = frame.plan.find_resource(resource_name);
-                        return resource != nullptr && !is_depth_format(resource->format) &&
-                               resource->format == pipeline->second.color_target_format;
-                    });
-                const auto has_depth_target = std::ranges::any_of(
-                    pass.writes, [&frame, &pipeline](const std::string& resource_name) {
-                        const auto* resource = frame.plan.find_resource(resource_name);
-                        return resource != nullptr && is_depth_format(resource->format) &&
-                               is_depth_format(pipeline->second.depth_target_format);
-                    });
-                if (!has_color_target ||
-                    (pipeline->second.depth_test_enable && !has_depth_target)) {
-                    return core::Result<RenderFrameStats>::failure(
-                        "renderer.incompatible_draw_targets",
-                        "render draw pass targets do not match its graphics pipeline");
-                }
+                    const auto has_color_target = std::ranges::any_of(
+                        pass.writes, [&frame, &pipeline](const std::string& resource_name) {
+                            const auto* resource = frame.plan.find_resource(resource_name);
+                            return resource != nullptr && !is_depth_format(resource->format) &&
+                                   resource->format == pipeline->second.color_target_format;
+                        });
+                    const auto has_depth_target = std::ranges::any_of(
+                        pass.writes, [&frame, &pipeline](const std::string& resource_name) {
+                            const auto* resource = frame.plan.find_resource(resource_name);
+                            return resource != nullptr && is_depth_format(resource->format) &&
+                                   is_depth_format(pipeline->second.depth_target_format);
+                        });
+                    if (!has_color_target ||
+                        (pipeline->second.depth_test_enable && !has_depth_target)) {
+                        return core::Result<RenderFrameStats>::failure(
+                            "renderer.incompatible_draw_targets",
+                            "render draw pass targets do not match its graphics pipeline");
+                    }
 
-                if (bound_pipeline != draw.pipeline) {
-                    bound_pipeline = draw.pipeline;
-                    ++stats.pipeline_bind_count;
+                    if (bound_pipeline != draw.pipeline) {
+                        bound_pipeline = draw.pipeline;
+                        ++stats.pipeline_bind_count;
+                    }
+                    ++stats.draw_count;
+                    ++stats.indexed_draw_count;
+                    stats.total_indices += draw.index_count;
                 }
-                ++stats.draw_count;
-                ++stats.indexed_draw_count;
-                stats.total_indices += draw.index_count;
             }
         }
-        stats.cpu_command_recording_ms = std::chrono::duration<double, std::milli>(
-                                             std::chrono::steady_clock::now() - command_started)
-                                             .count();
         stats.submission_serial = ++last_submission_serial_;
         ++completed_frame_count_;
         completed_submission_serial_ = stats.submission_serial;
