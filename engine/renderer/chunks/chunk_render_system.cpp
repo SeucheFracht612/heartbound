@@ -269,6 +269,7 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
     stats_.stale_mesh_result_count = 0;
     stats_.snapshot_cells_copied = 0;
     stats_.meshing_ms = 0.0;
+    stats_.gpu_wait_ms = 0.0;
     timings_.reset();
 
     status = refresh_render_table(world, camera);
@@ -836,6 +837,7 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
         }
         return core::Status::failure(upload.error().code, upload.error().message);
     }
+    stats_.gpu_wait_ms += upload.value().cpu_gpu_wait_ms;
 
     for (std::size_t index = 0; index < selected.size(); ++index) {
         const auto& pending = selected[index];

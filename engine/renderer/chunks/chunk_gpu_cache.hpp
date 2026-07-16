@@ -104,6 +104,7 @@ struct ChunkGpuBatchUploadResult {
     std::vector<ChunkGpuUploadResult> uploads;
     std::size_t uploaded_bytes = 0;
     std::size_t write_count = 0;
+    double cpu_gpu_wait_ms = 0.0;
 };
 
 class ChunkGpuCache {

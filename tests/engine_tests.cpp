@@ -2645,6 +2645,7 @@ void test_renderer_rhi() {
     assert(texture_upload.value().width == 2);
     assert(texture_upload.value().height == 2);
     assert(texture_upload.value().byte_size == material_texture_bytes.size());
+    assert(texture_upload.value().cpu_gpu_wait_ms == 0.0);
     assert(!texture_upload.value().gpu_backed);
     assert(device.value()->live_resource_count() == 4);
     const RenderDescriptorWrite roughness_write{

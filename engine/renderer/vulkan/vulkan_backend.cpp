@@ -1745,7 +1745,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "Vulkan upload contexts were not initialized");
         }
         auto& upload_context = upload_contexts_[next_upload_context_];
-        status = wait_for_upload_context(upload_context);
+        double gpu_wait_ms = 0.0;
+        status = wait_for_upload_context(upload_context, gpu_wait_ms);
         if (!status) {
             return core::Result<rhi::RenderBufferBatchUploadStats>::failure(status.error().code,
                                                                             status.error().message);
@@ -1902,6 +1903,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.write_count = writes.size();
         stats.byte_size = staging_bytes;
         stats.submission_serial = upload_serial;
+        stats.cpu_gpu_wait_ms = gpu_wait_ms;
         stats.used_fallback_staging = use_fallback;
         stats.gpu_backed = true;
         return core::Result<rhi::RenderBufferBatchUploadStats>::success(stats);
@@ -1936,7 +1938,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "Vulkan upload contexts were not initialized");
         }
         auto& upload_context = upload_contexts_[next_upload_context_];
-        status = wait_for_upload_context(upload_context);
+        double gpu_wait_ms = 0.0;
+        status = wait_for_upload_context(upload_context, gpu_wait_ms);
         if (!status) {
             return core::Result<rhi::RenderImageUploadStats>::failure(status.error().code,
                                                                       status.error().message);
@@ -2100,6 +2103,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.mip_levels = desc.mip_levels;
         stats.byte_size = bytes.size();
         stats.live_resource_count = live_resource_count();
+        stats.cpu_gpu_wait_ms = gpu_wait_ms;
         stats.gpu_backed = true;
         return core::Result<rhi::RenderImageUploadStats>::success(stats);
     }
@@ -3111,10 +3115,14 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         return core::Status::ok();
     }
 
-    [[nodiscard]] core::Status wait_for_upload_context(VulkanUploadContext& context) {
+    [[nodiscard]] core::Status wait_for_upload_context(VulkanUploadContext& context,
+                                                       double& wait_ms) {
+        using Clock = std::chrono::steady_clock;
         if (context.in_flight) {
+            const auto started = Clock::now();
             const auto result = vkWaitForFences(device_, 1, &context.completion_fence, VK_TRUE,
                                                 std::numeric_limits<std::uint64_t>::max());
+            wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - started).count();
             if (result != VK_SUCCESS) {
                 return core::Status::failure("renderer.vulkan_wait_upload_context_failed",
                                              "failed to wait for a reusable Vulkan upload: " +

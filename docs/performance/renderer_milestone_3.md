@@ -22,7 +22,7 @@ multiple occurrences of the same zone during one renderer frame. `RendererStats`
 | `meshing_ms` | elapsed worker time for results drained in this frame |
 | `upload_preparation_ms` | compact GPU-vertex conversion and upload packet preparation |
 | `upload_ms` | owner-thread upload submission/preparation |
-| `gpu_wait_ms` | fence, acquire, queue-idle, and device-idle waits performed by frame execution |
+| `gpu_wait_ms` | upload-context fence waits plus frame-context fence, acquire, queue-idle, and device-idle waits |
 
 Worker meshing time is work attribution, not main-thread blocking time. With concurrent workers its
 sum can exceed `cpu_frame_ms`. GPU upload timing is independent of the CPU `upload_ms` field.
@@ -102,23 +102,25 @@ Native delayed-frame verification:
 
 ```bash
 build/default-debug/apps/render_benchmark/heartstead_render_benchmark \
-  --vulkan --scene rapid-edits --radius 1 --warmup 8 --frames 24 \
-  --output build/benchmarks/m3-native-audit.json
+  --vulkan --scene rapid-edits --radius 1 --warmup 8 --frames 32 \
+  --output build/benchmarks/m3-final-native.json
 ```
 
-All 24 measured frames carried valid GPU timings with one-frame latency. The intervals for complete
+All 32 measured frames carried valid GPU timings with one-frame latency. The intervals for complete
 frame, opaque terrain, transfer, and final copy were nonnegative.
 
 Native upload verification:
 
 ```bash
 build/default-debug/apps/render_benchmark/heartstead_render_benchmark \
-  --vulkan --scene churn --radius 0 --warmup 0 --frames 32 --format csv \
-  --output build/benchmarks/m3-native-upload-audit.csv
+  --vulkan --scene churn --radius 0 --warmup 0 --frames 40 \
+  --output build/benchmarks/m3-final-churn.json
 ```
 
-The run produced 32 delayed frame samples and four upload samples. Every CSV row had the same 64
-columns, including the upload submission serial and timing validity fields.
+The run produced 40 delayed frame samples and three upload samples. Each CPU upload frame reported
+its upload bytes, upload-submission time, and GPU synchronization wait independently; all 40 frames
+reported a nonzero measured synchronization-call duration. The JSON summary retained the three
+valid GPU upload samples and their submission serials.
 
 `VK_LAYER_KHRONOS_validation` was not installed on this host. Validation requests therefore emitted
 the intended availability warning and continued; the native logs contained no renderer error,

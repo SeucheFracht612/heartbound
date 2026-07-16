@@ -429,6 +429,7 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
                           static_cast<std::size_t>(candidate.mesh.indices.offset), index_bytes});
     }
 
+    double cpu_gpu_wait_ms = 0.0;
     if (!writes.empty()) {
         auto written = device_->upload_buffer_batch(writes);
         if (!written) {
@@ -437,11 +438,13 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
             return core::Result<ChunkGpuBatchUploadResult>::failure(written.error().code,
                                                                     written.error().message);
         }
+        cpu_gpu_wait_ms = written.value().cpu_gpu_wait_ms;
     }
 
     ChunkGpuBatchUploadResult result;
     result.uploads.reserve(uploads.size());
     result.write_count = writes.size();
+    result.cpu_gpu_wait_ms = cpu_gpu_wait_ms;
     core::Status retirement_status = core::Status::ok();
     for (std::size_t index = 0; index < uploads.size(); ++index) {
         const auto& upload = uploads[index];

@@ -47,6 +47,7 @@ void test_generation_safe_allocation_retirement_and_merging() {
     assert(uploaded.value().write_count == 1);
     assert(uploaded.value().byte_size == upload.size());
     assert(uploaded.value().submission_serial == 1);
+    assert(uploaded.value().cpu_gpu_wait_ms == 0.0);
     assert(device->last_submission_serial() == 1);
     assert(device->completed_submission_serial() == 1);
 

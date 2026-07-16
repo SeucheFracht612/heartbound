@@ -348,6 +348,7 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
     stats_.meshing_ms = chunks.meshing_ms;
     stats_.upload_preparation_ms = chunks.upload_preparation_ms;
     stats_.upload_ms = chunks.upload_ms;
+    stats_.gpu_wait_ms = chunks.gpu_wait_ms;
     stats_.loaded_chunks = saturating_u32(loaded_chunk_count);
     stats_.mesh_pending_chunks = saturating_u32(chunks.pending_mesh_count);
     stats_.upload_pending_chunks = saturating_u32(chunks.pending_upload_count);
@@ -399,7 +400,7 @@ void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept
         std::min(frame.pipeline_bind_count,
                  static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
     stats_.command_recording_ms = frame.cpu_command_recording_ms;
-    stats_.gpu_wait_ms = frame.cpu_gpu_wait_ms;
+    stats_.gpu_wait_ms += frame.cpu_gpu_wait_ms;
     stats_.gpu_timing_valid = frame.gpu_timing_valid;
     stats_.gpu_timing_frame_index = frame.gpu_timing_frame_index;
     stats_.gpu_timing_latency_frames = frame.gpu_timing_latency_frames;

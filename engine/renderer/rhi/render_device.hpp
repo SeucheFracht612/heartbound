@@ -215,6 +215,7 @@ struct RenderBufferBatchUploadStats {
     std::size_t write_count = 0;
     std::size_t byte_size = 0;
     std::uint64_t submission_serial = 0;
+    double cpu_gpu_wait_ms = 0.0;
     bool used_fallback_staging = false;
     bool gpu_backed = false;
 };
@@ -267,6 +268,7 @@ struct RenderImageUploadStats {
     std::uint32_t mip_levels = 1;
     std::size_t byte_size = 0;
     std::size_t live_resource_count = 0;
+    double cpu_gpu_wait_ms = 0.0;
     bool gpu_backed = false;
 };
 

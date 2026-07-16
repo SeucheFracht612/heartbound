@@ -79,6 +79,7 @@ struct ChunkRenderStats {
     double meshing_ms = 0.0;
     double upload_preparation_ms = 0.0;
     double upload_ms = 0.0;
+    double gpu_wait_ms = 0.0;
 };
 
 struct ChunkDrawList {
