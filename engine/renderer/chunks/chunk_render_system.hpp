@@ -87,6 +87,8 @@ class ChunkRenderSystem {
     process_chunk_evictions(const world::ChunkStreamEvictionReport& eviction);
 
     [[nodiscard]] core::Status synchronize(world::WorldState& world, const RenderCamera& camera);
+    [[nodiscard]] core::Status
+    set_terrain_pipeline(rhi::RenderResourceHandle terrain_pipeline) noexcept;
     [[nodiscard]] ChunkDrawList build_draw_list(const RenderCamera& camera);
     [[nodiscard]] ChunkDrawList
     build_draw_list(const RenderCamera& camera,

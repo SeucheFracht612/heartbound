@@ -3,7 +3,9 @@
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <limits>
 #include <utility>
 
@@ -12,6 +14,61 @@ namespace heartstead::renderer {
 namespace {
 
 const ChunkRenderStats empty_chunk_stats{};
+
+[[nodiscard]] std::vector<std::byte> make_terrain_tile(std::array<std::uint8_t, 3> color,
+                                                       bool error = false) {
+    constexpr std::uint32_t tile_size = 16;
+    std::vector<std::byte> pixels(tile_size * tile_size * 4U);
+    for (std::uint32_t y = 0; y < tile_size; ++y) {
+        for (std::uint32_t x = 0; x < tile_size; ++x) {
+            const auto offset = static_cast<std::size_t>(y * tile_size + x) * 4U;
+            const bool alternate = ((x / 4U) + (y / 4U)) % 2U != 0;
+            if (error) {
+                pixels[offset] = static_cast<std::byte>(alternate ? 20U : 255U);
+                pixels[offset + 1] = static_cast<std::byte>(0U);
+                pixels[offset + 2] = static_cast<std::byte>(alternate ? 20U : 255U);
+            } else {
+                const auto scale = alternate ? 0.82F : 1.0F;
+                for (std::size_t channel = 0; channel < color.size(); ++channel) {
+                    pixels[offset + channel] = static_cast<std::byte>(
+                        static_cast<std::uint8_t>(static_cast<float>(color[channel]) * scale));
+                }
+            }
+            pixels[offset + 3] = static_cast<std::byte>(255U);
+        }
+    }
+    return pixels;
+}
+
+[[nodiscard]] ShaderProgramDesc
+make_terrain_shader_program(std::span<const std::uint32_t> vertex_spirv,
+                            std::span<const std::uint32_t> fragment_spirv) {
+    ShaderProgramDesc shader_program;
+    shader_program.id = "terrain";
+    shader_program.stages = {
+        {rhi::RenderShaderStage::vertex,
+         "main",
+         {vertex_spirv.begin(), vertex_spirv.end()},
+         "terrain.vert.spv"},
+        {rhi::RenderShaderStage::fragment,
+         "main",
+         {fragment_spirv.begin(), fragment_spirv.end()},
+         "terrain.frag.spv"},
+    };
+    shader_program.interface.vertex_stride = sizeof(terrain::GpuChunkVertex);
+    for (const auto& attribute : terrain::gpu_chunk_vertex_attributes) {
+        shader_program.interface.vertex_inputs.push_back({attribute.location, attribute.format});
+    }
+    shader_program.interface.descriptors = {
+        {"terrain_textures", rhi::RenderDescriptorKind::sampled_texture, 0, true},
+        {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true},
+    };
+    shader_program.interface.push_constant_ranges.push_back(
+        {rhi::RenderShaderStageFlags::vertex, 0, sizeof(rhi::ChunkPushConstants)});
+    shader_program.dependencies = {"gpu_chunk_vertex_v1", "gpu_voxel_material_v1",
+                                   "chunk_push_constants_v1"};
+    return shader_program;
+}
 
 } // namespace
 
@@ -38,8 +95,19 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
     }
 
     device_ = std::move(desc.device);
-    auto pipeline_status =
-        create_terrain_pipeline(desc.terrain_vertex_spirv, desc.terrain_fragment_spirv);
+    shader_manager_ = std::make_unique<ShaderManager>(*device_, desc.development_shader_hot_reload);
+    sampler_cache_ = std::make_unique<SamplerCache>(*device_);
+    texture_manager_ = std::make_unique<TextureManager>(*device_);
+    material_cache_ = std::make_unique<MaterialRuntimeCache>(*device_);
+    pipeline_cache_ = std::make_unique<PipelineCache>(*device_, *shader_manager_);
+    auto fallback_status = texture_manager_->initialize_fallbacks();
+    if (!fallback_status) {
+        const auto error = fallback_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
+    auto pipeline_status = create_terrain_pipeline(desc.terrain_vertex_spirv,
+                                                   desc.terrain_fragment_spirv, desc.voxel_palette);
     if (!pipeline_status) {
         const auto error = pipeline_status.error();
         (void)shutdown();
@@ -78,19 +146,36 @@ core::Status Renderer::shutdown() {
         chunk_cache_.reset();
     }
 
-    const auto release = [this, &first_failure](rhi::RenderResourceHandle& handle) {
-        if (device_ == nullptr || !handle.is_valid()) {
-            return;
-        }
-        auto status = device_->release_resource(handle);
+    const auto remember_failure = [&first_failure](core::Status status) {
         if (!status && first_failure) {
             first_failure = status;
         }
-        handle = {};
     };
-    release(terrain_pipeline_);
-    release(terrain_vertex_shader_);
-    release(terrain_fragment_shader_);
+    if (pipeline_cache_ != nullptr) {
+        remember_failure(pipeline_cache_->shutdown());
+        pipeline_cache_.reset();
+    }
+    if (material_cache_ != nullptr) {
+        remember_failure(material_cache_->shutdown());
+        material_cache_.reset();
+    }
+    if (texture_manager_ != nullptr) {
+        remember_failure(texture_manager_->shutdown());
+        texture_manager_.reset();
+    }
+    if (sampler_cache_ != nullptr) {
+        remember_failure(sampler_cache_->shutdown());
+        sampler_cache_.reset();
+    }
+    if (shader_manager_ != nullptr) {
+        remember_failure(shader_manager_->shutdown());
+        shader_manager_.reset();
+    }
+    terrain_pipeline_ = {};
+    terrain_pipeline_key_ = {};
+    terrain_shader_program_ = {};
+    terrain_texture_array_ = {};
+    terrain_sampler_ = {};
     device_.reset();
     return first_failure;
 }
@@ -198,9 +283,34 @@ core::Status Renderer::resize(rhi::RenderExtent extent) {
     return frame_builder_->resize(extent);
 }
 
+core::Status Renderer::reload_terrain_shaders(std::span<const std::uint32_t> vertex_spirv,
+                                              std::span<const std::uint32_t> fragment_spirv) {
+    if (!is_initialized() || shader_manager_ == nullptr || pipeline_cache_ == nullptr ||
+        chunk_system_ == nullptr) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized before shader reload");
+    }
+    auto status = shader_manager_->reload_program(
+        terrain_shader_program_, make_terrain_shader_program(vertex_spirv, fragment_spirv));
+    if (!status) {
+        return status;
+    }
+    status = pipeline_cache_->rebuild_program(terrain_shader_program_);
+    if (!status) {
+        return status;
+    }
+    auto rebuilt = pipeline_cache_->find(terrain_pipeline_key_);
+    if (!rebuilt) {
+        return core::Status::failure(rebuilt.error().code, rebuilt.error().message);
+    }
+    terrain_pipeline_ = rebuilt.value();
+    return chunk_system_->set_terrain_pipeline(terrain_pipeline_);
+}
+
 bool Renderer::is_initialized() const noexcept {
     return device_ != nullptr && chunk_cache_ != nullptr && chunk_system_ != nullptr &&
-           frame_builder_ != nullptr && terrain_pipeline_.is_valid();
+           frame_builder_ != nullptr && shader_manager_ != nullptr && texture_manager_ != nullptr &&
+           material_cache_ != nullptr && pipeline_cache_ != nullptr && terrain_pipeline_.is_valid();
 }
 
 const ChunkRenderStats& Renderer::chunk_stats() const noexcept {
@@ -244,6 +354,17 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
     stats_.visible_chunks = saturating_u32(chunks.visible_chunk_count);
     stats_.culled_chunks = saturating_u32(chunks.culled_chunk_count);
     stats_.drawn_chunks = saturating_u32(chunks.draw_count);
+    if (texture_manager_ != nullptr) {
+        stats_.resident_textures = saturating_u32(texture_manager_->stats().resident_texture_count);
+        stats_.resident_texture_bytes = texture_manager_->stats().resident_texture_bytes;
+    }
+    if (material_cache_ != nullptr) {
+        stats_.runtime_materials = saturating_u32(material_cache_->stats().resident_material_count);
+    }
+    if (pipeline_cache_ != nullptr) {
+        stats_.resident_pipelines =
+            saturating_u32(pipeline_cache_->stats().resident_pipeline_count);
+    }
     stats_.vertices = chunks.visible_vertex_count;
     stats_.triangles = chunks.visible_index_count / 3;
     stats_.resident_mesh_bytes = chunks.cache.resident_bytes;
@@ -269,6 +390,9 @@ void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept
     stats_.completed_submission_serial = frame.completed_submission_serial;
     stats_.draw_calls = static_cast<std::uint32_t>(std::min(
         frame.draw_count, static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    stats_.pipeline_switches = static_cast<std::uint32_t>(
+        std::min(frame.pipeline_bind_count,
+                 static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
     stats_.command_recording_ms = frame.cpu_command_recording_ms;
     stats_.gpu_wait_ms = frame.cpu_gpu_wait_ms;
     stats_.gpu_timing_valid = frame.gpu_timing_valid;
@@ -284,41 +408,118 @@ void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept
 }
 
 core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> vertex_spirv,
-                                               std::span<const std::uint32_t> fragment_spirv) {
+                                               std::span<const std::uint32_t> fragment_spirv,
+                                               const world::VoxelPalette* voxel_palette) {
+    if (shader_manager_ == nullptr || sampler_cache_ == nullptr || texture_manager_ == nullptr ||
+        material_cache_ == nullptr || pipeline_cache_ == nullptr) {
+        return core::Status::failure("renderer.runtime_assets_uninitialized",
+                                     "terrain runtime asset managers must be initialized first");
+    }
     const auto material = core::PrototypeId::parse("base:materials/milestone_terrain");
     if (!material) {
         return core::Status::failure("renderer.invalid_terrain_material",
                                      "internal terrain material prototype id is invalid");
     }
 
+    TerrainTextureArrayBuilder texture_builder(16, 16);
+    auto layer = texture_builder.add_layer("error", make_terrain_tile({255, 0, 255}, true));
+    if (!layer) {
+        return core::Status::failure(layer.error().code, layer.error().message);
+    }
+    constexpr std::array<std::array<std::uint8_t, 3>, 6> terrain_colors{
+        std::array<std::uint8_t, 3>{74, 145, 57},   std::array<std::uint8_t, 3>{118, 78, 46},
+        std::array<std::uint8_t, 3>{112, 116, 124}, std::array<std::uint8_t, 3>{184, 162, 98},
+        std::array<std::uint8_t, 3>{54, 111, 48},   std::array<std::uint8_t, 3>{127, 91, 59},
+    };
+    for (std::size_t index = 0; index < terrain_colors.size(); ++index) {
+        layer = texture_builder.add_layer("terrain_" + std::to_string(index + 1),
+                                          make_terrain_tile(terrain_colors[index]));
+        if (!layer) {
+            return core::Status::failure(layer.error().code, layer.error().message);
+        }
+    }
+    auto texture_desc = texture_builder.build("terrain_texture_array");
+    if (!texture_desc) {
+        return core::Status::failure(texture_desc.error().code, texture_desc.error().message);
+    }
+    auto texture = texture_manager_->create_texture(std::move(texture_desc).value());
+    if (!texture) {
+        return core::Status::failure(texture.error().code, texture.error().message);
+    }
+    terrain_texture_array_ = texture.value();
+    const auto* texture_view = texture_manager_->find(terrain_texture_array_);
+    if (texture_view == nullptr) {
+        return core::Status::failure("renderer.terrain_texture_missing",
+                                     "terrain texture array disappeared after creation");
+    }
+
+    rhi::RenderSamplerDesc sampler_desc;
+    sampler_desc.min_filter = rhi::RenderSamplerFilter::nearest;
+    sampler_desc.mag_filter = rhi::RenderSamplerFilter::nearest;
+    sampler_desc.mipmap_mode = rhi::RenderSamplerMipmapMode::linear;
+    sampler_desc.max_lod = static_cast<float>(texture_view->mip_levels - 1U);
+    sampler_desc.debug_name = "terrain_sampler";
+    auto sampler = sampler_cache_->get(std::move(sampler_desc));
+    if (!sampler) {
+        return core::Status::failure(sampler.error().code, sampler.error().message);
+    }
+    terrain_sampler_ = sampler.value();
+
+    std::vector<std::uint16_t> voxel_types;
+    if (voxel_palette != nullptr && !voxel_palette->empty()) {
+        const auto definitions = voxel_palette->definitions();
+        voxel_types.reserve(definitions.size());
+        for (const auto* definition : definitions) {
+            voxel_types.push_back(definition->type);
+        }
+    } else {
+        voxel_types.reserve(255);
+        for (std::uint16_t type = 1; type <= 255; ++type) {
+            voxel_types.push_back(type);
+        }
+    }
+    for (const auto type : voxel_types) {
+        auto runtime_id =
+            core::PrototypeId::parse("base:materials/runtime_voxel_" + std::to_string(type));
+        if (!runtime_id) {
+            return core::Status::failure("renderer.invalid_runtime_material_id",
+                                         "generated voxel material id is invalid");
+        }
+        MaterialRuntimeDesc runtime_material;
+        runtime_material.id = runtime_id.value();
+        runtime_material.voxel_type = type;
+        runtime_material.side_texture = 1U + (static_cast<std::uint32_t>(type) - 1U) % 6U;
+        runtime_material.top_texture = runtime_material.side_texture;
+        runtime_material.bottom_texture = runtime_material.side_texture;
+        auto inserted = material_cache_->upsert(std::move(runtime_material));
+        if (!inserted) {
+            return core::Status::failure(inserted.error().code, inserted.error().message);
+        }
+    }
+    auto material_status = material_cache_->synchronize_gpu();
+    if (!material_status) {
+        return material_status;
+    }
+
+    auto shader =
+        shader_manager_->create_program(make_terrain_shader_program(vertex_spirv, fragment_spirv));
+    if (!shader) {
+        return core::Status::failure(shader.error().code, shader.error().message);
+    }
+    terrain_shader_program_ = shader.value();
+
     rhi::RenderPipelineLayoutDesc layout;
     layout.material_id = material.value();
     layout.shader_template = {"base", "shaders/terrain.vert"};
+    layout.descriptors = {
+        {"terrain_textures", rhi::RenderDescriptorKind::sampled_texture, 0, true},
+        {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true},
+    };
     layout.push_constant_ranges.push_back(
         {rhi::RenderShaderStageFlags::vertex, 0, sizeof(rhi::ChunkPushConstants)});
     layout.debug_name = "terrain_layout";
-    auto layout_result = device_->bind_pipeline_layout(std::move(layout));
-    if (!layout_result) {
-        return core::Status::failure(layout_result.error().code, layout_result.error().message);
-    }
-
-    auto vertex_shader = device_->create_shader_module(
-        {rhi::RenderShaderStage::vertex, "terrain_vertex"}, vertex_spirv);
-    if (!vertex_shader) {
-        return core::Status::failure(vertex_shader.error().code, vertex_shader.error().message);
-    }
-    terrain_vertex_shader_ = vertex_shader.value().handle;
-
-    auto fragment_shader = device_->create_shader_module(
-        {rhi::RenderShaderStage::fragment, "terrain_fragment"}, fragment_spirv);
-    if (!fragment_shader) {
-        return core::Status::failure(fragment_shader.error().code, fragment_shader.error().message);
-    }
-    terrain_fragment_shader_ = fragment_shader.value().handle;
 
     rhi::RenderGraphicsPipelineDesc pipeline;
-    pipeline.vertex_shader = terrain_vertex_shader_;
-    pipeline.fragment_shader = terrain_fragment_shader_;
     pipeline.material_id = material.value();
     pipeline.debug_name = "terrain_pipeline";
     pipeline.vertex_stride = sizeof(terrain::GpuChunkVertex);
@@ -334,11 +535,29 @@ core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> ve
     pipeline.blend_mode = rhi::RenderBlendMode::disabled;
     pipeline.color_target_format = rhi::RenderImageFormat::rgba8_unorm;
     pipeline.depth_target_format = rhi::RenderImageFormat::d32_sfloat;
-    auto pipeline_result = device_->create_graphics_pipeline(std::move(pipeline));
+    terrain_pipeline_key_ = {};
+    terrain_pipeline_key_.shader_program = terrain_shader_program_;
+    terrain_pipeline_key_.vertex_layout =
+        hash_vertex_layout(pipeline.vertex_stride, pipeline.vertex_attributes);
+    auto pipeline_result = pipeline_cache_->prewarm(terrain_pipeline_key_, layout, pipeline);
     if (!pipeline_result) {
         return core::Status::failure(pipeline_result.error().code, pipeline_result.error().message);
     }
-    terrain_pipeline_ = pipeline_result.value().handle;
+    terrain_pipeline_ = pipeline_result.value();
+
+    const rhi::RenderDescriptorWrite texture_write{
+        material.value(), "terrain_textures", texture_view->image, 0, 0, terrain_sampler_};
+    auto texture_binding =
+        device_->write_descriptors(std::span<const rhi::RenderDescriptorWrite>{&texture_write, 1});
+    if (!texture_binding) {
+        return core::Status::failure(texture_binding.error().code, texture_binding.error().message);
+    }
+    material_status =
+        material_cache_->write_gpu_table_descriptor(material.value(), "voxel_materials");
+    if (!material_status) {
+        return material_status;
+    }
+    pipeline_cache_->seal();
     return core::Status::ok();
 }
 

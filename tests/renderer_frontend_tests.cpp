@@ -357,6 +357,7 @@ void test_renderer_frontend_submits_headless_frames() {
     init.device = std::move(device).value();
     init.terrain_vertex_spirv = test_spirv;
     init.terrain_fragment_spirv = test_spirv;
+    init.development_shader_hot_reload = true;
     init.chunk_config.max_chunks_meshed_per_frame = 2;
     init.chunk_config.max_bytes_uploaded_per_frame = 1024 * 1024;
 
@@ -365,7 +366,16 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(retained_renderer.is_initialized());
     assert(retained_renderer.device() != nullptr);
     const auto initialized_resource_count = retained_renderer.device()->live_resource_count();
-    assert(initialized_resource_count == 3); // two shader modules and one graphics pipeline
+    // Two shader modules, one pipeline, four fallback textures, one terrain texture array,
+    // one shared sampler, and one GPU material-table buffer.
+    assert(initialized_resource_count == 10);
+
+    auto invalid_spirv = test_spirv;
+    invalid_spirv[0] = 0;
+    assert(!retained_renderer.reload_terrain_shaders(invalid_spirv, test_spirv));
+    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
+    assert(retained_renderer.reload_terrain_shaders(test_spirv, test_spirv));
+    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
 
     world::WorldState world;
     assert(world.chunks().set({0, 0, 0}, {4, 4, 4}, world::VoxelCell{1, 255}));
@@ -393,6 +403,7 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(first_frame);
     assert(first_frame.value().draw_count == 1);
     assert(first_frame.value().indexed_draw_count == 1);
+    assert(first_frame.value().pipeline_bind_count == 1);
     assert(first_frame.value().total_indices > 0);
     assert(retained_renderer.chunk_stats().visible_chunk_count == 1);
     assert(retained_renderer.chunk_stats().culled_chunk_count == 0);
@@ -407,6 +418,11 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(renderer_stats.visible_chunks == 1);
     assert(renderer_stats.drawn_chunks == 1);
     assert(renderer_stats.draw_calls == 1);
+    assert(renderer_stats.pipeline_switches == 1);
+    assert(renderer_stats.resident_textures == 5);
+    assert(renderer_stats.runtime_materials == 255);
+    assert(renderer_stats.resident_pipelines == 1);
+    assert(renderer_stats.resident_texture_bytes > 0);
     assert(renderer_stats.vertices > 0);
     assert(renderer_stats.triangles > 0);
     assert(renderer_stats.resident_mesh_bytes > 0);

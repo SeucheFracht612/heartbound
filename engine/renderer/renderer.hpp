@@ -2,8 +2,13 @@
 
 #include "engine/core/result.hpp"
 #include "engine/profiling/cpu_timing.hpp"
+#include "engine/renderer/assets/sampler_cache.hpp"
+#include "engine/renderer/assets/shader_manager.hpp"
+#include "engine/renderer/assets/texture_manager.hpp"
 #include "engine/renderer/chunks/chunk_render_system.hpp"
 #include "engine/renderer/frame/frame_builder.hpp"
+#include "engine/renderer/materials/material_runtime_cache.hpp"
+#include "engine/renderer/materials/pipeline_cache.hpp"
 #include "engine/renderer/render_camera.hpp"
 #include "engine/renderer/renderer_stats.hpp"
 #include "engine/renderer/rhi/render_device.hpp"
@@ -25,6 +30,7 @@ struct RendererInitDesc {
     ChunkRenderConfig chunk_config{};
     ChunkGpuCacheConfig chunk_gpu_cache_config{};
     rhi::ClearColor clear_color{0.055F, 0.09F, 0.14F, 1.0F};
+    bool development_shader_hot_reload = false;
 };
 
 class Renderer {
@@ -49,6 +55,9 @@ class Renderer {
 
     [[nodiscard]] core::Result<rhi::RenderFrameStats> render(const RenderCamera& camera);
     [[nodiscard]] core::Status resize(rhi::RenderExtent extent);
+    [[nodiscard]] core::Status
+    reload_terrain_shaders(std::span<const std::uint32_t> vertex_spirv,
+                           std::span<const std::uint32_t> fragment_spirv);
 
     [[nodiscard]] bool is_initialized() const noexcept;
     [[nodiscard]] const ChunkRenderStats& chunk_stats() const noexcept;
@@ -59,14 +68,22 @@ class Renderer {
   private:
     [[nodiscard]] core::Status
     create_terrain_pipeline(std::span<const std::uint32_t> vertex_spirv,
-                            std::span<const std::uint32_t> fragment_spirv);
+                            std::span<const std::uint32_t> fragment_spirv,
+                            const world::VoxelPalette* voxel_palette);
     void update_frontend_stats(std::size_t loaded_chunk_count) noexcept;
     void update_backend_stats(const rhi::RenderFrameStats& frame) noexcept;
 
     std::unique_ptr<rhi::IRenderDevice> device_;
-    rhi::RenderResourceHandle terrain_vertex_shader_;
-    rhi::RenderResourceHandle terrain_fragment_shader_;
     rhi::RenderResourceHandle terrain_pipeline_;
+    GraphicsPipelineKey terrain_pipeline_key_{};
+    ShaderProgramHandle terrain_shader_program_;
+    TextureHandle terrain_texture_array_;
+    rhi::RenderResourceHandle terrain_sampler_;
+    std::unique_ptr<ShaderManager> shader_manager_;
+    std::unique_ptr<SamplerCache> sampler_cache_;
+    std::unique_ptr<TextureManager> texture_manager_;
+    std::unique_ptr<MaterialRuntimeCache> material_cache_;
+    std::unique_ptr<PipelineCache> pipeline_cache_;
     std::unique_ptr<ChunkGpuCache> chunk_cache_;
     std::unique_ptr<ChunkRenderSystem> chunk_system_;
     std::unique_ptr<FrameBuilder> frame_builder_;

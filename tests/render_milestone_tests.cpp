@@ -4,8 +4,8 @@
 #include "engine/renderer/rhi/render_frame_plan.hpp"
 #include "engine/renderer/shaders/spirv_loader.hpp"
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
-#include "engine/world/meshing/chunk_mesher.hpp"
 #include "engine/world/meshing/chunk_mesh_snapshot.hpp"
+#include "engine/world/meshing/chunk_mesher.hpp"
 
 #include <array>
 #include <cassert>
@@ -207,6 +207,7 @@ void test_unified_headless_frame_submission() {
     assert(stats);
     assert(stats.value().draw_count == 1);
     assert(stats.value().indexed_draw_count == 1);
+    assert(stats.value().pipeline_bind_count == 1);
     assert(stats.value().total_indices == 3);
     assert(stats.value().presented);
 
@@ -228,8 +229,8 @@ void test_immutable_chunk_meshing_snapshot() {
 
     auto table = world::build_block_render_table_snapshot(nullptr);
     assert(table);
-    auto snapshot = world::build_chunk_neighborhood_snapshot(
-        chunks, center.identity(), table.value());
+    auto snapshot =
+        world::build_chunk_neighborhood_snapshot(chunks, center.identity(), table.value());
     assert(snapshot);
     assert(snapshot.value().halo_radius == 1);
     assert(snapshot.value().side_length == 34);
@@ -237,8 +238,7 @@ void test_immutable_chunk_meshing_snapshot() {
     assert(snapshot.value().dependencies.size() == 27);
     assert(world::dependency_revisions_match(chunks, snapshot.value().dependencies));
 
-    auto immutable_mesh =
-        world::ChunkMesher::build_surface_mesh(snapshot.value(), table.value());
+    auto immutable_mesh = world::ChunkMesher::build_surface_mesh(snapshot.value(), table.value());
     assert(immutable_mesh);
     world::ChunkMeshingContext live_context{center, nullptr, &chunks, 1};
     auto reference_mesh = world::ChunkMesher::build_surface_mesh(live_context);

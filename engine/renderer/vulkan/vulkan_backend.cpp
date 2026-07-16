@@ -730,6 +730,8 @@ find_required_memory_type(VkPhysicalDevice physical_device, std::uint32_t type_b
     switch (format) {
     case rhi::RenderImageFormat::rgba8_unorm:
         return VK_FORMAT_R8G8B8A8_UNORM;
+    case rhi::RenderImageFormat::rgba8_srgb:
+        return VK_FORMAT_R8G8B8A8_SRGB;
     case rhi::RenderImageFormat::d32_sfloat:
         return VK_FORMAT_D32_SFLOAT;
     case rhi::RenderImageFormat::d32_sfloat_s8_uint:
@@ -738,6 +740,23 @@ find_required_memory_type(VkPhysicalDevice physical_device, std::uint32_t type_b
         return VK_FORMAT_D24_UNORM_S8_UINT;
     }
     return VK_FORMAT_UNDEFINED;
+}
+
+[[nodiscard]] VkFilter vulkan_sampler_filter(rhi::RenderSamplerFilter value) noexcept {
+    return value == rhi::RenderSamplerFilter::linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+}
+
+[[nodiscard]] VkSamplerMipmapMode
+vulkan_sampler_mipmap_mode(rhi::RenderSamplerMipmapMode value) noexcept {
+    return value == rhi::RenderSamplerMipmapMode::linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                                         : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+}
+
+[[nodiscard]] VkSamplerAddressMode
+vulkan_sampler_address_mode(rhi::RenderSamplerAddressMode value) noexcept {
+    return value == rhi::RenderSamplerAddressMode::clamp_to_edge
+               ? VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE
+               : VK_SAMPLER_ADDRESS_MODE_REPEAT;
 }
 
 [[nodiscard]] VkShaderStageFlags
@@ -822,6 +841,8 @@ vulkan_primitive_topology(rhi::RenderPrimitiveTopology topology) noexcept {
     switch (kind) {
     case rhi::RenderDescriptorKind::sampled_texture:
         return VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    case rhi::RenderDescriptorKind::storage_buffer:
+        return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     case rhi::RenderDescriptorKind::uniform_scalar:
     case rhi::RenderDescriptorKind::uniform_color:
         return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
@@ -834,6 +855,9 @@ vulkan_descriptor_stage_flags(rhi::RenderDescriptorKind kind) noexcept {
     switch (kind) {
     case rhi::RenderDescriptorKind::sampled_texture:
         return VK_SHADER_STAGE_FRAGMENT_BIT;
+    case rhi::RenderDescriptorKind::storage_buffer:
+        return VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+               VK_SHADER_STAGE_COMPUTE_BIT;
     case rhi::RenderDescriptorKind::uniform_scalar:
     case rhi::RenderDescriptorKind::uniform_color:
         return VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -845,10 +869,14 @@ vulkan_descriptor_stage_flags(rhi::RenderDescriptorKind kind) noexcept {
 make_descriptor_pool_sizes(const rhi::RenderPipelineLayoutDesc& desc) {
     std::uint32_t sampled_textures = 0;
     std::uint32_t uniform_buffers = 0;
+    std::uint32_t storage_buffers = 0;
     for (const auto& binding : desc.descriptors) {
         switch (binding.kind) {
         case rhi::RenderDescriptorKind::sampled_texture:
             ++sampled_textures;
+            break;
+        case rhi::RenderDescriptorKind::storage_buffer:
+            ++storage_buffers;
             break;
         case rhi::RenderDescriptorKind::uniform_scalar:
         case rhi::RenderDescriptorKind::uniform_color:
@@ -858,7 +886,7 @@ make_descriptor_pool_sizes(const rhi::RenderPipelineLayoutDesc& desc) {
     }
 
     std::vector<VkDescriptorPoolSize> sizes;
-    sizes.reserve(2);
+    sizes.reserve(3);
     if (sampled_textures > 0) {
         sizes.push_back(VkDescriptorPoolSize{
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
@@ -869,6 +897,12 @@ make_descriptor_pool_sizes(const rhi::RenderPipelineLayoutDesc& desc) {
         sizes.push_back(VkDescriptorPoolSize{
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
             uniform_buffers,
+        });
+    }
+    if (storage_buffers > 0) {
+        sizes.push_back(VkDescriptorPoolSize{
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            storage_buffers,
         });
     }
     return sizes;
@@ -1112,8 +1146,14 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         VkDeviceMemory memory = VK_NULL_HANDLE;
         VkImageView image_view = VK_NULL_HANDLE;
         VkSampler sampler = VK_NULL_HANDLE;
+        bool owns_sampler = false;
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
         std::size_t byte_size = 0;
+    };
+
+    struct VulkanSamplerResource {
+        rhi::RenderSamplerDesc desc;
+        VkSampler sampler = VK_NULL_HANDLE;
     };
 
     struct VulkanPipelineLayoutResource {
@@ -1234,6 +1274,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             destroy_staging_buffer();
             destroy_buffer_resources();
             destroy_image_resources();
+            destroy_sampler_resources();
+            if (default_sampler_ != VK_NULL_HANDLE) {
+                vkDestroySampler(device_, default_sampler_, nullptr);
+                default_sampler_ = VK_NULL_HANDLE;
+            }
             destroy_graphics_pipeline_resources();
             destroy_compute_pipeline_resources();
             destroy_shader_module_resources();
@@ -1323,6 +1368,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         result.supports_descriptor_writes = true;
         result.supports_buffer_upload = true;
         result.supports_image_upload = true;
+        result.supports_sampler_cache = true;
         result.supports_draw_binding = true;
         result.supports_frame_submission = true;
         result.supports_depth = depth_format_ != VK_FORMAT_UNDEFINED;
@@ -1350,10 +1396,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     }
 
     [[nodiscard]] std::size_t live_resource_count() const noexcept override {
-        return buffer_resources_.size() + image_resources_.size() + shader_modules_.size() +
-               compute_pipelines_.size() + graphics_pipelines_.size() + retired_buffers_.size() +
-               retired_images_.size() + retired_shader_modules_.size() +
-               retired_compute_pipelines_.size() + retired_graphics_pipelines_.size();
+        return buffer_resources_.size() + image_resources_.size() + sampler_resources_.size() +
+               shader_modules_.size() + compute_pipelines_.size() + graphics_pipelines_.size() +
+               retired_buffers_.size() + retired_images_.size() + retired_samplers_.size() +
+               retired_shader_modules_.size() + retired_compute_pipelines_.size() +
+               retired_graphics_pipelines_.size();
     }
 
     [[nodiscard]] core::Status resize(rhi::RenderExtent extent) override {
@@ -1883,72 +1930,60 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "Vulkan device does not support sampled transfer uploads for this image format");
         }
 
-        VulkanBufferResource staging;
-        staging.desc = rhi::RenderBufferDesc{rhi::RenderBufferUsage::storage, bytes.size(),
-                                             desc.debug_name + "_staging"};
-        staging.byte_size = bytes.size();
-
-        VkBufferCreateInfo staging_info{};
-        staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        staging_info.size = static_cast<VkDeviceSize>(bytes.size());
-        staging_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-        staging_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-        auto result = vkCreateBuffer(device_, &staging_info, nullptr, &staging.buffer);
-        if (result != VK_SUCCESS) {
+        if (upload_contexts_.empty()) {
             return core::Result<rhi::RenderImageUploadStats>::failure(
-                "renderer.vulkan_image_staging_buffer_failed",
-                "failed to create Vulkan image staging buffer: " +
-                    std::string(vk_result_name(result)));
+                "renderer.vulkan_upload_context_unavailable",
+                "Vulkan upload contexts were not initialized");
+        }
+        auto& upload_context = upload_contexts_[next_upload_context_];
+        status = wait_for_upload_context(upload_context);
+        if (!status) {
+            return core::Result<rhi::RenderImageUploadStats>::failure(status.error().code,
+                                                                      status.error().message);
         }
 
-        VkMemoryRequirements staging_requirements{};
-        vkGetBufferMemoryRequirements(device_, staging.buffer, &staging_requirements);
-        auto staging_memory_type = find_required_memory_type(
-            physical_device_, staging_requirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-            "image staging buffer");
-        if (!staging_memory_type) {
-            destroy_buffer_resource(staging);
-            return core::Result<rhi::RenderImageUploadStats>::failure(
-                staging_memory_type.error().code, staging_memory_type.error().message);
+        constexpr std::size_t persistent_staging_capacity = 32U * 1024U * 1024U;
+        const auto upload_serial = last_submission_serial_ + 1;
+        auto ring_range =
+            staging_ring_.allocate(bytes.size(), 4, upload_serial, completed_submission_serial_);
+        const bool use_fallback = !ring_range;
+        VkBuffer staging_buffer = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        std::size_t staging_offset = 0;
+        if (use_fallback) {
+            auto fallback_status = create_staging_buffer(
+                bytes.size(), upload_context.fallback_staging, upload_context.fallback_mapped);
+            if (!fallback_status) {
+                return core::Result<rhi::RenderImageUploadStats>::failure(
+                    fallback_status.error().code, fallback_status.error().message);
+            }
+            staging_buffer = upload_context.fallback_staging.buffer;
+            mapped = upload_context.fallback_mapped;
+        } else {
+            auto staging_status = ensure_staging_buffer(persistent_staging_capacity);
+            if (!staging_status) {
+                (void)staging_ring_.cancel(ring_range.value());
+                return core::Result<rhi::RenderImageUploadStats>::failure(
+                    staging_status.error().code, staging_status.error().message);
+            }
+            staging_buffer = staging_buffer_.buffer;
+            mapped = staging_mapped_;
+            staging_offset = ring_range.value().offset;
         }
+        std::memcpy(static_cast<std::byte*>(mapped) + staging_offset, bytes.data(), bytes.size());
 
-        VkMemoryAllocateInfo staging_allocation{};
-        staging_allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        staging_allocation.allocationSize = staging_requirements.size;
-        staging_allocation.memoryTypeIndex = staging_memory_type.value();
-
-        result = vkAllocateMemory(device_, &staging_allocation, nullptr, &staging.memory);
-        if (result != VK_SUCCESS) {
-            destroy_buffer_resource(staging);
-            return core::Result<rhi::RenderImageUploadStats>::failure(
-                "renderer.vulkan_image_staging_memory_failed",
-                "failed to allocate Vulkan image staging memory: " +
-                    std::string(vk_result_name(result)));
-        }
-
-        result = vkBindBufferMemory(device_, staging.buffer, staging.memory, 0);
-        if (result != VK_SUCCESS) {
-            destroy_buffer_resource(staging);
-            return core::Result<rhi::RenderImageUploadStats>::failure(
-                "renderer.vulkan_image_staging_bind_failed",
-                "failed to bind Vulkan image staging memory: " +
-                    std::string(vk_result_name(result)));
-        }
-
-        void* mapped_memory = nullptr;
-        result = vkMapMemory(device_, staging.memory, 0, static_cast<VkDeviceSize>(bytes.size()), 0,
-                             &mapped_memory);
-        if (result != VK_SUCCESS) {
-            destroy_buffer_resource(staging);
-            return core::Result<rhi::RenderImageUploadStats>::failure(
-                "renderer.vulkan_image_staging_map_failed",
-                "failed to map Vulkan image staging memory: " +
-                    std::string(vk_result_name(result)));
-        }
-        std::memcpy(mapped_memory, bytes.data(), bytes.size());
-        vkUnmapMemory(device_, staging.memory);
+        const auto release_staging_after_failure = [&]() noexcept {
+            if (use_fallback) {
+                if (upload_context.fallback_mapped != nullptr &&
+                    upload_context.fallback_staging.memory != VK_NULL_HANDLE) {
+                    vkUnmapMemory(device_, upload_context.fallback_staging.memory);
+                    upload_context.fallback_mapped = nullptr;
+                }
+                destroy_buffer_resource(upload_context.fallback_staging);
+            } else {
+                (void)staging_ring_.cancel(ring_range.value());
+            }
+        };
 
         VulkanImageResource resource;
         resource.desc = desc;
@@ -1959,17 +1994,17 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         image_info.imageType = VK_IMAGE_TYPE_2D;
         image_info.format = format;
         image_info.extent = VkExtent3D{desc.width, desc.height, 1};
-        image_info.mipLevels = 1;
-        image_info.arrayLayers = 1;
+        image_info.mipLevels = desc.mip_levels;
+        image_info.arrayLayers = desc.array_layers;
         image_info.samples = VK_SAMPLE_COUNT_1_BIT;
         image_info.tiling = VK_IMAGE_TILING_OPTIMAL;
         image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-        result = vkCreateImage(device_, &image_info, nullptr, &resource.image);
+        auto result = vkCreateImage(device_, &image_info, nullptr, &resource.image);
         if (result != VK_SUCCESS) {
-            destroy_buffer_resource(staging);
+            release_staging_after_failure();
             return core::Result<rhi::RenderImageUploadStats>::failure(
                 "renderer.vulkan_sampled_image_failed",
                 "failed to create Vulkan sampled image: " + std::string(vk_result_name(result)));
@@ -1982,7 +2017,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                              VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (!image_memory_type) {
             destroy_image_resource(resource);
-            destroy_buffer_resource(staging);
+            release_staging_after_failure();
             return core::Result<rhi::RenderImageUploadStats>::failure(
                 image_memory_type.error().code, image_memory_type.error().message);
         }
@@ -1995,7 +2030,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         result = vkAllocateMemory(device_, &image_allocation, nullptr, &resource.memory);
         if (result != VK_SUCCESS) {
             destroy_image_resource(resource);
-            destroy_buffer_resource(staging);
+            release_staging_after_failure();
             return core::Result<rhi::RenderImageUploadStats>::failure(
                 "renderer.vulkan_sampled_image_memory_failed",
                 "failed to allocate Vulkan sampled image memory: " +
@@ -2005,59 +2040,52 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         result = vkBindImageMemory(device_, resource.image, resource.memory, 0);
         if (result != VK_SUCCESS) {
             destroy_image_resource(resource);
-            destroy_buffer_resource(staging);
+            release_staging_after_failure();
             return core::Result<rhi::RenderImageUploadStats>::failure(
                 "renderer.vulkan_sampled_image_bind_failed",
                 "failed to bind Vulkan sampled image memory: " +
                     std::string(vk_result_name(result)));
         }
 
-        status = upload_sampled_image(staging.buffer, resource);
-        destroy_buffer_resource(staging);
-        if (!status) {
-            destroy_image_resource(resource);
-            return core::Result<rhi::RenderImageUploadStats>::failure(status.error().code,
-                                                                      status.error().message);
-        }
-
         VkImageViewCreateInfo view_info{};
         view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         view_info.image = resource.image;
-        view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view_info.viewType =
+            desc.array_layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         view_info.format = format;
         view_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         view_info.subresourceRange.baseMipLevel = 0;
-        view_info.subresourceRange.levelCount = 1;
+        view_info.subresourceRange.levelCount = desc.mip_levels;
         view_info.subresourceRange.baseArrayLayer = 0;
-        view_info.subresourceRange.layerCount = 1;
+        view_info.subresourceRange.layerCount = desc.array_layers;
         result = vkCreateImageView(device_, &view_info, nullptr, &resource.image_view);
         if (result != VK_SUCCESS) {
             destroy_image_resource(resource);
+            release_staging_after_failure();
             return core::Result<rhi::RenderImageUploadStats>::failure(
                 "renderer.vulkan_sampled_image_view_failed",
                 "failed to create Vulkan sampled image view: " +
                     std::string(vk_result_name(result)));
         }
 
-        VkSamplerCreateInfo sampler_info{};
-        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        sampler_info.magFilter = VK_FILTER_NEAREST;
-        sampler_info.minFilter = VK_FILTER_NEAREST;
-        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        sampler_info.maxAnisotropy = 1.0F;
-        sampler_info.minLod = 0.0F;
-        sampler_info.maxLod = 0.0F;
-        result = vkCreateSampler(device_, &sampler_info, nullptr, &resource.sampler);
-        if (result != VK_SUCCESS) {
+        auto sampler_status = ensure_default_sampler();
+        if (!sampler_status) {
             destroy_image_resource(resource);
+            release_staging_after_failure();
             return core::Result<rhi::RenderImageUploadStats>::failure(
-                "renderer.vulkan_sampler_failed",
-                "failed to create Vulkan sampled image sampler: " +
-                    std::string(vk_result_name(result)));
+                sampler_status.error().code, sampler_status.error().message);
         }
+        resource.sampler = default_sampler_;
+
+        status = upload_sampled_image(upload_context, staging_buffer, staging_offset, resource,
+                                      upload_serial);
+        if (!status) {
+            release_staging_after_failure();
+            destroy_image_resource(resource);
+            return core::Result<rhi::RenderImageUploadStats>::failure(status.error().code,
+                                                                      status.error().message);
+        }
+        next_upload_context_ = (next_upload_context_ + 1) % upload_contexts_.size();
 
         const rhi::RenderResourceHandle handle{next_resource_id_++};
         image_resources_.emplace(handle.value, std::move(resource));
@@ -2068,10 +2096,45 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.format = desc.format;
         stats.width = desc.width;
         stats.height = desc.height;
+        stats.array_layers = desc.array_layers;
+        stats.mip_levels = desc.mip_levels;
         stats.byte_size = bytes.size();
         stats.live_resource_count = live_resource_count();
         stats.gpu_backed = true;
         return core::Result<rhi::RenderImageUploadStats>::success(stats);
+    }
+
+    [[nodiscard]] core::Result<rhi::RenderSamplerCreateStats>
+    create_sampler(rhi::RenderSamplerDesc desc) override {
+        auto status = rhi::validate_render_sampler_desc(desc);
+        if (!status) {
+            return core::Result<rhi::RenderSamplerCreateStats>::failure(status.error().code,
+                                                                        status.error().message);
+        }
+        VkSamplerCreateInfo sampler_info{};
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = vulkan_sampler_filter(desc.mag_filter);
+        sampler_info.minFilter = vulkan_sampler_filter(desc.min_filter);
+        sampler_info.mipmapMode = vulkan_sampler_mipmap_mode(desc.mipmap_mode);
+        sampler_info.addressModeU = vulkan_sampler_address_mode(desc.address_u);
+        sampler_info.addressModeV = vulkan_sampler_address_mode(desc.address_v);
+        sampler_info.addressModeW = vulkan_sampler_address_mode(desc.address_w);
+        sampler_info.maxAnisotropy = desc.max_anisotropy;
+        sampler_info.minLod = desc.min_lod;
+        sampler_info.maxLod = desc.max_lod;
+
+        VulkanSamplerResource resource;
+        resource.desc = std::move(desc);
+        const auto result = vkCreateSampler(device_, &sampler_info, nullptr, &resource.sampler);
+        if (result != VK_SUCCESS) {
+            return core::Result<rhi::RenderSamplerCreateStats>::failure(
+                "renderer.vulkan_sampler_failed",
+                "failed to create Vulkan sampler: " + std::string(vk_result_name(result)));
+        }
+        const rhi::RenderResourceHandle handle{next_resource_id_++};
+        sampler_resources_.emplace(handle.value, std::move(resource));
+        return core::Result<rhi::RenderSamplerCreateStats>::success(
+            {backend(), handle, live_resource_count(), true});
     }
 
     [[nodiscard]] core::Result<rhi::RenderShaderModuleStats>
@@ -2130,7 +2193,12 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             desc.descriptors, [](const rhi::RenderDescriptorBinding& binding) {
                 return binding.kind == rhi::RenderDescriptorKind::sampled_texture;
             }));
-        stats.uniform_count = desc.descriptors.size() - stats.sampled_texture_count;
+        stats.storage_buffer_count = static_cast<std::size_t>(std::ranges::count_if(
+            desc.descriptors, [](const rhi::RenderDescriptorBinding& binding) {
+                return binding.kind == rhi::RenderDescriptorKind::storage_buffer;
+            }));
+        stats.uniform_count =
+            desc.descriptors.size() - stats.sampled_texture_count - stats.storage_buffer_count;
         stats.push_constant_range_count = desc.push_constant_ranges.size();
         stats.gpu_backed = true;
 
@@ -2478,6 +2546,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         std::unordered_set<std::string> materials;
         std::size_t uniform_write_count = 0;
         std::size_t sampled_texture_write_count = 0;
+        std::size_t storage_buffer_write_count = 0;
         std::vector<VkDescriptorBufferInfo> buffer_infos;
         std::vector<VkDescriptorImageInfo> image_infos;
         std::vector<VkWriteDescriptorSet> descriptor_writes;
@@ -2516,8 +2585,18 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                         "sampled texture descriptor writes must not specify a byte range");
                 }
 
+                auto sampler = image->second.sampler;
+                if (write.sampler.is_valid()) {
+                    const auto sampler_resource = sampler_resources_.find(write.sampler.value);
+                    if (sampler_resource == sampler_resources_.end()) {
+                        return core::Result<rhi::RenderDescriptorWriteStats>::failure(
+                            "renderer.unknown_descriptor_sampler",
+                            "sampled texture descriptor references an unknown sampler");
+                    }
+                    sampler = sampler_resource->second.sampler;
+                }
                 image_infos.push_back(VkDescriptorImageInfo{
-                    image->second.sampler,
+                    sampler,
                     image->second.image_view,
                     image->second.layout,
                 });
@@ -2547,10 +2626,13 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     "renderer.unknown_descriptor_resource",
                     "descriptor write resource handle is not owned by this device");
             }
-            if (resource->second.desc.usage != rhi::RenderBufferUsage::uniform) {
+            const auto required_usage = binding->kind == rhi::RenderDescriptorKind::storage_buffer
+                                            ? rhi::RenderBufferUsage::storage
+                                            : rhi::RenderBufferUsage::uniform;
+            if (resource->second.desc.usage != required_usage) {
                 return core::Result<rhi::RenderDescriptorWriteStats>::failure(
                     "renderer.invalid_descriptor_resource_usage",
-                    "uniform descriptor writes must reference a uniform buffer resource");
+                    "buffer descriptor write references an incompatible buffer usage");
             }
             if (write.byte_size == 0) {
                 return core::Result<rhi::RenderDescriptorWriteStats>::failure(
@@ -2575,12 +2657,16 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             descriptor_write.dstBinding = binding->slot;
             descriptor_write.dstArrayElement = 0;
             descriptor_write.descriptorCount = 1;
-            descriptor_write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            descriptor_write.descriptorType = vulkan_descriptor_type(binding->kind);
             descriptor_write.pBufferInfo = &buffer_infos.back();
             descriptor_writes.push_back(descriptor_write);
 
             materials.insert(write.material_id.value());
-            ++uniform_write_count;
+            if (binding->kind == rhi::RenderDescriptorKind::storage_buffer) {
+                ++storage_buffer_write_count;
+            } else {
+                ++uniform_write_count;
+            }
         }
 
         vkUpdateDescriptorSets(device_, static_cast<std::uint32_t>(descriptor_writes.size()),
@@ -2595,6 +2681,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.write_count = writes.size();
         stats.uniform_write_count = uniform_write_count;
         stats.sampled_texture_write_count = sampled_texture_write_count;
+        stats.storage_buffer_write_count = storage_buffer_write_count;
         stats.material_count = materials.size();
         stats.gpu_backed = true;
         return core::Result<rhi::RenderDescriptorWriteStats>::success(stats);
@@ -2685,6 +2772,14 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             destroy_descriptor_writes_for_resource(handle);
             retired_images_.push_back({std::move(image->second), last_submission_serial_});
             image_resources_.erase(image);
+            collect_retired_resources();
+            return core::Status::ok();
+        }
+        auto sampler = sampler_resources_.find(handle.value);
+        if (sampler != sampler_resources_.end()) {
+            destroy_descriptor_writes_for_resource(handle);
+            retired_samplers_.push_back({std::move(sampler->second), last_submission_serial_});
+            sampler_resources_.erase(sampler);
             collect_retired_resources();
             return core::Status::ok();
         }
@@ -2937,6 +3032,13 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 return false;
             }
             destroy_image_resource(retired.resource);
+            return true;
+        });
+        std::erase_if(retired_samplers_, [this, completed](auto& retired) {
+            if (retired.retire_after_submission > completed) {
+                return false;
+            }
+            destroy_sampler_resource(retired.resource);
             return true;
         });
         std::erase_if(retired_buffers_, [this, completed](auto& retired) {
@@ -3270,11 +3372,37 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         destroy_buffer_resource(staging_buffer_);
     }
 
-    void destroy_image_resource(VulkanImageResource& resource) noexcept {
-        if (resource.sampler != VK_NULL_HANDLE) {
-            vkDestroySampler(device_, resource.sampler, nullptr);
-            resource.sampler = VK_NULL_HANDLE;
+    [[nodiscard]] core::Status ensure_default_sampler() {
+        if (default_sampler_ != VK_NULL_HANDLE) {
+            return core::Status::ok();
         }
+        VkSamplerCreateInfo sampler_info{};
+        sampler_info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        sampler_info.magFilter = VK_FILTER_NEAREST;
+        sampler_info.minFilter = VK_FILTER_NEAREST;
+        sampler_info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        sampler_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+        sampler_info.maxAnisotropy = 1.0F;
+        sampler_info.minLod = 0.0F;
+        sampler_info.maxLod = VK_LOD_CLAMP_NONE;
+        const auto result = vkCreateSampler(device_, &sampler_info, nullptr, &default_sampler_);
+        if (result != VK_SUCCESS) {
+            default_sampler_ = VK_NULL_HANDLE;
+            return core::Status::failure("renderer.vulkan_sampler_failed",
+                                         "failed to create Vulkan default sampler: " +
+                                             std::string(vk_result_name(result)));
+        }
+        return core::Status::ok();
+    }
+
+    void destroy_image_resource(VulkanImageResource& resource) noexcept {
+        if (resource.owns_sampler && resource.sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device_, resource.sampler, nullptr);
+        }
+        resource.sampler = VK_NULL_HANDLE;
+        resource.owns_sampler = false;
         if (resource.image_view != VK_NULL_HANDLE) {
             vkDestroyImageView(device_, resource.image_view, nullptr);
             resource.image_view = VK_NULL_HANDLE;
@@ -3296,6 +3424,20 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             destroy_image_resource(resource);
         }
         image_resources_.clear();
+    }
+
+    void destroy_sampler_resource(VulkanSamplerResource& resource) noexcept {
+        if (resource.sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device_, resource.sampler, nullptr);
+            resource.sampler = VK_NULL_HANDLE;
+        }
+    }
+
+    void destroy_sampler_resources() noexcept {
+        for (auto& [_, resource] : sampler_resources_) {
+            destroy_sampler_resource(resource);
+        }
+        sampler_resources_.clear();
     }
 
     void destroy_frame_image_resource(VulkanFrameImageResource& resource) noexcept {
@@ -3497,7 +3639,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     void destroy_descriptor_writes_for_resource(rhi::RenderResourceHandle resource) noexcept {
         for (auto write = descriptor_write_records_.begin();
              write != descriptor_write_records_.end();) {
-            if (write->second.resource.value == resource.value) {
+            if (write->second.resource.value == resource.value ||
+                write->second.sampler.value == resource.value) {
                 write = descriptor_write_records_.erase(write);
             } else {
                 ++write;
@@ -3681,35 +3824,30 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     }
 
-    [[nodiscard]] core::Status upload_sampled_image(VkBuffer staging_buffer,
-                                                    VulkanImageResource& resource) {
-        auto result = vkResetFences(device_, 1, &fence_);
-        if (result != VK_SUCCESS) {
-            return core::Status::failure("renderer.vulkan_reset_fence_failed",
-                                         "failed to reset Vulkan fence: " +
-                                             std::string(vk_result_name(result)));
-        }
-
-        result = vkResetCommandBuffer(command_buffer_, 0);
-        if (result != VK_SUCCESS) {
-            return core::Status::failure("renderer.vulkan_reset_command_buffer_failed",
-                                         "failed to reset Vulkan command buffer: " +
-                                             std::string(vk_result_name(result)));
-        }
-
+    [[nodiscard]] core::Status upload_sampled_image(VulkanUploadContext& upload_context,
+                                                    VkBuffer staging_buffer,
+                                                    VkDeviceSize staging_offset,
+                                                    VulkanImageResource& resource,
+                                                    std::uint64_t upload_serial) {
+        const auto commands = upload_context.transfer_commands;
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        result = vkBeginCommandBuffer(command_buffer_, &begin_info);
+        auto result = vkBeginCommandBuffer(commands, &begin_info);
         if (result != VK_SUCCESS) {
-            return core::Status::failure("renderer.vulkan_begin_command_buffer_failed",
-                                         "failed to begin Vulkan command buffer: " +
+            return core::Status::failure("renderer.vulkan_image_upload_begin_failed",
+                                         "failed to begin Vulkan image upload commands: " +
                                              std::string(vk_result_name(result)));
         }
-        begin_debug_label(command_buffer_, "Sampled image upload", 0.92F, 0.56F, 0.16F);
+        if (upload_context.timestamp_queries != VK_NULL_HANDLE) {
+            vkCmdResetQueryPool(commands, upload_context.timestamp_queries, 0, 2);
+            vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                upload_context.timestamp_queries, 0);
+        }
+        begin_debug_label(commands, "Sampled image upload", 0.92F, 0.56F, 0.16F);
 
         const VkImageSubresourceRange image_range{
-            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1,
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, resource.desc.mip_levels, 0, resource.desc.array_layers,
         };
 
         VkImageMemoryBarrier to_transfer{};
@@ -3722,22 +3860,33 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         to_transfer.image = resource.image;
         to_transfer.subresourceRange = image_range;
-        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+        vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                              &to_transfer);
 
-        VkBufferImageCopy copy_region{};
-        copy_region.bufferOffset = 0;
-        copy_region.bufferRowLength = 0;
-        copy_region.bufferImageHeight = 0;
-        copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        copy_region.imageSubresource.mipLevel = 0;
-        copy_region.imageSubresource.baseArrayLayer = 0;
-        copy_region.imageSubresource.layerCount = 1;
-        copy_region.imageOffset = VkOffset3D{0, 0, 0};
-        copy_region.imageExtent = VkExtent3D{resource.desc.width, resource.desc.height, 1};
-        vkCmdCopyBufferToImage(command_buffer_, staging_buffer, resource.image,
-                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy_region);
+        std::vector<VkBufferImageCopy> copy_regions;
+        copy_regions.reserve(resource.desc.mip_levels);
+        VkDeviceSize buffer_offset = staging_offset;
+        auto mip_width = resource.desc.width;
+        auto mip_height = resource.desc.height;
+        const auto bytes_per_pixel = rhi::render_image_format_bytes_per_pixel(resource.desc.format);
+        for (std::uint32_t mip = 0; mip < resource.desc.mip_levels; ++mip) {
+            VkBufferImageCopy copy_region{};
+            copy_region.bufferOffset = buffer_offset;
+            copy_region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            copy_region.imageSubresource.mipLevel = mip;
+            copy_region.imageSubresource.baseArrayLayer = 0;
+            copy_region.imageSubresource.layerCount = resource.desc.array_layers;
+            copy_region.imageExtent = VkExtent3D{mip_width, mip_height, 1};
+            copy_regions.push_back(copy_region);
+            buffer_offset += static_cast<VkDeviceSize>(mip_width) * mip_height *
+                             resource.desc.array_layers * bytes_per_pixel;
+            mip_width = std::max(1U, mip_width / 2U);
+            mip_height = std::max(1U, mip_height / 2U);
+        }
+        vkCmdCopyBufferToImage(
+            commands, staging_buffer, resource.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            static_cast<std::uint32_t>(copy_regions.size()), copy_regions.data());
 
         VkImageMemoryBarrier to_shader_read{};
         to_shader_read.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -3749,38 +3898,38 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         to_shader_read.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         to_shader_read.image = resource.image;
         to_shader_read.subresourceRange = image_range;
-        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        vkCmdPipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 0, nullptr, 0, nullptr, 1, &to_shader_read);
-        end_debug_label(command_buffer_);
+        if (upload_context.timestamp_queries != VK_NULL_HANDLE) {
+            vkCmdWriteTimestamp(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                upload_context.timestamp_queries, 1);
+        }
+        end_debug_label(commands);
 
-        result = vkEndCommandBuffer(command_buffer_);
+        result = vkEndCommandBuffer(commands);
         if (result != VK_SUCCESS) {
-            return core::Status::failure("renderer.vulkan_end_command_buffer_failed",
-                                         "failed to end Vulkan command buffer: " +
+            return core::Status::failure("renderer.vulkan_image_upload_end_failed",
+                                         "failed to end Vulkan image upload commands: " +
                                              std::string(vk_result_name(result)));
         }
 
         VkSubmitInfo submit_info{};
         submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &command_buffer_;
-        result = vkQueueSubmit(queue_, 1, &submit_info, fence_);
+        submit_info.pCommandBuffers = &commands;
+        result = vkQueueSubmit(queue_, 1, &submit_info, upload_context.completion_fence);
         if (result != VK_SUCCESS) {
             return core::Status::failure("renderer.vulkan_queue_submit_failed",
                                          "failed to submit Vulkan sampled image upload: " +
                                              std::string(vk_result_name(result)));
         }
 
-        result = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
-                                 std::numeric_limits<std::uint64_t>::max());
-        if (result != VK_SUCCESS) {
-            return core::Status::failure("renderer.vulkan_wait_fence_failed",
-                                         "failed to wait for Vulkan sampled image upload: " +
-                                             std::string(vk_result_name(result)));
-        }
-
+        last_submission_serial_ = upload_serial;
+        upload_context.submission_serial = upload_serial;
+        upload_context.in_flight = true;
+        upload_context.timing_pending = upload_context.timestamp_queries != VK_NULL_HANDLE;
         resource.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         return core::Status::ok();
     }
@@ -4421,6 +4570,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         }
 
         const auto has_draws = !frame.pass_commands.empty();
+        std::size_t frame_pipeline_bind_count = 0;
         const rhi::RenderPassCommands* pass_commands =
             has_draws ? &frame.pass_commands.front() : nullptr;
         VulkanGraphicsPipelineResource* first_pipeline = nullptr;
@@ -4563,21 +4713,27 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             scissor.extent = VkExtent2D{target_extent.width, target_extent.height};
             vkCmdSetScissor(frame_commands, 0, 1, &scissor);
 
+            VkPipeline bound_pipeline = VK_NULL_HANDLE;
+            std::size_t pipeline_bind_count = 0;
             for (const auto& draw : pass_commands->draws) {
                 auto& pipeline = graphics_pipelines_.at(draw.pipeline.value);
                 auto& vertex = buffer_resources_.at(draw.vertex_buffer.value);
                 auto& index = buffer_resources_.at(draw.index_buffer.value);
                 auto& layout = pipeline_layouts_.at(pipeline.desc.material_id.value());
-                vkCmdBindPipeline(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                  pipeline.pipeline);
+                if (bound_pipeline != pipeline.pipeline) {
+                    bound_pipeline = pipeline.pipeline;
+                    ++pipeline_bind_count;
+                    vkCmdBindPipeline(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      pipeline.pipeline);
+                    if (layout.descriptor_set != VK_NULL_HANDLE) {
+                        vkCmdBindDescriptorSets(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                layout.pipeline_layout, 0, 1,
+                                                &layout.descriptor_set, 0, nullptr);
+                    }
+                }
                 const VkDeviceSize vertex_buffer_offset = 0;
                 vkCmdBindVertexBuffers(frame_commands, 0, 1, &vertex.buffer, &vertex_buffer_offset);
                 vkCmdBindIndexBuffer(frame_commands, index.buffer, 0, VK_INDEX_TYPE_UINT32);
-                if (layout.descriptor_set != VK_NULL_HANDLE) {
-                    vkCmdBindDescriptorSets(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            layout.pipeline_layout, 0, 1, &layout.descriptor_set, 0,
-                                            nullptr);
-                }
                 const rhi::ChunkPushConstants constants{
                     frame.camera.view_projection,
                     {draw.camera_relative_origin.x, draw.camera_relative_origin.y,
@@ -4589,6 +4745,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                                  draw.first_index, draw.vertex_offset, draw.first_instance);
             }
             vkCmdEndRenderPass(frame_commands);
+            frame_pipeline_bind_count = pipeline_bind_count;
         } else {
             VkImageMemoryBarrier color_to_clear{};
             color_to_clear.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -4806,6 +4963,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.transition_count = execution_plan.value().transitions.size();
         stats.synchronization_barrier_count = execution_plan.value().transitions.size();
         stats.submitted_synchronization_barrier_count = submitted_barrier_count;
+        stats.pipeline_bind_count = frame_pipeline_bind_count;
         stats.cpu_command_recording_ms = command_recording_ms;
         stats.cpu_gpu_wait_ms = gpu_wait_ms;
         attach_gpu_timing(stats, gpu_timing, frame_index);
@@ -5300,11 +5458,14 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     void* staging_mapped_ = nullptr;
     StagingRingAllocator staging_ring_{32U * 1024U * 1024U};
     std::unordered_map<std::uint64_t, VulkanImageResource> image_resources_;
+    VkSampler default_sampler_ = VK_NULL_HANDLE;
+    std::unordered_map<std::uint64_t, VulkanSamplerResource> sampler_resources_;
     std::unordered_map<std::uint64_t, VulkanShaderModuleResource> shader_modules_;
     std::unordered_map<std::uint64_t, VulkanComputePipelineResource> compute_pipelines_;
     std::unordered_map<std::uint64_t, VulkanGraphicsPipelineResource> graphics_pipelines_;
     std::vector<RetiredVulkanResource<VulkanBufferResource>> retired_buffers_;
     std::vector<RetiredVulkanResource<VulkanImageResource>> retired_images_;
+    std::vector<RetiredVulkanResource<VulkanSamplerResource>> retired_samplers_;
     std::vector<RetiredVulkanResource<VulkanShaderModuleResource>> retired_shader_modules_;
     std::vector<RetiredVulkanResource<VulkanComputePipelineResource>> retired_compute_pipelines_;
     std::vector<RetiredVulkanResource<VulkanGraphicsPipelineResource>> retired_graphics_pipelines_;

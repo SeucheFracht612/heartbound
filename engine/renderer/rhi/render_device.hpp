@@ -48,6 +48,7 @@ enum class RenderBufferMemory {
 
 enum class RenderImageFormat {
     rgba8_unorm,
+    rgba8_srgb,
     d32_sfloat,
     d32_sfloat_s8_uint,
     d24_unorm_s8_uint,
@@ -55,8 +56,24 @@ enum class RenderImageFormat {
 
 enum class RenderDescriptorKind {
     sampled_texture,
+    storage_buffer,
     uniform_scalar,
     uniform_color,
+};
+
+enum class RenderSamplerFilter : std::uint8_t {
+    nearest,
+    linear,
+};
+
+enum class RenderSamplerMipmapMode : std::uint8_t {
+    nearest,
+    linear,
+};
+
+enum class RenderSamplerAddressMode : std::uint8_t {
+    repeat,
+    clamp_to_edge,
 };
 
 enum class RenderShaderStage {
@@ -145,6 +162,7 @@ struct RenderFrameStats {
     std::size_t submitted_synchronization_barrier_count = 0;
     std::size_t draw_count = 0;
     std::size_t indexed_draw_count = 0;
+    std::size_t pipeline_bind_count = 0;
     std::size_t total_indices = 0;
     double cpu_command_recording_ms = 0.0;
     double cpu_gpu_wait_ms = 0.0;
@@ -197,6 +215,28 @@ struct RenderImageDesc {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::string debug_name;
+    std::uint32_t array_layers = 1;
+    std::uint32_t mip_levels = 1;
+};
+
+struct RenderSamplerDesc {
+    RenderSamplerFilter min_filter = RenderSamplerFilter::nearest;
+    RenderSamplerFilter mag_filter = RenderSamplerFilter::nearest;
+    RenderSamplerMipmapMode mipmap_mode = RenderSamplerMipmapMode::nearest;
+    RenderSamplerAddressMode address_u = RenderSamplerAddressMode::repeat;
+    RenderSamplerAddressMode address_v = RenderSamplerAddressMode::repeat;
+    RenderSamplerAddressMode address_w = RenderSamplerAddressMode::repeat;
+    float max_anisotropy = 1.0F;
+    float min_lod = 0.0F;
+    float max_lod = 0.0F;
+    std::string debug_name;
+};
+
+struct RenderSamplerCreateStats {
+    RenderBackend backend = RenderBackend::headless;
+    RenderResourceHandle handle;
+    std::size_t live_resource_count = 0;
+    bool gpu_backed = false;
 };
 
 struct RenderUploadStats {
@@ -214,6 +254,8 @@ struct RenderImageUploadStats {
     RenderImageFormat format = RenderImageFormat::rgba8_unorm;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
+    std::uint32_t array_layers = 1;
+    std::uint32_t mip_levels = 1;
     std::size_t byte_size = 0;
     std::size_t live_resource_count = 0;
     bool gpu_backed = false;
@@ -247,6 +289,7 @@ struct RenderPipelineLayoutStats {
     std::uint32_t pipeline_version = 0;
     std::size_t descriptor_count = 0;
     std::size_t sampled_texture_count = 0;
+    std::size_t storage_buffer_count = 0;
     std::size_t uniform_count = 0;
     std::size_t push_constant_range_count = 0;
     std::size_t bound_pipeline_count = 0;
@@ -376,6 +419,15 @@ struct RenderDescriptorWrite {
     RenderResourceHandle resource;
     std::size_t byte_offset = 0;
     std::size_t byte_size = 0;
+    RenderResourceHandle sampler;
+
+    RenderDescriptorWrite() = default;
+    RenderDescriptorWrite(core::PrototypeId material, std::string binding,
+                          RenderResourceHandle resource_handle, std::size_t offset = 0,
+                          std::size_t size = 0, RenderResourceHandle sampler_handle = {})
+        : material_id(std::move(material)), binding_name(std::move(binding)),
+          resource(resource_handle), byte_offset(offset), byte_size(size), sampler(sampler_handle) {
+    }
 };
 
 struct RenderDescriptorWriteStats {
@@ -383,6 +435,7 @@ struct RenderDescriptorWriteStats {
     std::size_t write_count = 0;
     std::size_t uniform_write_count = 0;
     std::size_t sampled_texture_write_count = 0;
+    std::size_t storage_buffer_write_count = 0;
     std::size_t material_count = 0;
     bool gpu_backed = false;
 };
@@ -457,6 +510,7 @@ struct RenderDeviceCapabilities {
     bool supports_descriptor_writes = false;
     bool supports_buffer_upload = false;
     bool supports_image_upload = false;
+    bool supports_sampler_cache = false;
     bool supports_draw_binding = false;
     bool supports_frame_submission = false;
     bool supports_depth = false;
@@ -476,6 +530,7 @@ struct RenderBackendCapabilities {
     bool supports_descriptor_writes = false;
     bool supports_buffer_upload = false;
     bool supports_image_upload = false;
+    bool supports_sampler_cache = false;
     bool supports_draw_binding = false;
     bool supports_frame_submission = false;
     bool supports_depth = false;
@@ -513,6 +568,8 @@ class IRenderDevice {
     upload_buffer(RenderBufferDesc desc, std::span<const std::byte> bytes) = 0;
     [[nodiscard]] virtual core::Result<RenderImageUploadStats>
     upload_image(RenderImageDesc desc, std::span<const std::byte> bytes) = 0;
+    [[nodiscard]] virtual core::Result<RenderSamplerCreateStats>
+    create_sampler(RenderSamplerDesc desc) = 0;
     [[nodiscard]] virtual core::Result<RenderShaderModuleStats>
     create_shader_module(RenderShaderModuleDesc desc,
                          std::span<const std::uint32_t> spirv_words) = 0;
@@ -542,6 +599,7 @@ validate_render_buffer_writes_shape(std::span<const RenderBufferWrite> writes);
                                                          std::span<const std::byte> bytes);
 [[nodiscard]] core::Status validate_render_image_upload(const RenderImageDesc& desc,
                                                         std::span<const std::byte> bytes);
+[[nodiscard]] core::Status validate_render_sampler_desc(const RenderSamplerDesc& desc);
 [[nodiscard]] core::Status
 validate_render_shader_module_upload(const RenderShaderModuleDesc& desc,
                                      std::span<const std::uint32_t> spirv_words);
@@ -568,6 +626,11 @@ validate_render_mesh_bindings_shape(std::span<const RenderMeshBinding> draws);
 [[nodiscard]] std::string_view render_image_format_name(RenderImageFormat format) noexcept;
 [[nodiscard]] std::size_t render_image_format_bytes_per_pixel(RenderImageFormat format) noexcept;
 [[nodiscard]] std::string_view render_descriptor_kind_name(RenderDescriptorKind kind) noexcept;
+[[nodiscard]] std::string_view render_sampler_filter_name(RenderSamplerFilter value) noexcept;
+[[nodiscard]] std::string_view
+render_sampler_mipmap_mode_name(RenderSamplerMipmapMode value) noexcept;
+[[nodiscard]] std::string_view
+render_sampler_address_mode_name(RenderSamplerAddressMode value) noexcept;
 [[nodiscard]] std::string_view render_shader_stage_name(RenderShaderStage stage) noexcept;
 [[nodiscard]] std::string_view
 render_primitive_topology_name(RenderPrimitiveTopology value) noexcept;

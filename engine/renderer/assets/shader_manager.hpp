@@ -99,7 +99,7 @@ class ShaderManager {
     [[nodiscard]] core::Result<LoadedProgram> load_program(ShaderProgramDesc desc);
     [[nodiscard]] ProgramRecord* find_record(ShaderProgramHandle handle) noexcept;
     [[nodiscard]] const ProgramRecord* find_record(ShaderProgramHandle handle) const noexcept;
-    void refresh_view(ProgramRecord& record) noexcept;
+    void refresh_view(ProgramRecord& record);
     void update_stats() noexcept;
 
     rhi::IRenderDevice& device_;

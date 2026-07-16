@@ -268,7 +268,7 @@ ShaderManager::find_record(ShaderProgramHandle handle) const noexcept {
     return record.occupied && record.generation == handle.generation ? &record : nullptr;
 }
 
-void ShaderManager::refresh_view(ProgramRecord& record) noexcept {
+void ShaderManager::refresh_view(ProgramRecord& record) {
     record.view.id = record.loaded.desc.id;
     record.view.revision = record.revision;
     record.view.interface = record.loaded.desc.interface;

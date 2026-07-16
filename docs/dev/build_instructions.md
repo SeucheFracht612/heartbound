@@ -99,15 +99,20 @@ Run the retained Milestone 2 terrain renderer:
 ```
 
 This application requires an X11 display and a Vulkan device that can present to it. It creates a
-known nine-chunk far-world terrain set and exercises the retained `Renderer`, budgeted synchronous
-meshing/upload queues, GPU chunk cache, frustum culling, and unified indexed-draw frame path. Use
+known nine-chunk far-world terrain set and exercises the retained `Renderer`, budgeted asynchronous
+meshing, staged upload queues, GPU chunk cache, frustum culling, and unified indexed-draw frame
+path. Use
 WASD to move, Space to rise, hold the right mouse button to look, and press Escape or close the
 window to exit. Resizing and minimizing the window preserve resident chunk buffers. If
 `VK_LAYER_KHRONOS_validation` is installed, it is enabled automatically; otherwise startup
 continues with a visible warning.
 
 The checked-in shader sources and production SPIR-V are under
-`apps/render_smoke/assets/shaders`. To regenerate and validate them with external Khronos tools:
+`apps/render_smoke/assets/shaders`. CMake detects `glslangValidator` (or the newer `glslang` binary)
+and, when available, recompiles
+the GLSL into the build tree whenever a source changes. Otherwise it stages the checked-in SPIR-V,
+so release builds never require a runtime shader compiler. To regenerate and validate the
+checked-in artifacts with external Khronos tools:
 
 ```bash
 glslangValidator -V apps/render_smoke/assets/shaders/terrain.vert -o apps/render_smoke/assets/shaders/terrain.vert.spv
@@ -116,8 +121,9 @@ spirv-val apps/render_smoke/assets/shaders/terrain.vert.spv
 spirv-val apps/render_smoke/assets/shaders/terrain.frag.spv
 ```
 
-The build copies these assets beside `heartstead_render_smoke`, and the application loads and
-checks the SPIR-V header before creating Vulkan shader modules.
+Both renderer applications stage the selected artifacts beside their executable. The runtime loads
+and validates the SPIR-V header before creating Vulkan shader modules; it never compiles shader
+source during normal rendering.
 
 Run a deterministic renderer benchmark headlessly:
 

@@ -6,11 +6,4 @@ target_compile_definitions(
     HEARTSTEAD_RENDER_SMOKE_ASSET_DIR="$<TARGET_FILE_DIR:heartstead_render_smoke>/assets"
 )
 heartstead_configure_target(heartstead_render_smoke)
-
-add_custom_command(
-  TARGET heartstead_render_smoke
-  POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/assets"
-          "$<TARGET_FILE_DIR:heartstead_render_smoke>/assets"
-  COMMENT "Copying render smoke shader assets"
-)
+heartstead_attach_terrain_shader_assets(heartstead_render_smoke)

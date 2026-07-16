@@ -42,9 +42,14 @@ struct RendererStats {
     std::uint32_t culled_chunks = 0;
     std::uint32_t drawn_chunks = 0;
     std::uint32_t draw_calls = 0;
+    std::uint32_t pipeline_switches = 0;
+    std::uint32_t resident_textures = 0;
+    std::uint32_t runtime_materials = 0;
+    std::uint32_t resident_pipelines = 0;
 
     std::uint64_t vertices = 0;
     std::uint64_t triangles = 0;
+    std::uint64_t resident_texture_bytes = 0;
     std::uint64_t resident_mesh_bytes = 0;
     std::uint64_t gpu_arena_capacity_bytes = 0;
     std::uint64_t gpu_arena_used_bytes = 0;

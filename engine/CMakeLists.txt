@@ -63,9 +63,13 @@ target_sources(
     replay/command_replay.cpp
     renderer/benchmark/benchmark_scene.cpp
     renderer/benchmark/benchmark_statistics.cpp
+    renderer/assets/sampler_cache.cpp
     renderer/assets/shader_manager.cpp
+    renderer/assets/texture_manager.cpp
     renderer/materials/material_asset_validation.cpp
+    renderer/materials/block_render_table.cpp
     renderer/materials/material_definition.cpp
+    renderer/materials/material_runtime_cache.cpp
     renderer/materials/material_pipeline_layout.cpp
     renderer/materials/pipeline_cache.cpp
     renderer/materials/material_prototype_loader.cpp
@@ -206,9 +210,13 @@ target_sources(
       renderer/benchmark/benchmark_scene.hpp
       renderer/benchmark/benchmark_statistics.hpp
       renderer/assets/render_asset_handles.hpp
+      renderer/assets/sampler_cache.hpp
       renderer/assets/shader_manager.hpp
+      renderer/assets/texture_manager.hpp
       renderer/materials/material_asset_validation.hpp
+      renderer/materials/block_render_table.hpp
       renderer/materials/material_definition.hpp
+      renderer/materials/material_runtime_cache.hpp
       renderer/materials/material_pipeline_layout.hpp
       renderer/materials/pipeline_cache.hpp
       renderer/materials/material_prototype_loader.hpp

@@ -76,6 +76,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
         result.supports_descriptor_writes = true;
         result.supports_buffer_upload = true;
         result.supports_image_upload = true;
+        result.supports_sampler_cache = true;
         result.supports_draw_binding = true;
         result.supports_frame_submission = true;
         result.supports_depth = true;
@@ -100,8 +101,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
     }
 
     [[nodiscard]] std::size_t live_resource_count() const noexcept override {
-        return resources_.size() + image_resources_.size() + shader_modules_.size() +
-               compute_pipelines_.size() + graphics_pipelines_.size();
+        return resources_.size() + image_resources_.size() + sampler_resources_.size() +
+               shader_modules_.size() + compute_pipelines_.size() + graphics_pipelines_.size();
     }
 
     [[nodiscard]] core::Status resize(RenderExtent extent) override {
@@ -154,6 +155,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.synchronization_barrier_count = execution_plan.value().transitions.size();
         stats.submitted_synchronization_barrier_count = execution_plan.value().transitions.size();
 
+        RenderResourceHandle bound_pipeline;
         for (const auto& pass_commands : frame.pass_commands) {
             const auto& pass = frame.plan.passes[pass_commands.pass_index];
             for (const auto& draw : pass_commands.draws) {
@@ -231,6 +233,10 @@ class HeadlessRenderDevice final : public IRenderDevice {
                         "render draw pass targets do not match its graphics pipeline");
                 }
 
+                if (bound_pipeline != draw.pipeline) {
+                    bound_pipeline = draw.pipeline;
+                    ++stats.pipeline_bind_count;
+                }
                 ++stats.draw_count;
                 ++stats.indexed_draw_count;
                 stats.total_indices += draw.index_count;
@@ -341,10 +347,25 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.format = desc.format;
         stats.width = desc.width;
         stats.height = desc.height;
+        stats.array_layers = desc.array_layers;
+        stats.mip_levels = desc.mip_levels;
         stats.byte_size = bytes.size();
         stats.live_resource_count = live_resource_count();
         stats.gpu_backed = false;
         return core::Result<RenderImageUploadStats>::success(stats);
+    }
+
+    [[nodiscard]] core::Result<RenderSamplerCreateStats>
+    create_sampler(RenderSamplerDesc desc) override {
+        auto status = validate_render_sampler_desc(desc);
+        if (!status) {
+            return core::Result<RenderSamplerCreateStats>::failure(status.error().code,
+                                                                   status.error().message);
+        }
+        const RenderResourceHandle handle{next_resource_id_++};
+        sampler_resources_.emplace(handle.value, std::move(desc));
+        return core::Result<RenderSamplerCreateStats>::success(
+            {backend(), handle, live_resource_count(), false});
     }
 
     [[nodiscard]] core::Result<RenderShaderModuleStats>
@@ -386,7 +407,12 @@ class HeadlessRenderDevice final : public IRenderDevice {
             std::ranges::count_if(desc.descriptors, [](const RenderDescriptorBinding& binding) {
                 return binding.kind == RenderDescriptorKind::sampled_texture;
             }));
-        stats.uniform_count = desc.descriptors.size() - stats.sampled_texture_count;
+        stats.storage_buffer_count = static_cast<std::size_t>(
+            std::ranges::count_if(desc.descriptors, [](const RenderDescriptorBinding& binding) {
+                return binding.kind == RenderDescriptorKind::storage_buffer;
+            }));
+        stats.uniform_count =
+            desc.descriptors.size() - stats.sampled_texture_count - stats.storage_buffer_count;
         stats.push_constant_range_count = desc.push_constant_ranges.size();
         stats.gpu_backed = false;
 
@@ -510,6 +536,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
         std::unordered_set<std::string> materials;
         std::size_t uniform_write_count = 0;
         std::size_t sampled_texture_write_count = 0;
+        std::size_t storage_buffer_write_count = 0;
         for (const auto& write : writes) {
             const auto layout = pipeline_layouts_.find(write.material_id.value());
             if (layout == pipeline_layouts_.end()) {
@@ -540,6 +567,11 @@ class HeadlessRenderDevice final : public IRenderDevice {
                         "renderer.invalid_sampled_texture_descriptor_range",
                         "sampled texture descriptor writes must not specify a byte range");
                 }
+                if (write.sampler.is_valid() && !sampler_resources_.contains(write.sampler.value)) {
+                    return core::Result<RenderDescriptorWriteStats>::failure(
+                        "renderer.unknown_descriptor_sampler",
+                        "sampled texture descriptor references an unknown sampler");
+                }
                 materials.insert(write.material_id.value());
                 ++sampled_texture_write_count;
                 continue;
@@ -556,10 +588,13 @@ class HeadlessRenderDevice final : public IRenderDevice {
                     "renderer.unknown_descriptor_resource",
                     "descriptor write resource handle is not owned by this device");
             }
-            if (resource->second.usage != RenderBufferUsage::uniform) {
+            const auto required_usage = binding->kind == RenderDescriptorKind::storage_buffer
+                                            ? RenderBufferUsage::storage
+                                            : RenderBufferUsage::uniform;
+            if (resource->second.usage != required_usage) {
                 return core::Result<RenderDescriptorWriteStats>::failure(
                     "renderer.invalid_descriptor_resource_usage",
-                    "uniform descriptor writes must reference a uniform buffer resource");
+                    "buffer descriptor write references an incompatible buffer usage");
             }
             if (write.byte_size == 0) {
                 return core::Result<RenderDescriptorWriteStats>::failure(
@@ -574,7 +609,11 @@ class HeadlessRenderDevice final : public IRenderDevice {
             }
 
             materials.insert(write.material_id.value());
-            ++uniform_write_count;
+            if (binding->kind == RenderDescriptorKind::storage_buffer) {
+                ++storage_buffer_write_count;
+            } else {
+                ++uniform_write_count;
+            }
         }
 
         for (const auto& write : writes) {
@@ -587,6 +626,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.write_count = writes.size();
         stats.uniform_write_count = uniform_write_count;
         stats.sampled_texture_write_count = sampled_texture_write_count;
+        stats.storage_buffer_write_count = storage_buffer_write_count;
         stats.material_count = materials.size();
         stats.gpu_backed = false;
         return core::Result<RenderDescriptorWriteStats>::success(stats);
@@ -665,6 +705,10 @@ class HeadlessRenderDevice final : public IRenderDevice {
             destroy_descriptor_writes_for_resource(handle);
             return core::Status::ok();
         }
+        if (sampler_resources_.erase(handle.value) != 0) {
+            destroy_descriptor_writes_for_resource(handle);
+            return core::Status::ok();
+        }
         if (shader_modules_.erase(handle.value) != 0) {
             destroy_compute_pipelines_for_shader(handle);
             destroy_graphics_pipelines_for_shader(handle);
@@ -724,7 +768,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
     void destroy_descriptor_writes_for_resource(RenderResourceHandle resource) {
         for (auto write = descriptor_writes_.begin(); write != descriptor_writes_.end();) {
-            if (write->second.resource.value == resource.value) {
+            if (write->second.resource.value == resource.value ||
+                write->second.sampler.value == resource.value) {
                 write = descriptor_writes_.erase(write);
             } else {
                 ++write;
@@ -749,6 +794,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
     std::uint64_t next_resource_id_ = 1;
     std::unordered_map<std::uint64_t, RenderBufferDesc> resources_;
     std::unordered_map<std::uint64_t, RenderImageDesc> image_resources_;
+    std::unordered_map<std::uint64_t, RenderSamplerDesc> sampler_resources_;
     std::unordered_map<std::uint64_t, RenderShaderModuleDesc> shader_modules_;
     std::unordered_map<std::uint64_t, RenderComputePipelineDesc> compute_pipelines_;
     std::unordered_map<std::uint64_t, RenderGraphicsPipelineDesc> graphics_pipelines_;
@@ -864,23 +910,38 @@ core::Status validate_render_buffer_upload(const RenderBufferDesc& desc,
 
 core::Status validate_render_image_upload(const RenderImageDesc& desc,
                                           std::span<const std::byte> bytes) {
-    if (desc.width == 0 || desc.height == 0) {
-        return core::Status::failure("renderer.invalid_image_extent",
-                                     "render image width and height must be non-zero");
+    if (desc.width == 0 || desc.height == 0 || desc.array_layers == 0 || desc.mip_levels == 0) {
+        return core::Status::failure(
+            "renderer.invalid_image_extent",
+            "render image dimensions, layers, and mip levels must be non-zero");
     }
     const auto bytes_per_pixel = render_image_format_bytes_per_pixel(desc.format);
     if (bytes_per_pixel == 0) {
         return core::Status::failure("renderer.unknown_image_format",
                                      "unknown render image format");
     }
-    if (desc.width > std::numeric_limits<std::size_t>::max() / bytes_per_pixel ||
-        desc.height > std::numeric_limits<std::size_t>::max() /
-                          (static_cast<std::size_t>(desc.width) * bytes_per_pixel)) {
-        return core::Status::failure("renderer.image_upload_too_large",
-                                     "render image upload byte size would overflow");
+    std::uint32_t maximum_mip_levels = 1;
+    for (auto dimension = std::max(desc.width, desc.height); dimension > 1; dimension /= 2) {
+        ++maximum_mip_levels;
     }
-    const auto expected_size = static_cast<std::size_t>(desc.width) *
-                               static_cast<std::size_t>(desc.height) * bytes_per_pixel;
+    if (desc.mip_levels > maximum_mip_levels) {
+        return core::Status::failure("renderer.invalid_image_mip_count",
+                                     "render image has more mip levels than its extent permits");
+    }
+    std::size_t expected_size = 0;
+    auto mip_width = desc.width;
+    auto mip_height = desc.height;
+    for (std::uint32_t mip = 0; mip < desc.mip_levels; ++mip) {
+        const auto texel_count = static_cast<std::uint64_t>(mip_width) * mip_height;
+        const auto mip_bytes = texel_count * desc.array_layers * bytes_per_pixel;
+        if (mip_bytes > std::numeric_limits<std::size_t>::max() - expected_size) {
+            return core::Status::failure("renderer.image_upload_too_large",
+                                         "render image upload byte size would overflow");
+        }
+        expected_size += static_cast<std::size_t>(mip_bytes);
+        mip_width = std::max(1U, mip_width / 2U);
+        mip_height = std::max(1U, mip_height / 2U);
+    }
     if (bytes.empty()) {
         return core::Status::failure("renderer.empty_image_upload",
                                      "render image upload bytes must be non-empty");
@@ -952,6 +1013,7 @@ core::Status validate_render_pipeline_layout_shape(const RenderPipelineLayoutDes
         }
         switch (binding.kind) {
         case RenderDescriptorKind::sampled_texture:
+        case RenderDescriptorKind::storage_buffer:
         case RenderDescriptorKind::uniform_scalar:
         case RenderDescriptorKind::uniform_color:
             break;
@@ -1158,6 +1220,11 @@ validate_render_descriptor_writes_shape(std::span<const RenderDescriptorWrite> w
             return core::Status::failure("renderer.invalid_descriptor_write_resource",
                                          "descriptor write must reference a valid resource handle");
         }
+        if (write.sampler.is_valid() && (write.byte_offset != 0 || write.byte_size != 0)) {
+            return core::Status::failure(
+                "renderer.invalid_descriptor_sampler_range",
+                "descriptor writes with a sampler cannot specify a buffer range");
+        }
     }
     return core::Status::ok();
 }
@@ -1234,6 +1301,7 @@ RenderBackendCapabilities render_backend_capabilities(RenderBackend backend) noe
         capabilities.supports_descriptor_writes = true;
         capabilities.supports_buffer_upload = true;
         capabilities.supports_image_upload = true;
+        capabilities.supports_sampler_cache = true;
         capabilities.supports_draw_binding = true;
         capabilities.supports_frame_submission = true;
         capabilities.supports_depth = true;
@@ -1256,6 +1324,7 @@ RenderBackendCapabilities render_backend_capabilities(RenderBackend backend) noe
         capabilities.supports_descriptor_writes = true;
         capabilities.supports_buffer_upload = true;
         capabilities.supports_image_upload = true;
+        capabilities.supports_sampler_cache = true;
         capabilities.supports_draw_binding = true;
         capabilities.supports_frame_submission = true;
         capabilities.supports_depth = true;
@@ -1322,6 +1391,8 @@ std::string_view render_image_format_name(RenderImageFormat format) noexcept {
     switch (format) {
     case RenderImageFormat::rgba8_unorm:
         return "rgba8_unorm";
+    case RenderImageFormat::rgba8_srgb:
+        return "rgba8_srgb";
     case RenderImageFormat::d32_sfloat:
         return "d32_sfloat";
     case RenderImageFormat::d32_sfloat_s8_uint:
@@ -1335,6 +1406,7 @@ std::string_view render_image_format_name(RenderImageFormat format) noexcept {
 std::size_t render_image_format_bytes_per_pixel(RenderImageFormat format) noexcept {
     switch (format) {
     case RenderImageFormat::rgba8_unorm:
+    case RenderImageFormat::rgba8_srgb:
         return 4;
     case RenderImageFormat::d32_sfloat:
         return 4;
@@ -1350,12 +1422,58 @@ std::string_view render_descriptor_kind_name(RenderDescriptorKind kind) noexcept
     switch (kind) {
     case RenderDescriptorKind::sampled_texture:
         return "sampled_texture";
+    case RenderDescriptorKind::storage_buffer:
+        return "storage_buffer";
     case RenderDescriptorKind::uniform_scalar:
         return "uniform_scalar";
     case RenderDescriptorKind::uniform_color:
         return "uniform_color";
     }
     return "unknown";
+}
+
+std::string_view render_sampler_filter_name(RenderSamplerFilter value) noexcept {
+    switch (value) {
+    case RenderSamplerFilter::nearest:
+        return "nearest";
+    case RenderSamplerFilter::linear:
+        return "linear";
+    }
+    return "unknown";
+}
+
+std::string_view render_sampler_mipmap_mode_name(RenderSamplerMipmapMode value) noexcept {
+    switch (value) {
+    case RenderSamplerMipmapMode::nearest:
+        return "nearest";
+    case RenderSamplerMipmapMode::linear:
+        return "linear";
+    }
+    return "unknown";
+}
+
+std::string_view render_sampler_address_mode_name(RenderSamplerAddressMode value) noexcept {
+    switch (value) {
+    case RenderSamplerAddressMode::repeat:
+        return "repeat";
+    case RenderSamplerAddressMode::clamp_to_edge:
+        return "clamp_to_edge";
+    }
+    return "unknown";
+}
+
+core::Status validate_render_sampler_desc(const RenderSamplerDesc& desc) {
+    if (!std::isfinite(desc.max_anisotropy) || desc.max_anisotropy != 1.0F) {
+        return core::Status::failure(
+            "renderer.unsupported_sampler_anisotropy",
+            "sampler anisotropy is not enabled yet and must remain exactly one");
+    }
+    if (!std::isfinite(desc.min_lod) || !std::isfinite(desc.max_lod) || desc.min_lod < 0.0F ||
+        desc.max_lod < desc.min_lod) {
+        return core::Status::failure("renderer.invalid_sampler_lod",
+                                     "sampler LOD range must be finite, nonnegative, and ordered");
+    }
+    return core::Status::ok();
 }
 
 std::string_view render_shader_stage_name(RenderShaderStage stage) noexcept {
@@ -1441,6 +1559,7 @@ std::string_view render_blend_mode_name(RenderBlendMode value) noexcept {
 bool is_depth_format(RenderImageFormat format) noexcept {
     switch (format) {
     case RenderImageFormat::rgba8_unorm:
+    case RenderImageFormat::rgba8_srgb:
         return false;
     case RenderImageFormat::d32_sfloat:
     case RenderImageFormat::d32_sfloat_s8_uint:

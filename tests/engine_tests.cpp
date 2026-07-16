@@ -2936,11 +2936,13 @@ void test_renderer_rhi() {
         assert(vulkan_graphics_pipeline.value().gpu_backed);
         assert(vulkan_device.value()->live_resource_count() == 9);
         assert(vulkan_device.value()->release_resource(vulkan_compute_pipeline.value().handle));
-        assert(vulkan_device.value()->live_resource_count() == 8);
+        assert(vulkan_device.value()->live_resource_count() == 9);
         assert(vulkan_device.value()->release_resource(vulkan_pipeline_shader.value().handle));
-        assert(vulkan_device.value()->live_resource_count() == 7);
+        assert(vulkan_device.value()->live_resource_count() == 9);
         assert(vulkan_device.value()->release_resource(vulkan_uniform_upload.value().handle));
-        assert(vulkan_device.value()->live_resource_count() == 6);
+        // The sampled-image upload is asynchronous. Resources retired after it remain counted
+        // until a later queue completion proves that submission serial is no longer in flight.
+        assert(vulkan_device.value()->live_resource_count() == 9);
         auto vulkan_draw_stats = vulkan_device.value()->bind_mesh_draws(
             std::span<const RenderMeshBinding>{&vulkan_chunk_draw, 1});
         assert(vulkan_draw_stats);
@@ -2955,15 +2957,15 @@ void test_renderer_rhi() {
         assert(vulkan_draw_stats.value().gpu_backed);
         assert(vulkan_draw_stats.value().draw_commands_submitted);
         assert(vulkan_device.value()->release_resource(vulkan_graphics_pipeline.value().handle));
-        assert(vulkan_device.value()->live_resource_count() == 5);
+        assert(vulkan_device.value()->live_resource_count() == 9);
         assert(vulkan_device.value()->release_resource(vulkan_vertex_shader.value().handle));
-        assert(vulkan_device.value()->live_resource_count() == 4);
+        assert(vulkan_device.value()->live_resource_count() == 9);
         assert(vulkan_device.value()->release_resource(vulkan_fragment_shader.value().handle));
-        assert(vulkan_device.value()->live_resource_count() == 3);
+        assert(vulkan_device.value()->live_resource_count() == 9);
         assert(vulkan_device.value()->release_resource(vulkan_upload.value().handle));
         assert(vulkan_device.value()->release_resource(vulkan_index_upload.value().handle));
         assert(vulkan_device.value()->release_resource(vulkan_texture_upload.value().handle));
-        assert(vulkan_device.value()->live_resource_count() == 0);
+        assert(vulkan_device.value()->live_resource_count() == 9);
         auto invalid_vulkan_present = vulkan_device.value()->render_frame(
             RenderFrameDesc{ClearColor{0.0F, 0.0F, 0.0F, 1.0F}, {}, true});
         assert(!invalid_vulkan_present);
@@ -2973,6 +2975,7 @@ void test_renderer_rhi() {
         assert(vulkan_frame);
         assert(vulkan_frame.value().backend == RenderBackend::vulkan);
         assert(vulkan_frame.value().frame_index == 0);
+        assert(vulkan_device.value()->live_resource_count() == 0);
         assert(vulkan_frame.value().extent.width == 320);
         assert(vulkan_frame.value().extent.height == 180);
         assert(!vulkan_frame.value().presented);

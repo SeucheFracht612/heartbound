@@ -217,8 +217,13 @@ std::string BenchmarkRecorder::to_json() const {
                << ", \"visible_chunks\": " << sample.visible_chunks
                << ", \"culled_chunks\": " << sample.culled_chunks
                << ", \"drawn_chunks\": " << sample.drawn_chunks
-               << ", \"draw_calls\": " << sample.draw_calls << ", \"vertices\": " << sample.vertices
-               << ", \"triangles\": " << sample.triangles
+               << ", \"draw_calls\": " << sample.draw_calls
+               << ", \"pipeline_switches\": " << sample.pipeline_switches
+               << ", \"resident_textures\": " << sample.resident_textures
+               << ", \"runtime_materials\": " << sample.runtime_materials
+               << ", \"resident_pipelines\": " << sample.resident_pipelines
+               << ", \"vertices\": " << sample.vertices << ", \"triangles\": " << sample.triangles
+               << ", \"resident_texture_bytes\": " << sample.resident_texture_bytes
                << ", \"resident_mesh_bytes\": " << sample.resident_mesh_bytes
                << ", \"gpu_arena_capacity_bytes\": " << sample.gpu_arena_capacity_bytes
                << ", \"gpu_arena_used_bytes\": " << sample.gpu_arena_used_bytes
@@ -242,7 +247,9 @@ std::string BenchmarkRecorder::to_csv() const {
               "sync_ms,culling_ms,draw_list_ms,command_build_ms,command_recording_ms,snapshot_ms,"
               "meshing_ms,upload_preparation_ms,upload_ms,gpu_wait_ms,loaded_chunks,"
               "mesh_pending_chunks,upload_pending_chunks,resident_chunks,visible_chunks,"
-              "culled_chunks,drawn_chunks,draw_calls,vertices,triangles,resident_mesh_bytes,"
+              "culled_chunks,drawn_chunks,draw_calls,pipeline_switches,resident_textures,"
+              "runtime_materials,resident_pipelines,vertices,triangles,resident_texture_bytes,"
+              "resident_mesh_bytes,"
               "gpu_arena_capacity_bytes,gpu_arena_used_bytes,gpu_arena_free_bytes,"
               "gpu_arena_fragmentation,pending_upload_bytes,uploaded_bytes\n";
     for (const auto& sample : samples_) {
@@ -262,8 +269,10 @@ std::string BenchmarkRecorder::to_csv() const {
                << ',' << sample.mesh_pending_chunks << ',' << sample.upload_pending_chunks << ','
                << sample.resident_chunks << ',' << sample.visible_chunks << ','
                << sample.culled_chunks << ',' << sample.drawn_chunks << ',' << sample.draw_calls
-               << ',' << sample.vertices << ',' << sample.triangles << ','
-               << sample.resident_mesh_bytes << ',' << sample.gpu_arena_capacity_bytes << ','
+               << ',' << sample.pipeline_switches << ',' << sample.resident_textures << ','
+               << sample.runtime_materials << ',' << sample.resident_pipelines << ','
+               << sample.vertices << ',' << sample.triangles << ',' << sample.resident_texture_bytes
+               << ',' << sample.resident_mesh_bytes << ',' << sample.gpu_arena_capacity_bytes << ','
                << sample.gpu_arena_used_bytes << ',' << sample.gpu_arena_free_bytes << ','
                << sample.gpu_arena_fragmentation << ',' << sample.pending_upload_bytes << ','
                << sample.uploaded_bytes_this_frame << '\n';

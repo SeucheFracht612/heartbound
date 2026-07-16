@@ -227,6 +227,16 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
     return first_failure;
 }
 
+core::Status
+ChunkRenderSystem::set_terrain_pipeline(rhi::RenderResourceHandle terrain_pipeline) noexcept {
+    if (!terrain_pipeline.is_valid()) {
+        return core::Status::failure("chunk_render_system.invalid_terrain_pipeline",
+                                     "terrain pipeline handle must be valid");
+    }
+    terrain_pipeline_ = terrain_pipeline;
+    return core::Status::ok();
+}
+
 ChunkDrawList ChunkRenderSystem::build_draw_list(const RenderCamera& camera) {
     return build_draw_list(camera, {});
 }

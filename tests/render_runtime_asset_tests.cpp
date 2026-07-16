@@ -1,9 +1,13 @@
+#include "engine/renderer/assets/sampler_cache.hpp"
 #include "engine/renderer/assets/shader_manager.hpp"
+#include "engine/renderer/assets/texture_manager.hpp"
+#include "engine/renderer/materials/material_runtime_cache.hpp"
 #include "engine/renderer/materials/pipeline_cache.hpp"
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
 
 #include <array>
 #include <cassert>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -134,10 +138,192 @@ void test_shader_interface_rejects_mismatch() {
     assert(shaders.shutdown());
 }
 
+[[nodiscard]] renderer::TextureUploadDesc make_texture_array(std::string id, std::uint8_t bias) {
+    renderer::TextureUploadDesc desc;
+    desc.id = std::move(id);
+    desc.width = 4;
+    desc.height = 4;
+    desc.array_layers = 2;
+    desc.rgba8.resize(4U * 4U * 2U * 4U);
+    for (std::size_t index = 0; index < desc.rgba8.size(); index += 4) {
+        desc.rgba8[index] = static_cast<std::byte>(bias + static_cast<std::uint8_t>(index % 31U));
+        desc.rgba8[index + 1] = static_cast<std::byte>(64U);
+        desc.rgba8[index + 2] = static_cast<std::byte>(128U);
+        desc.rgba8[index + 3] = static_cast<std::byte>(255U);
+    }
+    return desc;
+}
+
+void test_texture_arrays_mips_fallbacks_and_sampler_cache() {
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+    const auto baseline = device.value()->live_resource_count();
+
+    renderer::TextureManager textures(*device.value());
+    assert(textures.initialize_fallbacks());
+    assert(textures.stats().resident_texture_count == 4);
+    assert(textures.error_texture().is_valid());
+    assert(textures.resolve_or_error({}).handle == textures.error_texture());
+    assert(device.value()->live_resource_count() == baseline + 4);
+
+    auto terrain = textures.create_texture(make_texture_array("terrain_array", 7));
+    assert(terrain);
+    const auto* view = textures.find(terrain.value());
+    assert(view != nullptr);
+    assert(view->array_layers == 2);
+    assert(view->mip_levels == 3);
+    assert(view->color_space == renderer::TextureColorSpace::srgb);
+    assert(view->resident_bytes == (4U * 4U * 2U + 2U * 2U * 2U + 1U * 1U * 2U) * 4U);
+    const auto first_image = view->image;
+
+    auto invalid_replacement = make_texture_array("terrain_array", 11);
+    invalid_replacement.rgba8.pop_back();
+    auto status = textures.replace_texture(terrain.value(), std::move(invalid_replacement));
+    assert(!status);
+    assert(textures.find(terrain.value())->image == first_image);
+    assert(textures.stats().failed_reload_count == 1);
+
+    assert(textures.replace_texture(terrain.value(), make_texture_array("terrain_array", 13)));
+    assert(textures.find(terrain.value())->image != first_image);
+    assert(textures.find(terrain.value())->revision == 2);
+    assert(textures.stats().successful_reload_count == 1);
+
+    renderer::SamplerCache samplers(*device.value());
+    renderer::rhi::RenderSamplerDesc sampler_desc;
+    sampler_desc.min_filter = renderer::rhi::RenderSamplerFilter::linear;
+    sampler_desc.mag_filter = renderer::rhi::RenderSamplerFilter::nearest;
+    sampler_desc.mipmap_mode = renderer::rhi::RenderSamplerMipmapMode::linear;
+    sampler_desc.max_lod = 8.0F;
+    auto sampler = samplers.get(sampler_desc);
+    assert(sampler);
+    assert(samplers.get(sampler_desc).value() == sampler.value());
+    assert(samplers.stats().resident_sampler_count == 1);
+    assert(samplers.stats().cache_hit_count == 1);
+
+    auto material = core::PrototypeId::parse("base:materials/texture_test");
+    assert(material);
+    renderer::rhi::RenderPipelineLayoutDesc layout;
+    layout.material_id = material.value();
+    layout.shader_template = {"base", "shaders/texture_test.frag"};
+    layout.descriptors.push_back(
+        {"terrain_textures", renderer::rhi::RenderDescriptorKind::sampled_texture, 0, true});
+    assert(device.value()->bind_pipeline_layout(layout));
+    const renderer::rhi::RenderDescriptorWrite texture_write{
+        material.value(), "terrain_textures", textures.find(terrain.value())->image, 0, 0,
+        sampler.value()};
+    auto written = device.value()->write_descriptors(
+        std::span<const renderer::rhi::RenderDescriptorWrite>{&texture_write, 1});
+    assert(written);
+    assert(written.value().sampled_texture_write_count == 1);
+
+    assert(samplers.shutdown());
+    assert(textures.release_texture(terrain.value()));
+    assert(textures.shutdown());
+    assert(device.value()->live_resource_count() == baseline);
+}
+
+void test_srgb_mip_generation() {
+    const std::array<std::byte, 16> base{
+        std::byte{0},   std::byte{0}, std::byte{0}, std::byte{255},
+        std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255},
+        std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255},
+        std::byte{255}, std::byte{0}, std::byte{0}, std::byte{255},
+    };
+    const auto mips =
+        renderer::generate_rgba8_mip_chain(2, 2, 1, renderer::TextureColorSpace::srgb, base);
+    assert(mips.size() == 20);
+    // Gamma-correct averaging is brighter than a naive byte average of 191.
+    assert(std::to_integer<std::uint8_t>(mips[16]) > 220);
+    assert(std::to_integer<std::uint8_t>(mips[19]) == 255);
+
+    renderer::TextureUploadDesc overflowing;
+    overflowing.id = "overflowing";
+    overflowing.width = std::numeric_limits<std::uint32_t>::max();
+    overflowing.height = std::numeric_limits<std::uint32_t>::max();
+    overflowing.array_layers = std::numeric_limits<std::uint32_t>::max();
+    const auto overflow_status = renderer::validate_texture_upload_desc(overflowing);
+    assert(!overflow_status);
+    assert(overflow_status.error().code == "texture_manager.extent_overflow");
+}
+
+void test_material_table_updates_without_mesh_changes() {
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+    const auto baseline = device.value()->live_resource_count();
+
+    renderer::TerrainTextureArrayBuilder array_builder(2, 2);
+    const std::array<std::byte, 16> error_layer{
+        std::byte{255}, std::byte{0}, std::byte{255}, std::byte{255},
+        std::byte{0},   std::byte{0}, std::byte{0},   std::byte{255},
+        std::byte{0},   std::byte{0}, std::byte{0},   std::byte{255},
+        std::byte{255}, std::byte{0}, std::byte{255}, std::byte{255},
+    };
+    const std::array<std::byte, 16> grass_layer{
+        std::byte{32}, std::byte{160}, std::byte{48}, std::byte{255}, std::byte{36}, std::byte{170},
+        std::byte{52}, std::byte{255}, std::byte{28}, std::byte{150}, std::byte{40}, std::byte{255},
+        std::byte{40}, std::byte{180}, std::byte{56}, std::byte{255},
+    };
+    assert(array_builder.add_layer("error", error_layer).value() == 0);
+    assert(array_builder.add_layer("grass", grass_layer).value() == 1);
+    assert(array_builder.add_layer("grass", grass_layer).value() == 1);
+    assert(array_builder.layer_count() == 2);
+    auto array_desc = array_builder.build("terrain_tiles");
+    assert(array_desc);
+    assert(array_desc.value().array_layers == 2);
+
+    renderer::MaterialRuntimeCache materials(*device.value());
+    auto material_id = core::PrototypeId::parse("base:materials/grass");
+    assert(material_id);
+    renderer::MaterialRuntimeDesc material;
+    material.id = material_id.value();
+    material.voxel_type = 1;
+    material.side_texture = 1;
+    material.top_texture = 1;
+    material.bottom_texture = 0;
+    auto handle = materials.upsert(material);
+    assert(handle);
+    const auto revision = materials.block_render_table().revision();
+    assert(materials.upsert(material).value() == handle.value());
+    assert(materials.block_render_table().revision() == revision);
+    assert(materials.synchronize_gpu());
+    assert(materials.gpu_table_buffer().is_valid());
+    assert(materials.stats().gpu_table.material_count == 2);
+    assert(materials.stats().gpu_table.upload_count == 1);
+    const auto table_buffer = materials.gpu_table_buffer();
+    assert(device.value()->live_resource_count() == baseline + 1);
+
+    auto pipeline_material = core::PrototypeId::parse("base:materials/terrain_pipeline");
+    assert(pipeline_material);
+    renderer::rhi::RenderPipelineLayoutDesc layout;
+    layout.material_id = pipeline_material.value();
+    layout.shader_template = {"base", "shaders/terrain.frag"};
+    layout.descriptors.push_back(
+        {"voxel_materials", renderer::rhi::RenderDescriptorKind::storage_buffer, 0, true});
+    assert(device.value()->bind_pipeline_layout(layout));
+    assert(materials.write_gpu_table_descriptor(pipeline_material.value(), "voxel_materials"));
+
+    material.base_color = {0.8F, 0.9F, 0.7F, 1.0F};
+    assert(materials.upsert(material).value() == handle.value());
+    assert(materials.find(handle.value())->revision == 2);
+    assert(materials.synchronize_gpu());
+    assert(materials.gpu_table_buffer() == table_buffer);
+    assert(materials.stats().gpu_table.upload_count == 2);
+    assert(materials.stats().gpu_table.resident_revision ==
+           materials.block_render_table().revision());
+
+    assert(materials.shutdown());
+    assert(device.value()->live_resource_count() == baseline);
+}
+
 } // namespace
 
 int main() {
     test_shader_hot_reload_and_pipeline_cache();
     test_shader_interface_rejects_mismatch();
+    test_texture_arrays_mips_fallbacks_and_sampler_cache();
+    test_srgb_mip_generation();
+    test_material_table_updates_without_mesh_changes();
     return 0;
 }

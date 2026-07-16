@@ -27,8 +27,8 @@ Implemented foundation:
     without exposing backend pipeline handles
   - can create graphics pipeline objects from vertex/fragment shader modules and bound material
     pipeline layouts without exposing backend pipeline handles
-  - can write descriptor bindings for material scalar/color uniform buffers and sampled texture
-    images without exposing backend descriptor set handles
+  - can write descriptor bindings for material scalar/color uniform buffers, storage buffers, and
+    sampled texture arrays with shared samplers without exposing backend descriptor set handles
   - retains the old material-based `bind_mesh_draws()` API only as a deprecated compatibility path;
     visible rendering uses explicit pipeline handles through `execute_frame()`
   - builds renderer-neutral frame execution plans so Vulkan barriers and image-layout transitions
@@ -110,8 +110,22 @@ Implemented foundation:
     only after the RHI's completed submission serial reaches the last submission that could have
     referenced the old range
   - debug statistics expose resident/empty counts and bytes, arena capacity/usage/free space and
-    fragmentation, pending mesh/upload work, batched writes, visible/culled chunks, draws, vertices,
-    and indices
+    fragmentation, pending mesh/upload work, batched writes, visible/culled chunks, draws,
+    pipeline binds, vertices, and indices
+
+- Runtime render assets and materials
+  - `ShaderManager`, `TextureManager`, `SamplerCache`, `MaterialRuntimeCache`, and `PipelineCache`
+    are renderer-owned; chunks retain only mesh allocations and never own descriptors or pipelines
+  - texture handles are generation-safe and missing/stale references resolve to a deterministic
+    checkerboard error texture; white, black, and flat-normal fallback textures are always resident
+  - RGBA8 texture arrays carry explicit linear or sRGB formats and complete CPU-generated mip
+    chains; sRGB downsampling converts color channels through linear space
+  - sampler descriptors are cached, so equivalent materials share one GPU sampler
+  - stable terrain texture-layer indices feed a contiguous 48-byte `GpuVoxelMaterial` table; that
+    storage buffer can change color, texture layers, flags, emissive strength, or roughness without
+    remeshing chunks
+  - the shared terrain pipeline samples the array using integer voxel-type data from the real chunk
+    vertex ABI and indexes the material table; its pipeline binds are counted per frame
 
 - Camera and shader constants
   - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention
@@ -191,8 +205,9 @@ Implemented foundation:
     buffers, images, shaders, and pipelines until completion
   - can allocate private `VkShaderModule` objects from validated SPIR-V words behind opaque RHI
     handles
-  - can upload small RGBA8 sampled images through a private staging buffer, optimal-tiled image,
-    image view, and sampler behind opaque RHI handles
+  - uploads RGBA8/sRGB 2D images, arrays, and mip chains through the shared persistently mapped
+    staging ring and serial-tracked upload contexts into optimal-tiled images; queue ordering makes
+    them visible to later draws without an immediate fence wait
   - can allocate private compute `VkPipeline` objects from owned compute shader modules and bound
     material pipeline layouts
   - creates private graphics pipelines with explicit topology, polygon/cull/front-face state,
@@ -274,17 +289,21 @@ Runtime shader programs use generation-safe `ShaderProgramHandle` values and ret
 points, dependencies, and an explicit shader-interface contract. The shader manager validates all
 SPIR-V before module creation. Development reload creates every replacement module before changing
 the resident program, keeps superseded modules alive while dependent pipelines rebuild, and leaves
-the previous program untouched on load failure. `PipelineCache` keys graphics pipelines by shader
+the previous program and terrain pipeline untouched on load failure. The renderer updates future
+chunk draw packets only after a complete dependent-pipeline rebuild. `PipelineCache` keys graphics
+pipelines by shader
 program, vertex layout, render phase, attachment formats, raster/depth/blend state, sample count,
 and feature flags. Common pipelines are prewarmed, then the cache is sealed so a normal frame cannot
 create a surprise pipeline. Reload rebuilds dependent entries transactionally and preserves their
 old pipelines if any replacement fails. Rebinding a byte-for-byte equivalent RHI layout is
 idempotent so prewarming and shader replacement do not invalidate unrelated pipelines.
 
-The current shader compiler has development validators plus a production SPIR-V passthrough
-profile. Development preserves source bytes behind explicit compiled-shader metadata and rejects
-empty or unsupported shader sources. Production currently accepts only `.spv` assets that pass
-basic SPIR-V header validation and reports `shader_compiler.production_compiler_unavailable` for
-Slang/HLSL source until a real compiler backend is linked. Future production shader compilation
-must keep this declared asset/profile boundary without allowing mods or resource packs to bypass
-declared shader templates and render extension points.
+The application build has a real GLSL-to-SPIR-V path: when `glslangValidator`/`glslang` is
+installed, CMake
+recompiles terrain stages after source changes and stages the build-tree artifacts for both the
+smoke application and benchmark. Checked-in, externally validated SPIR-V is the deterministic
+fallback when the tool is unavailable. Normal runtime rendering never compiles shaders. The
+general asset `ShaderCompiler` still has development validators plus a production SPIR-V
+passthrough profile and reports `shader_compiler.production_compiler_unavailable` for Slang/HLSL
+until that compiler backend is linked; shader-pack compilation remains a later extension of that
+declared cook boundary.
