@@ -61,6 +61,8 @@ target_sources(
     processes/process_environment.cpp
     processes/process_prototype.cpp
     replay/command_replay.cpp
+    renderer/benchmark/benchmark_scene.cpp
+    renderer/benchmark/benchmark_statistics.cpp
     renderer/materials/material_asset_validation.cpp
     renderer/materials/material_definition.cpp
     renderer/materials/material_pipeline_layout.cpp
@@ -195,6 +197,8 @@ target_sources(
       processes/process_environment.hpp
       processes/process_prototype.hpp
       replay/command_replay.hpp
+      renderer/benchmark/benchmark_scene.hpp
+      renderer/benchmark/benchmark_statistics.hpp
       renderer/materials/material_asset_validation.hpp
       renderer/materials/material_definition.hpp
       renderer/materials/material_pipeline_layout.hpp
