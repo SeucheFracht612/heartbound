@@ -26,6 +26,15 @@
       }
     },
     {
+      "name": "default-release",
+      "displayName": "Default Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/default-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
       "name": "linux-clang-debug",
       "displayName": "Linux Clang Debug",
       "inherits": "default-debug",
@@ -74,6 +83,10 @@
       "configurePreset": "default-debug-werror"
     },
     {
+      "name": "default-release",
+      "configurePreset": "default-release"
+    },
+    {
       "name": "linux-clang-debug",
       "configurePreset": "linux-clang-debug"
     },
@@ -101,6 +114,13 @@
     {
       "name": "default-debug-werror",
       "configurePreset": "default-debug-werror",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "default-release",
+      "configurePreset": "default-release",
       "output": {
         "outputOnFailure": true
       }

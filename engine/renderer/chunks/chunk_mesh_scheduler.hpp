@@ -52,12 +52,18 @@ struct ChunkMeshResult {
     std::string error_message;
 };
 
+enum class ChunkMeshingMode : std::uint8_t {
+    reference,
+    greedy,
+};
+
 struct ChunkMeshSchedulerConfig {
     std::uint32_t worker_count = 2;
     std::size_t max_concurrent_jobs = 4;
     std::size_t max_completed_results = 256;
     std::size_t max_cached_snapshot_buffers = 8;
     std::size_t max_cached_mesh_buffers = 8;
+    ChunkMeshingMode meshing_mode = ChunkMeshingMode::greedy;
 
     [[nodiscard]] core::Status validate() const;
 };

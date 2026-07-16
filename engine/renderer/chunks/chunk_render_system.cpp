@@ -59,6 +59,7 @@ core::Status ChunkRenderConfig::validate() const {
     scheduler_config.max_completed_results = max_completed_mesh_results_per_frame * 4;
     scheduler_config.max_cached_snapshot_buffers = max_cached_snapshot_buffers;
     scheduler_config.max_cached_mesh_buffers = max_cached_mesh_buffers;
+    scheduler_config.meshing_mode = meshing_mode;
     auto scheduler_status = scheduler_config.validate();
     if (!scheduler_status) {
         return scheduler_status;
@@ -101,6 +102,7 @@ core::Status ChunkRenderSystem::initialize() {
     scheduler_config.max_completed_results = config_.max_completed_mesh_results_per_frame * 4;
     scheduler_config.max_cached_snapshot_buffers = config_.max_cached_snapshot_buffers;
     scheduler_config.max_cached_mesh_buffers = config_.max_cached_mesh_buffers;
+    scheduler_config.meshing_mode = config_.meshing_mode;
     auto scheduler = ChunkMeshScheduler::create(scheduler_config);
     if (!scheduler) {
         render_table_.reset();

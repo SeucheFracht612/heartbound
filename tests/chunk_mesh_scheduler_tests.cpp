@@ -141,6 +141,7 @@ void test_results_carry_stale_center_neighbor_table_and_generation_metadata() {
     config.max_concurrent_jobs = 1;
     config.max_completed_results = 8;
     config.max_cached_snapshot_buffers = 2;
+    config.meshing_mode = renderer::ChunkMeshingMode::reference;
     auto scheduler_result = renderer::ChunkMeshScheduler::create(config);
     assert(scheduler_result);
     auto scheduler = std::move(scheduler_result).value();

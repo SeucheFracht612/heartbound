@@ -28,6 +28,7 @@ struct ChunkRenderConfig {
     std::size_t max_concurrent_mesh_jobs = 4;
     std::size_t max_cached_snapshot_buffers = 8;
     std::size_t max_cached_mesh_buffers = 8;
+    ChunkMeshingMode meshing_mode = ChunkMeshingMode::greedy;
 
     [[nodiscard]] core::Status validate() const;
 };

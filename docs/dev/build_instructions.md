@@ -133,6 +133,11 @@ Run a deterministic renderer benchmark headlessly:
   --output build/benchmarks/mountains.json
 ```
 
+Use the `default-release` preset for optimized renderer measurements. Add `--reference-mesher` to
+run the readable correctness mesher through the same benchmark pipeline as an optimization
+baseline. Milestone 8 reference results and machine details are recorded in
+`docs/performance/renderer_milestone_8.md`.
+
 Use the native Vulkan backend to collect delayed GPU timestamp measurements:
 
 ```bash

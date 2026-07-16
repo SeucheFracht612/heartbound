@@ -290,14 +290,18 @@ full-cube path; the readable `ChunkMesher` remains the correctness reference and
 boxes, cross-plane foliage, and rich-model extraction. Greedy masks merge only faces with identical
 material, voxel type, render phase, light, state, and relevant block flags. Directional surface-area
 tests cover all six faces, negative chunk coordinates, cross-chunk occlusion, incompatible merge
-keys, and checkerboard worst cases. In the deterministic flat nine-chunk benchmark this reduced a
-representative visible frame from tens of thousands of triangles to 66 without changing visible
-surface coverage. CPU meshes also group their complete index range into validated, nonoverlapping
+keys, and checkerboard worst cases. In the deterministic flat nine-chunk benchmark this reduced the
+resident terrain from 43,776 triangles to 108 without changing visible surface coverage. CPU meshes
+also group their complete index range into validated, nonoverlapping
 material/render-phase sections. The retained GPU cache preserves those ranges, and visibility
 extraction emits one indexed draw per section while counting drawn chunks separately from draws.
 Completed uploads return CPU vertex/index/section storage to a bounded scheduler pool and compact
 GPU-vertex conversion storage to an owner-thread pool. Warm remeshes reuse those capacities; pool
 counts and retained capacities are exposed in chunk renderer statistics.
+The optimized cube loop scans each axis boundary once for both face directions, bounds work to the
+occupied cell extent, and uses inline contiguous snapshot/render-table access. The benchmark runner
+can select `--reference-mesher` for an otherwise identical baseline; recorded Debug and Release
+results live in `docs/performance/renderer_milestone_8.md`.
 
 The backend currently supports one draw-producing Vulkan pass per unified submission. General
 multi-pass Vulkan execution, phase-specific terrain pipelines, frame-local descriptor allocation

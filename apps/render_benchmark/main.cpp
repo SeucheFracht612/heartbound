@@ -40,6 +40,7 @@ struct Options {
     OutputFormat format = OutputFormat::json;
     std::filesystem::path output;
     bool validation = true;
+    bool reference_mesher = false;
 };
 
 [[nodiscard]] int fail(std::string_view message) {
@@ -60,6 +61,7 @@ void print_usage() {
                  "  --frame-cap N      Sleep to cap at N FPS; 0 is uncapped (default)\n"
                  "  --output PATH      Result path (default benchmark-SCENE.json)\n"
                  "  --format json|csv  Result serialization format\n"
+                 "  --reference-mesher Use the correctness-reference terrain mesher\n"
                  "  --no-validation    Do not request Vulkan validation\n"
                  "  --list-scenes      Print scene names\n"
                  "  --help             Print this help\n";
@@ -115,6 +117,8 @@ template <typename Integer>
             options.backend = renderer::rhi::RenderBackend::headless;
         } else if (argument == "--no-validation") {
             options.validation = false;
+        } else if (argument == "--reference-mesher") {
+            options.reference_mesher = true;
         } else if (argument == "--scene") {
             auto value = next_value();
             if (!value) {
@@ -314,6 +318,9 @@ int main(int argc, char** argv) {
     renderer_init.voxel_palette = &scene.value()->palette();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 64;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 512U * 1024U * 1024U;
+    renderer_init.chunk_config.meshing_mode = options.reference_mesher
+                                                  ? renderer::ChunkMeshingMode::reference
+                                                  : renderer::ChunkMeshingMode::greedy;
     renderer::Renderer active_renderer;
     auto status = active_renderer.initialize(std::move(renderer_init));
     if (!status) {
@@ -358,6 +365,7 @@ int main(int argc, char** argv) {
             " warm-up, " + std::to_string(options.measured_frames) + " measured, " +
             (options.frame_cap == 0 ? "uncapped" : std::to_string(options.frame_cap) + " FPS") +
             ", backend=" + std::string(renderer::rhi::render_backend_name(options.backend)) +
+            ", mesher=" + (options.reference_mesher ? "reference" : "greedy") +
             ", settled=" + std::to_string(settlement_frames) + " frames");
 
     std::uint64_t simulation_frame = 0;

@@ -148,6 +148,10 @@ core::Status ChunkMeshSchedulerConfig::validate() const {
             "renderer.invalid_chunk_mesh_concurrency",
             "chunk mesh concurrent-job limit must be at least the worker count");
     }
+    if (meshing_mode != ChunkMeshingMode::reference && meshing_mode != ChunkMeshingMode::greedy) {
+        return core::Status::failure("renderer.invalid_chunk_meshing_mode",
+                                     "chunk meshing mode is not supported");
+    }
     return core::Status::ok();
 }
 
@@ -225,12 +229,13 @@ core::Status ChunkMeshScheduler::submit(ChunkMeshRequest request) {
     const auto center_revision = request.center_revision;
     const auto table_revision = request.block_render_table_revision;
     const auto priority = request.priority;
+    const auto meshing_mode = config_.meshing_mode;
     auto cancellation = std::make_shared<std::atomic_bool>(false);
     auto shared_state = shared_state_;
     jobs::JobDesc job;
     job.name = "chunk_mesh";
     job.priority = job_priority(priority);
-    job.work = [request = std::move(request), cancellation,
+    job.work = [request = std::move(request), cancellation, meshing_mode,
                 shared_state](const jobs::JobContext&) mutable {
         ChunkMeshResult result;
         result.identity = request.identity;
@@ -247,9 +252,15 @@ core::Status ChunkMeshScheduler::submit(ChunkMeshRequest request) {
 
         const auto started = std::chrono::steady_clock::now();
         try {
-            auto reusable_mesh = shared_state->acquire_mesh();
-            auto mesh = world::GreedyChunkMesher::build_surface_mesh(
-                request.neighborhood, *request.render_table, std::move(reusable_mesh));
+            auto mesh = [&]() {
+                if (meshing_mode == ChunkMeshingMode::reference) {
+                    return world::ChunkMesher::build_surface_mesh(request.neighborhood,
+                                                                  *request.render_table);
+                }
+                auto reusable_mesh = shared_state->acquire_mesh();
+                return world::GreedyChunkMesher::build_surface_mesh(
+                    request.neighborhood, *request.render_table, std::move(reusable_mesh));
+            }();
             result.meshing_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - started)
                                     .count();
