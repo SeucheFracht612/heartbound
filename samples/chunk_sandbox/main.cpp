@@ -66,8 +66,10 @@ int main() {
 
     world::WorldState state;
     world::ChunkStreamInterestPolicy stream_policy;
-    stream_policy.load_radius_chunks = 0;
-    stream_policy.retain_radius_chunks = 1;
+    stream_policy.load_horizontal_radius_chunks = 0;
+    stream_policy.load_vertical_radius_chunks = 0;
+    stream_policy.retain_horizontal_radius_chunks = 1;
+    stream_policy.retain_vertical_radius_chunks = 1;
     const std::vector<simulation::SimulationViewer> viewers{
         {core::NetId::from_value(1), {0, 0, 0}},
     };

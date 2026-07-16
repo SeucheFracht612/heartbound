@@ -42,19 +42,23 @@ namespace {
     return value + amount;
 }
 
-[[nodiscard]] bool within_radius(ChunkCoord coord, ChunkCoord center,
-                                 std::uint16_t radius) noexcept {
-    const auto r = static_cast<std::int64_t>(radius);
-    const auto unsigned_radius = static_cast<std::uint64_t>(r);
-    return axis_distance(coord.x, center.x) <= unsigned_radius &&
-           axis_distance(coord.y, center.y) <= unsigned_radius &&
-           axis_distance(coord.z, center.z) <= unsigned_radius;
+[[nodiscard]] bool within_cylinder(ChunkCoord coord, ChunkCoord center,
+                                   std::uint16_t horizontal_radius,
+                                   std::uint16_t vertical_radius) noexcept {
+    const auto dx = axis_distance(coord.x, center.x);
+    const auto dy = axis_distance(coord.y, center.y);
+    const auto dz = axis_distance(coord.z, center.z);
+    const auto horizontal = static_cast<std::uint64_t>(horizontal_radius);
+    return dx <= horizontal && dz <= horizontal &&
+           dy <= static_cast<std::uint64_t>(vertical_radius) &&
+           dx * dx + dz * dz <= horizontal * horizontal;
 }
 
-[[nodiscard]] bool within_any_radius(ChunkCoord coord, const std::vector<ChunkCoord>& centers,
-                                     std::uint16_t radius) noexcept {
-    return std::ranges::any_of(centers, [coord, radius](ChunkCoord center) {
-        return within_radius(coord, center, radius);
+[[nodiscard]] bool within_any_cylinder(ChunkCoord coord, const std::vector<ChunkCoord>& centers,
+                                       std::uint16_t horizontal_radius,
+                                       std::uint16_t vertical_radius) noexcept {
+    return std::ranges::any_of(centers, [=](ChunkCoord center) {
+        return within_cylinder(coord, center, horizontal_radius, vertical_radius);
     });
 }
 
@@ -177,12 +181,14 @@ ChunkStreamer::load_chunk(WorldState& state, ChunkCoord coord,
 }
 
 core::Status ChunkStreamInterestPolicy::validate() const {
-    if (load_radius_chunks > retain_radius_chunks) {
+    if (load_horizontal_radius_chunks > retain_horizontal_radius_chunks ||
+        load_vertical_radius_chunks > retain_vertical_radius_chunks) {
         return core::Status::failure(
             "chunk_stream.invalid_interest_radius",
-            "chunk stream load radius must be less than or equal to retain radius");
+            "chunk stream load radii must be less than or equal to retain radii");
     }
-    if (load_radius_chunks > max_load_radius_chunks) {
+    if (load_horizontal_radius_chunks > max_load_radius_chunks ||
+        load_vertical_radius_chunks > max_load_radius_chunks) {
         return core::Status::failure(
             "chunk_stream.load_radius_too_large",
             "chunk stream load radius exceeds the bounded planning budget");
@@ -207,23 +213,27 @@ ChunkStreamer::plan_interest(const WorldState& state,
     }
 
     std::set<ChunkCoord> desired;
-    const auto radius = static_cast<std::int64_t>(policy.load_radius_chunks);
+    const auto horizontal_radius = static_cast<std::int64_t>(policy.load_horizontal_radius_chunks);
+    const auto vertical_radius = static_cast<std::int64_t>(policy.load_vertical_radius_chunks);
     for (const auto center : viewer_chunks) {
-        const auto min_z = saturated_subtract(center.z, radius);
-        const auto max_z = saturated_add(center.z, radius);
-        const auto min_y = saturated_subtract(center.y, radius);
-        const auto max_y = saturated_add(center.y, radius);
-        const auto min_x = saturated_subtract(center.x, radius);
-        const auto max_x = saturated_add(center.x, radius);
+        const auto min_z = saturated_subtract(center.z, horizontal_radius);
+        const auto max_z = saturated_add(center.z, horizontal_radius);
+        const auto min_y = saturated_subtract(center.y, vertical_radius);
+        const auto max_y = saturated_add(center.y, vertical_radius);
+        const auto min_x = saturated_subtract(center.x, horizontal_radius);
+        const auto max_x = saturated_add(center.x, horizontal_radius);
         for (auto z = min_z;; ++z) {
-            for (auto y = min_y;; ++y) {
-                for (auto x = min_x;; ++x) {
-                    desired.insert({x, y, z});
-                    if (x == max_x) {
-                        break;
+            for (auto x = min_x;; ++x) {
+                if (within_cylinder({x, center.y, z}, center, policy.load_horizontal_radius_chunks,
+                                    0)) {
+                    for (auto y = min_y;; ++y) {
+                        desired.insert({x, y, z});
+                        if (y == max_y) {
+                            break;
+                        }
                     }
                 }
-                if (y == max_y) {
+                if (x == max_x) {
                     break;
                 }
             }
@@ -251,7 +261,8 @@ ChunkStreamer::plan_interest(const WorldState& state,
 
     for (const auto* chunk : state.chunks().records()) {
         const auto coord = chunk->coord();
-        if (within_any_radius(coord, viewer_chunks, policy.retain_radius_chunks)) {
+        if (within_any_cylinder(coord, viewer_chunks, policy.retain_horizontal_radius_chunks,
+                                policy.retain_vertical_radius_chunks)) {
             plan.retained_chunks.push_back(coord);
             continue;
         }

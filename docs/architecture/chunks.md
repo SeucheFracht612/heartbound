@@ -60,10 +60,14 @@ Implemented foundation:
     or delta application fails
   - validates every saved local coordinate before mutation and restores canonical edit history
     without duplicating records across reloads
-  - plans viewer-interest load requests from chunk radii without mutating world state
-  - bounds load-radius planning and uses overflow-safe distance/range arithmetic at signed
-    coordinate limits
-  - reports clean chunks outside the retain radius as evictable while pinning save-dirty or
+  - plans viewer-interest load requests from a cylindrical horizontal radius plus an independent
+    vertical radius without mutating world state; diagonal columns outside the circle are not
+    loaded merely because they fit a square bounding box
+  - uses separate, larger retain radii as streaming hysteresis so viewer movement near an interest
+    boundary does not immediately unload and reload the same chunks
+  - bounds both load radii and uses overflow-safe distance/range arithmetic at signed coordinate
+    limits
+  - reports clean chunks outside the retain cylinder as evictable while pinning save-dirty or
     replication-dirty chunks so terrain edits are not discarded before persistence/replication
   - executes eviction requests by removing only clean loaded chunks, reporting missing chunks and
     retained dirty chunks separately

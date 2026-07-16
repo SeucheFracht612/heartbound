@@ -12638,10 +12638,16 @@ void test_chunk_streamer() {
     auto& clean_far_chunk = state.chunks().get_or_create({5, 0, 0});
     clean_far_chunk.clear_all_dirty();
     const auto clean_far_identity = clean_far_chunk.identity();
+    auto& retained_shell_chunk = state.chunks().get_or_create({2, 2, 0});
+    retained_shell_chunk.clear_all_dirty();
+    auto& vertical_outside_chunk = state.chunks().get_or_create({0, 3, 0});
+    vertical_outside_chunk.clear_all_dirty();
     assert(state.chunks().set({6, 0, 0}, {0, 0, 0}, heartstead::world::VoxelCell{13, 0}));
     heartstead::world::ChunkStreamInterestPolicy interest_policy;
-    interest_policy.load_radius_chunks = 1;
-    interest_policy.retain_radius_chunks = 2;
+    interest_policy.load_horizontal_radius_chunks = 1;
+    interest_policy.load_vertical_radius_chunks = 1;
+    interest_policy.retain_horizontal_radius_chunks = 2;
+    interest_policy.retain_vertical_radius_chunks = 2;
     const std::vector<heartstead::simulation::SimulationViewer> viewers{
         {heartstead::core::NetId::from_value(1), {0, 0, 0}},
     };
@@ -12649,17 +12655,26 @@ void test_chunk_streamer() {
         heartstead::world::ChunkStreamer::plan_interest(state, viewers, interest_policy);
     assert(interest);
     assert(interest.value().viewer_count == 1);
-    assert(interest.value().desired_chunk_count == 27);
-    assert(interest.value().load_requests.size() == 26);
+    assert(interest.value().desired_chunk_count == 15);
+    assert(interest.value().load_requests.size() == 14);
     assert(std::ranges::find(interest.value().load_requests,
                              heartstead::world::ChunkCoord{-1, 0, 0}) !=
            interest.value().load_requests.end());
+    assert(
+        std::ranges::find(interest.value().load_requests, heartstead::world::ChunkCoord{1, 0, 1}) ==
+        interest.value().load_requests.end());
     assert(
         std::ranges::find(interest.value().load_requests, heartstead::world::ChunkCoord{0, 0, 0}) ==
         interest.value().load_requests.end());
     assert(std::ranges::find(interest.value().retained_chunks,
                              heartstead::world::ChunkCoord{0, 0, 0}) !=
            interest.value().retained_chunks.end());
+    assert(std::ranges::find(interest.value().retained_chunks,
+                             heartstead::world::ChunkCoord{2, 2, 0}) !=
+           interest.value().retained_chunks.end());
+    assert(std::ranges::find(interest.value().evictable_chunks,
+                             heartstead::world::ChunkCoord{0, 3, 0}) !=
+           interest.value().evictable_chunks.end());
     assert(std::ranges::find(interest.value().evictable_chunks,
                              heartstead::world::ChunkCoord{5, 0, 0}) !=
            interest.value().evictable_chunks.end());
@@ -12782,8 +12797,10 @@ void test_chunk_streamer() {
     assert(
         maintenance_state.chunks().set({6, 0, 0}, {0, 0, 0}, heartstead::world::VoxelCell{14, 0}));
     heartstead::world::ChunkStreamInterestPolicy maintenance_policy;
-    maintenance_policy.load_radius_chunks = 0;
-    maintenance_policy.retain_radius_chunks = 1;
+    maintenance_policy.load_horizontal_radius_chunks = 0;
+    maintenance_policy.load_vertical_radius_chunks = 0;
+    maintenance_policy.retain_horizontal_radius_chunks = 1;
+    maintenance_policy.retain_vertical_radius_chunks = 1;
     TestSaveSink maintenance_save_sink;
     TestReplicationSink maintenance_replication_sink;
     auto maintenance = heartstead::world::ChunkStreamer::maintain_interest(
@@ -12891,8 +12908,8 @@ void test_chunk_streamer() {
     assert(failed_load_maintenance.error().code == "test.delta_failed");
     assert(failed_load_maintenance_state.chunks().contains({5, 0, 0}));
 
-    interest_policy.load_radius_chunks = 3;
-    interest_policy.retain_radius_chunks = 2;
+    interest_policy.load_horizontal_radius_chunks = 3;
+    interest_policy.retain_horizontal_radius_chunks = 2;
     auto invalid_interest =
         heartstead::world::ChunkStreamer::plan_interest(state, viewers, interest_policy);
     assert(!invalid_interest);

@@ -126,9 +126,9 @@ void test_worldgen_preserves_i64_height_and_rejects_unrepresentable_chunks() {
 void test_chunk_interest_planning_is_bounded() {
     heartstead::world::WorldState state;
     heartstead::world::ChunkStreamInterestPolicy policy;
-    policy.load_radius_chunks = static_cast<std::uint16_t>(
+    policy.load_horizontal_radius_chunks = static_cast<std::uint16_t>(
         heartstead::world::ChunkStreamInterestPolicy::max_load_radius_chunks + 1U);
-    policy.retain_radius_chunks = policy.load_radius_chunks;
+    policy.retain_horizontal_radius_chunks = policy.load_horizontal_radius_chunks;
     auto plan = heartstead::world::ChunkStreamer::plan_interest(state, {}, policy);
     assert(!plan);
     assert(plan.error().code == "chunk_stream.load_radius_too_large");

@@ -84,8 +84,10 @@ struct ChunkStreamLoadReport {
 struct ChunkStreamInterestPolicy {
     static constexpr std::uint16_t max_load_radius_chunks = 32;
 
-    std::uint16_t load_radius_chunks = 1;
-    std::uint16_t retain_radius_chunks = 2;
+    std::uint16_t load_horizontal_radius_chunks = 1;
+    std::uint16_t load_vertical_radius_chunks = 1;
+    std::uint16_t retain_horizontal_radius_chunks = 2;
+    std::uint16_t retain_vertical_radius_chunks = 2;
 
     [[nodiscard]] core::Status validate() const;
 };
