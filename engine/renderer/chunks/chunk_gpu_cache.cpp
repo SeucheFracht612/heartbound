@@ -123,7 +123,6 @@ void ChunkGpuCache::mark_failed(world::ChunkIdentity identity) noexcept {
     if (entry != nullptr && entry->state != ChunkGpuState::resident) {
         entry->state = ChunkGpuState::failed;
     }
-    ++stats_.failed_upload_count;
 }
 
 core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
@@ -164,6 +163,7 @@ core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
             {rhi::RenderBufferUsage::vertex, vertex_bytes.size(), "chunk_vertices"}, vertex_bytes);
         if (!vertex_upload) {
             mark_failed(identity);
+            ++stats_.failed_upload_count;
             return core::Result<ChunkGpuUploadResult>::failure(vertex_upload.error().code,
                                                                vertex_upload.error().message);
         }
@@ -174,6 +174,7 @@ core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
         if (!index_upload) {
             (void)device_->release_resource(new_vertex);
             mark_failed(identity);
+            ++stats_.failed_upload_count;
             return core::Result<ChunkGpuUploadResult>::failure(index_upload.error().code,
                                                                index_upload.error().message);
         }

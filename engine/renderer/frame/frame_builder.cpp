@@ -1,0 +1,80 @@
+#include "engine/renderer/frame/frame_builder.hpp"
+
+#include <utility>
+
+namespace heartstead::renderer {
+
+FrameBuilder::FrameBuilder(rhi::RenderExtent extent, rhi::ClearColor clear_color)
+    : extent_(extent), clear_color_(clear_color) {}
+
+core::Status FrameBuilder::resize(rhi::RenderExtent extent) {
+    auto status = rhi::validate_render_extent(extent);
+    if (!status) {
+        return status;
+    }
+    extent_ = extent;
+    return core::Status::ok();
+}
+
+void FrameBuilder::set_clear_color(rhi::ClearColor clear_color) noexcept {
+    clear_color_ = clear_color;
+}
+
+core::Result<rhi::RenderFramePlan> FrameBuilder::build_plan() const {
+    using namespace rhi;
+    auto extent_status = validate_render_extent(extent_);
+    if (!extent_status) {
+        return core::Result<RenderFramePlan>::failure(extent_status.error().code,
+                                                      extent_status.error().message);
+    }
+
+    RenderFramePlanBuilder builder(extent_);
+    auto status = builder.add_resource(
+        {"output", extent_, RenderResourceLifetime::external, RenderImageFormat::rgba8_unorm});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_resource(
+        {"depth", extent_, RenderResourceLifetime::transient, RenderImageFormat::d32_sfloat});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass(
+        {"world", RenderPassKind::world, {}, {"output", "depth"}, clear_color_, false});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass({"present", RenderPassKind::present, {"output"}, {}, {}, true});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    return builder.build();
+}
+
+core::Result<rhi::RenderFrameSubmission> FrameBuilder::build(const RenderCamera& camera,
+                                                             RenderCommandLists commands) const {
+    auto plan = build_plan();
+    if (!plan) {
+        return core::Result<rhi::RenderFrameSubmission>::failure(plan.error().code,
+                                                                 plan.error().message);
+    }
+
+    rhi::RenderFrameSubmission result;
+    result.plan = std::move(plan).value();
+    result.camera.view_projection = camera.view_projection;
+    if (!commands.world_draws.empty()) {
+        result.pass_commands.push_back({0, std::move(commands.world_draws)});
+    }
+    auto status = rhi::validate_render_frame_submission_shape(result);
+    if (!status) {
+        return core::Result<rhi::RenderFrameSubmission>::failure(status.error().code,
+                                                                 status.error().message);
+    }
+    return core::Result<rhi::RenderFrameSubmission>::success(std::move(result));
+}
+
+rhi::RenderExtent FrameBuilder::extent() const noexcept {
+    return extent_;
+}
+
+} // namespace heartstead::renderer

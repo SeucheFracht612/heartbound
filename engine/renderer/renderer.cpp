@@ -1,0 +1,216 @@
+#include "engine/renderer/renderer.hpp"
+
+#include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
+
+#include <utility>
+
+namespace heartstead::renderer {
+
+namespace {
+
+const ChunkRenderStats empty_chunk_stats{};
+
+} // namespace
+
+Renderer::~Renderer() {
+    (void)shutdown();
+}
+
+core::Status Renderer::initialize(RendererInitDesc desc) {
+    if (is_initialized()) {
+        return core::Status::failure("renderer.already_initialized",
+                                     "renderer cannot be initialized twice");
+    }
+    if (desc.device == nullptr) {
+        return core::Status::failure("renderer.missing_device",
+                                     "renderer initialization requires a render device");
+    }
+    auto config_status = desc.chunk_config.validate();
+    if (!config_status) {
+        return config_status;
+    }
+
+    device_ = std::move(desc.device);
+    auto pipeline_status =
+        create_terrain_pipeline(desc.terrain_vertex_spirv, desc.terrain_fragment_spirv);
+    if (!pipeline_status) {
+        const auto error = pipeline_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
+
+    chunk_cache_ = std::make_unique<ChunkGpuCache>(*device_);
+    chunk_system_ = std::make_unique<ChunkRenderSystem>(*chunk_cache_, terrain_pipeline_,
+                                                        desc.voxel_palette, desc.chunk_config);
+    frame_builder_ = std::make_unique<FrameBuilder>(device_->current_extent(), desc.clear_color);
+    return core::Status::ok();
+}
+
+core::Status Renderer::shutdown() {
+    core::Status first_failure = core::Status::ok();
+    frame_builder_.reset();
+    chunk_system_.reset();
+    if (chunk_cache_ != nullptr) {
+        auto status = chunk_cache_->clear();
+        if (!status) {
+            first_failure = status;
+        }
+        chunk_cache_.reset();
+    }
+
+    const auto release = [this, &first_failure](rhi::RenderResourceHandle& handle) {
+        if (device_ == nullptr || !handle.is_valid()) {
+            return;
+        }
+        auto status = device_->release_resource(handle);
+        if (!status && first_failure) {
+            first_failure = status;
+        }
+        handle = {};
+    };
+    release(terrain_pipeline_);
+    release(terrain_vertex_shader_);
+    release(terrain_fragment_shader_);
+    device_.reset();
+    return first_failure;
+}
+
+core::Status Renderer::synchronize_chunks(world::WorldState& world, const RenderCamera& camera) {
+    if (chunk_system_ == nullptr) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized before chunk synchronization");
+    }
+    return chunk_system_->synchronize(world, camera);
+}
+
+core::Status Renderer::process_chunk_loads(std::span<const world::ChunkStreamLoadReport> loads) {
+    if (chunk_system_ == nullptr) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized before processing chunk loads");
+    }
+    return chunk_system_->process_chunk_loads(loads);
+}
+
+core::Status Renderer::process_chunk_evictions(std::span<const world::ChunkIdentity> evictions) {
+    if (chunk_system_ == nullptr) {
+        return core::Status::failure(
+            "renderer.not_initialized",
+            "renderer must be initialized before processing chunk evictions");
+    }
+    return chunk_system_->process_chunk_evictions(evictions);
+}
+
+core::Status Renderer::process_chunk_evictions(const world::ChunkStreamEvictionReport& eviction) {
+    if (chunk_system_ == nullptr) {
+        return core::Status::failure(
+            "renderer.not_initialized",
+            "renderer must be initialized before processing chunk evictions");
+    }
+    return chunk_system_->process_chunk_evictions(eviction);
+}
+
+core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera) {
+    if (device_ == nullptr || chunk_system_ == nullptr || frame_builder_ == nullptr) {
+        return core::Result<rhi::RenderFrameStats>::failure(
+            "renderer.not_initialized", "renderer must be initialized before rendering");
+    }
+    auto draws = chunk_system_->build_draw_list(camera);
+    RenderCommandLists command_lists;
+    command_lists.world_draws = std::move(draws.draws);
+    auto frame = frame_builder_->build(camera, std::move(command_lists));
+    if (!frame) {
+        return core::Result<rhi::RenderFrameStats>::failure(frame.error().code,
+                                                            frame.error().message);
+    }
+    return device_->execute_frame(frame.value());
+}
+
+core::Status Renderer::resize(rhi::RenderExtent extent) {
+    if (device_ == nullptr || frame_builder_ == nullptr) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized before resizing");
+    }
+    auto status = device_->resize(extent);
+    if (!status) {
+        return status;
+    }
+    return frame_builder_->resize(extent);
+}
+
+bool Renderer::is_initialized() const noexcept {
+    return device_ != nullptr && chunk_cache_ != nullptr && chunk_system_ != nullptr &&
+           frame_builder_ != nullptr && terrain_pipeline_.is_valid();
+}
+
+const ChunkRenderStats& Renderer::chunk_stats() const noexcept {
+    return chunk_system_ == nullptr ? empty_chunk_stats : chunk_system_->stats();
+}
+
+rhi::IRenderDevice* Renderer::device() noexcept {
+    return device_.get();
+}
+
+const rhi::IRenderDevice* Renderer::device() const noexcept {
+    return device_.get();
+}
+
+core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> vertex_spirv,
+                                               std::span<const std::uint32_t> fragment_spirv) {
+    const auto material = core::PrototypeId::parse("base:materials/milestone_terrain");
+    if (!material) {
+        return core::Status::failure("renderer.invalid_terrain_material",
+                                     "internal terrain material prototype id is invalid");
+    }
+
+    rhi::RenderPipelineLayoutDesc layout;
+    layout.material_id = material.value();
+    layout.shader_template = {"base", "shaders/terrain.vert"};
+    layout.push_constant_ranges.push_back(
+        {rhi::RenderShaderStageFlags::vertex, 0, sizeof(rhi::ChunkPushConstants)});
+    layout.debug_name = "terrain_layout";
+    auto layout_result = device_->bind_pipeline_layout(std::move(layout));
+    if (!layout_result) {
+        return core::Status::failure(layout_result.error().code, layout_result.error().message);
+    }
+
+    auto vertex_shader = device_->create_shader_module(
+        {rhi::RenderShaderStage::vertex, "terrain_vertex"}, vertex_spirv);
+    if (!vertex_shader) {
+        return core::Status::failure(vertex_shader.error().code, vertex_shader.error().message);
+    }
+    terrain_vertex_shader_ = vertex_shader.value().handle;
+
+    auto fragment_shader = device_->create_shader_module(
+        {rhi::RenderShaderStage::fragment, "terrain_fragment"}, fragment_spirv);
+    if (!fragment_shader) {
+        return core::Status::failure(fragment_shader.error().code, fragment_shader.error().message);
+    }
+    terrain_fragment_shader_ = fragment_shader.value().handle;
+
+    rhi::RenderGraphicsPipelineDesc pipeline;
+    pipeline.vertex_shader = terrain_vertex_shader_;
+    pipeline.fragment_shader = terrain_fragment_shader_;
+    pipeline.material_id = material.value();
+    pipeline.debug_name = "terrain_pipeline";
+    pipeline.vertex_stride = sizeof(terrain::GpuChunkVertex);
+    pipeline.vertex_attributes.assign(terrain::gpu_chunk_vertex_attributes.begin(),
+                                      terrain::gpu_chunk_vertex_attributes.end());
+    pipeline.topology = rhi::RenderPrimitiveTopology::triangle_list;
+    pipeline.polygon_mode = rhi::RenderPolygonMode::fill;
+    pipeline.cull_mode = rhi::RenderCullMode::back;
+    pipeline.front_face = rhi::RenderFrontFace::counter_clockwise;
+    pipeline.depth_test_enable = true;
+    pipeline.depth_write_enable = true;
+    pipeline.depth_compare = rhi::RenderCompareOperation::less;
+    pipeline.blend_mode = rhi::RenderBlendMode::disabled;
+    pipeline.color_target_format = rhi::RenderImageFormat::rgba8_unorm;
+    pipeline.depth_target_format = rhi::RenderImageFormat::d32_sfloat;
+    auto pipeline_result = device_->create_graphics_pipeline(std::move(pipeline));
+    if (!pipeline_result) {
+        return core::Status::failure(pipeline_result.error().code, pipeline_result.error().message);
+    }
+    terrain_pipeline_ = pipeline_result.value().handle;
+    return core::Status::ok();
+}
+
+} // namespace heartstead::renderer
