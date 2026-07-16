@@ -4,6 +4,7 @@
 #include "engine/save/save_database.hpp"
 #include "engine/save/save_snapshot.hpp"
 #include "engine/simulation/simulation_lod.hpp"
+#include "engine/world/chunks/chunk_identity.hpp"
 #include "engine/world/regions/region_graph.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
@@ -72,6 +73,7 @@ enum class ChunkStreamLoadSource {
 
 struct ChunkStreamLoadReport {
     ChunkCoord coord;
+    ChunkIdentity identity;
     ChunkStreamLoadSource source = ChunkStreamLoadSource::already_loaded;
     bool chunk_was_already_loaded = false;
     bool generated_chunk_inserted = false;
@@ -101,6 +103,7 @@ struct ChunkStreamInterestPlan {
 struct ChunkStreamEvictionReport {
     std::size_t requested_count = 0;
     std::vector<ChunkCoord> evicted_chunks;
+    std::vector<ChunkIdentity> evicted_identities;
     std::vector<ChunkCoord> missing_chunks;
     std::vector<ChunkCoord> retained_dirty_chunks;
 

@@ -3,6 +3,8 @@
 #include "engine/world/voxels/voxel_palette.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <set>
@@ -12,6 +14,18 @@
 namespace heartstead::world {
 
 namespace {
+
+std::atomic<std::uint64_t> next_chunk_load_generation{1};
+
+[[nodiscard]] std::uint64_t allocate_load_generation() noexcept {
+    const auto generation = next_chunk_load_generation.fetch_add(1, std::memory_order_relaxed);
+    // Exhausting every 64-bit generation is not recoverable without reusing an identity. Preserve
+    // zero as the invalid generation even in that physically unreachable situation.
+    if (generation == 0) {
+        std::terminate();
+    }
+    return generation;
+}
 
 [[nodiscard]] std::uint64_t mix(std::uint64_t value) noexcept {
     value ^= value >> 30U;
@@ -36,7 +50,10 @@ std::size_t ChunkDatabase::ChunkCoordHash::operator()(ChunkCoord coord) const no
 }
 
 VoxelChunk& ChunkDatabase::get_or_create(ChunkCoord coord) {
-    const auto [it, _] = chunks_.try_emplace(coord, coord);
+    const auto [it, inserted] = chunks_.try_emplace(coord, coord);
+    if (inserted) {
+        it->second.assign_load_generation(allocate_load_generation());
+    }
     return it->second;
 }
 
@@ -56,6 +73,16 @@ std::vector<const VoxelChunk*> ChunkDatabase::records() const {
     for (const auto& [_, chunk] : chunks_) {
         result.push_back(&chunk);
     }
+    return result;
+}
+
+std::vector<ChunkIdentity> ChunkDatabase::identities() const {
+    std::vector<ChunkIdentity> result;
+    result.reserve(chunks_.size());
+    for (const auto& [_, chunk] : chunks_) {
+        result.push_back(chunk.identity());
+    }
+    std::ranges::sort(result);
     return result;
 }
 
@@ -231,6 +258,7 @@ core::Status ChunkDatabase::insert_generated_impl(VoxelChunk chunk,
                                      "generated chunk already exists");
     }
 
+    chunk.assign_load_generation(allocate_load_generation());
     chunks_.emplace(coord, std::move(chunk));
     if (dirty_regions != nullptr) {
         return mark_chunk_rebuild_regions(*dirty_regions, coord, "generated chunk");

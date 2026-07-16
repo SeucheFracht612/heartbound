@@ -4935,12 +4935,18 @@ void test_voxel_palette() {
 
 void test_world_voxel_chunk() {
     heartstead::world::VoxelChunk chunk({2, 0, -1});
+    const auto initial_revision = chunk.content_revision();
+    assert(initial_revision == 1);
+    assert(!chunk.identity().is_valid());
     auto initial = chunk.get({0, 0, 0});
     assert(initial);
     assert(initial.value().is_air());
 
     auto set_status = chunk.set({3, 4, 5}, heartstead::world::VoxelCell{42, 9});
     assert(set_status);
+    assert(chunk.content_revision() == initial_revision + 1);
+    assert(chunk.set({3, 4, 5}, heartstead::world::VoxelCell{42, 9}));
+    assert(chunk.content_revision() == initial_revision + 1);
 
     auto edited = chunk.get({3, 4, 5});
     assert(edited);
@@ -4953,12 +4959,23 @@ void test_world_voxel_chunk() {
 
     auto loaded_status = chunk.apply_saved_cell({4, 5, 6}, heartstead::world::VoxelCell{43, 10});
     assert(loaded_status);
+    assert(chunk.content_revision() == initial_revision + 2);
     auto loaded_cell = chunk.get({4, 5, 6});
     assert(loaded_cell);
     assert(loaded_cell.value().type == 43);
     assert(chunk.dirty().contains(heartstead::world::ChunkDirtyFlag::mesh));
     assert(!chunk.dirty().contains(heartstead::world::ChunkDirtyFlag::save));
     assert(!chunk.dirty().contains(heartstead::world::ChunkDirtyFlag::replication));
+
+    chunk.fill(heartstead::world::VoxelCell{6, 2});
+    assert(chunk.content_revision() == initial_revision + 3);
+    chunk.fill(heartstead::world::VoxelCell{6, 2});
+    assert(chunk.content_revision() == initial_revision + 3);
+
+    std::vector<heartstead::world::VoxelCell> generated(heartstead::world::VoxelChunk::total_cells,
+                                                        heartstead::world::VoxelCell::air());
+    assert(chunk.load_generated_cells(std::move(generated)));
+    assert(chunk.content_revision() == initial_revision + 4);
 
     auto outside = chunk.get({heartstead::world::VoxelChunk::edge_length, 0, 0});
     assert(!outside);
@@ -4979,6 +4996,10 @@ void test_chunk_database() {
     assert(origin.coord() == expected_origin);
     assert(neighbor.coord() == expected_neighbor);
     assert(database.chunk_count() == 2);
+    assert(origin.identity().is_valid());
+    assert(neighbor.identity().is_valid());
+    assert(origin.identity() != neighbor.identity());
+    const auto old_neighbor_identity = neighbor.identity();
 
     database.clear_all_dirty();
     assert(database.stats().dirty_mesh_count == 0);
@@ -5001,6 +5022,10 @@ void test_chunk_database() {
     heartstead::dirty::DirtyRegionTracker dirty_regions;
     auto& neighbor_after_erase = database.get_or_create({1, 0, 0});
     assert(neighbor_after_erase.coord() == expected_neighbor);
+    assert(neighbor_after_erase.identity().coordinate == old_neighbor_identity.coordinate);
+    assert(neighbor_after_erase.identity().load_generation > old_neighbor_identity.load_generation);
+    const auto identities = database.identities();
+    assert(identities.size() == 2);
     auto boundary_edit =
         database.set({0, 0, 0}, {heartstead::world::VoxelChunk::edge_length - 1, 4, 5},
                      heartstead::world::VoxelCell{8, 0}, dirty_regions);
@@ -12464,6 +12489,8 @@ void test_chunk_streamer() {
            std::string_view("generated"));
     assert(generated.value().generated_chunk_inserted);
     assert(!generated.value().saved_delta_applied);
+    assert(generated.value().identity.is_valid());
+    assert(generated.value().identity.coordinate == heartstead::world::ChunkCoord(0, 0, 0));
     assert(state.chunks().contains({0, 0, 0}));
     assert(state.chunks().stats().dirty_save_count == 0);
     assert(state.chunks().stats().dirty_replication_count == 0);
@@ -12474,6 +12501,7 @@ void test_chunk_streamer() {
     assert(already_loaded.value().source ==
            heartstead::world::ChunkStreamLoadSource::already_loaded);
     assert(already_loaded.value().chunk_was_already_loaded);
+    assert(already_loaded.value().identity == generated.value().identity);
     assert(state.chunks().chunk_count() == 1);
 
     struct TestDeltaSource final : heartstead::world::IChunkEditDeltaSource {
@@ -12594,6 +12622,7 @@ void test_chunk_streamer() {
 
     auto& clean_far_chunk = state.chunks().get_or_create({5, 0, 0});
     clean_far_chunk.clear_all_dirty();
+    const auto clean_far_identity = clean_far_chunk.identity();
     assert(state.chunks().set({6, 0, 0}, {0, 0, 0}, heartstead::world::VoxelCell{13, 0}));
     heartstead::world::ChunkStreamInterestPolicy interest_policy;
     interest_policy.load_radius_chunks = 1;
@@ -12634,6 +12663,8 @@ void test_chunk_streamer() {
     assert(eviction.evicted_count() == 1);
     const heartstead::world::ChunkCoord clean_evicted_coord{5, 0, 0};
     assert(eviction.evicted_chunks.front() == clean_evicted_coord);
+    assert(eviction.evicted_identities.size() == 1);
+    assert(eviction.evicted_identities.front() == clean_far_identity);
     assert(eviction.missing_chunks.size() == 1);
     const heartstead::world::ChunkCoord missing_eviction_coord{99, 0, 0};
     assert(eviction.missing_chunks.front() == missing_eviction_coord);

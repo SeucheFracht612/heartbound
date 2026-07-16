@@ -1,6 +1,8 @@
 #include "engine/world/voxels/voxel_chunk.hpp"
 
 #include <algorithm>
+#include <exception>
+#include <limits>
 #include <utility>
 
 namespace heartstead::world {
@@ -39,6 +41,14 @@ ChunkCoord VoxelChunk::coord() const noexcept {
     return coord_;
 }
 
+ChunkIdentity VoxelChunk::identity() const noexcept {
+    return {coord_, load_generation_};
+}
+
+std::uint64_t VoxelChunk::content_revision() const noexcept {
+    return content_revision_;
+}
+
 const ChunkDirtyState& VoxelChunk::dirty() const noexcept {
     return dirty_;
 }
@@ -64,6 +74,7 @@ core::Status VoxelChunk::set(VoxelCoord coord, VoxelCell cell) {
     }
 
     current = cell;
+    advance_content_revision();
     dirty_.mark(ChunkDirtyFlag::mesh);
     dirty_.mark(ChunkDirtyFlag::collision);
     dirty_.mark(ChunkDirtyFlag::lighting);
@@ -84,6 +95,7 @@ core::Status VoxelChunk::apply_saved_cell(VoxelCoord coord, VoxelCell cell) {
     }
 
     current = cell;
+    advance_content_revision();
     dirty_.mark(ChunkDirtyFlag::mesh);
     dirty_.mark(ChunkDirtyFlag::collision);
     dirty_.mark(ChunkDirtyFlag::lighting);
@@ -97,6 +109,7 @@ core::Status VoxelChunk::load_generated_cells(std::vector<VoxelCell> cells) {
     }
 
     cells_ = std::move(cells);
+    advance_content_revision();
     dirty_.clear_all();
     dirty_.mark(ChunkDirtyFlag::mesh);
     dirty_.mark(ChunkDirtyFlag::collision);
@@ -105,7 +118,12 @@ core::Status VoxelChunk::load_generated_cells(std::vector<VoxelCell> cells) {
 }
 
 void VoxelChunk::fill(VoxelCell cell) {
+    if (std::ranges::all_of(cells_, [cell](const VoxelCell& current) { return current == cell; })) {
+        return;
+    }
+
     std::ranges::fill(cells_, cell);
+    advance_content_revision();
     dirty_.mark(ChunkDirtyFlag::mesh);
     dirty_.mark(ChunkDirtyFlag::collision);
     dirty_.mark(ChunkDirtyFlag::lighting);
@@ -123,6 +141,17 @@ void VoxelChunk::clear_dirty(ChunkDirtyFlag flag) noexcept {
 
 void VoxelChunk::clear_all_dirty() noexcept {
     dirty_.clear_all();
+}
+
+void VoxelChunk::assign_load_generation(std::uint64_t generation) noexcept {
+    load_generation_ = generation;
+}
+
+void VoxelChunk::advance_content_revision() noexcept {
+    if (content_revision_ == std::numeric_limits<std::uint64_t>::max()) {
+        std::terminate();
+    }
+    ++content_revision_;
 }
 
 bool VoxelChunk::contains(VoxelCoord coord) noexcept {

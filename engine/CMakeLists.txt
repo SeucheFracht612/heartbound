@@ -236,6 +236,7 @@ target_sources(
       world/blocks/block_model.hpp
       world/chunks/chunk_database.hpp
       world/chunks/chunk_edit_delta_codec.hpp
+      world/chunks/chunk_identity.hpp
       world/coords/world_coords.hpp
       world/coords/world_position.hpp
       world/meshing/chunk_mesher.hpp

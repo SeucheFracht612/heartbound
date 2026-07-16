@@ -2,6 +2,7 @@
 
 #include "engine/core/result.hpp"
 #include "engine/dirty/dirty_region.hpp"
+#include "engine/world/chunks/chunk_identity.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 
 #include <cstddef>
@@ -36,6 +37,7 @@ class ChunkDatabase {
     [[nodiscard]] VoxelChunk* find(ChunkCoord coord) noexcept;
     [[nodiscard]] const VoxelChunk* find(ChunkCoord coord) const noexcept;
     [[nodiscard]] std::vector<const VoxelChunk*> records() const;
+    [[nodiscard]] std::vector<ChunkIdentity> identities() const;
     [[nodiscard]] bool contains(ChunkCoord coord) const noexcept;
     [[nodiscard]] std::size_t chunk_count() const noexcept;
     bool erase(ChunkCoord coord);
@@ -85,8 +87,7 @@ class ChunkDatabase {
                                          dirty::DirtyRegionTracker* dirty_regions);
     [[nodiscard]] core::Status
     mark_rich_mesh_invalidation(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
-                                std::uint16_t radius,
-                                dirty::DirtyRegionTracker& dirty_regions);
+                                std::uint16_t radius, dirty::DirtyRegionTracker& dirty_regions);
     [[nodiscard]] static dirty::DirtyRegionCoord dirty_coord_for_chunk(ChunkCoord coord) noexcept;
     [[nodiscard]] static core::Status
     mark_chunk_rebuild_regions(dirty::DirtyRegionTracker& dirty_regions, ChunkCoord coord,

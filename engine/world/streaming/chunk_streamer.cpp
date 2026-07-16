@@ -109,6 +109,7 @@ ChunkStreamer::load_chunk(WorldState& state, ChunkCoord coord,
     report.coord = coord;
 
     if (state.chunks().contains(coord)) {
+        report.identity = state.chunks().find(coord)->identity();
         report.chunk_was_already_loaded = true;
         report.source = ChunkStreamLoadSource::already_loaded;
         return core::Result<ChunkStreamLoadReport>::success(report);
@@ -129,6 +130,7 @@ ChunkStreamer::load_chunk(WorldState& state, ChunkCoord coord,
                                                                 status.error().message);
         }
         report.generated_chunk_inserted = true;
+        report.identity = state.chunks().find(coord)->identity();
         report.source = ChunkStreamLoadSource::generated;
         return core::Result<ChunkStreamLoadReport>::success(report);
     }
@@ -148,6 +150,7 @@ ChunkStreamer::load_chunk(WorldState& state, ChunkCoord coord,
                                                                 status.error().message);
         }
         report.generated_chunk_inserted = true;
+        report.identity = state.chunks().find(coord)->identity();
         report.source = ChunkStreamLoadSource::generated;
         return core::Result<ChunkStreamLoadReport>::success(report);
     }
@@ -166,6 +169,7 @@ ChunkStreamer::load_chunk(WorldState& state, ChunkCoord coord,
     }
 
     report.generated_chunk_inserted = true;
+    report.identity = state.chunks().find(coord)->identity();
     report.source = ChunkStreamLoadSource::generated_with_saved_delta;
     report.saved_delta_applied = true;
     report.saved_edit_count = edits.value().size();
@@ -285,8 +289,10 @@ ChunkStreamer::evict_chunks(WorldState& state, std::span<const ChunkCoord> reque
             report.retained_dirty_chunks.push_back(coord);
             continue;
         }
+        const auto identity = chunk->identity();
         if (state.chunks().erase(coord)) {
             report.evicted_chunks.push_back(coord);
+            report.evicted_identities.push_back(identity);
         } else {
             report.missing_chunks.push_back(coord);
         }

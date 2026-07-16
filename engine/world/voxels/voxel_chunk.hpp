@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/core/result.hpp"
+#include "engine/world/chunks/chunk_identity.hpp"
 #include "engine/world/coords/world_coords.hpp"
 
 #include <cstddef>
@@ -8,6 +9,8 @@
 #include <vector>
 
 namespace heartstead::world {
+
+class ChunkDatabase;
 
 struct VoxelCell {
     std::uint16_t type = 0;
@@ -56,6 +59,8 @@ class VoxelChunk {
     explicit VoxelChunk(ChunkCoord coord);
 
     [[nodiscard]] ChunkCoord coord() const noexcept;
+    [[nodiscard]] ChunkIdentity identity() const noexcept;
+    [[nodiscard]] std::uint64_t content_revision() const noexcept;
     [[nodiscard]] const ChunkDirtyState& dirty() const noexcept;
     [[nodiscard]] core::Result<VoxelCell> get(VoxelCoord coord) const;
 
@@ -68,12 +73,18 @@ class VoxelChunk {
     void clear_all_dirty() noexcept;
 
   private:
+    friend class ChunkDatabase;
+
     [[nodiscard]] static bool contains(VoxelCoord coord) noexcept;
     [[nodiscard]] static std::size_t index_of(VoxelCoord coord) noexcept;
+    void assign_load_generation(std::uint64_t generation) noexcept;
+    void advance_content_revision() noexcept;
 
     ChunkCoord coord_;
     std::vector<VoxelCell> cells_;
     ChunkDirtyState dirty_;
+    std::uint64_t content_revision_ = 1;
+    std::uint64_t load_generation_ = 0;
 };
 
 } // namespace heartstead::world
