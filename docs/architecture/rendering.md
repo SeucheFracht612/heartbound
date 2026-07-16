@@ -196,6 +196,10 @@ Implemented foundation:
     descriptor set objects for material pipeline layouts without exposing their handles
   - requests the Khronos validation layer and `VK_EXT_debug_utils` when available, routes warning
     and error callbacks into engine logging, and degrades to a startup warning when unavailable
+  - records delayed timestamp-query results for the complete GPU frame, opaque terrain pass,
+    transfer interval, and final swapchain copy without stalling to read the current frame
+  - emits Vulkan debug labels around opaque terrain, frame transfer, final copy, and sampled-image
+    upload command regions
   - reports unavailable when Vulkan is not compiled in or no graphics-capable physical device is
     present
   - does not expose Vulkan handles through the RHI
@@ -212,6 +216,22 @@ budget meshing/uploads, retain GPU meshes, frustum-cull entries, and build the u
 pass. Camera-relative positioning, depth testing, camera controls, resize/minimize handling,
 swapchain recreation, and clean shutdown all use `execute_frame()`; no separate
 `bind_mesh_draws()` submission is required.
+
+Milestone 3 instrumentation is exposed through `Renderer::stats()`. Scoped CPU zones distinguish
+chunk synchronization, extraction, culling, draw-list and command construction, chunk snapshot
+capture, meshing, upload preparation, upload copying, backend command recording, and time blocked
+on acquire/fence/device synchronization. Vulkan timestamp results carry the source frame index and
+latency in frames, so callers never confuse delayed GPU measurements with the current CPU frame.
+The headless backend validates the same submission and counter structure while reporting GPU timing
+as unavailable.
+
+`apps/render_benchmark` provides deterministic flat, mountain, cave, checkerboard, cross-plane
+forest, rapid-edit, high-speed flythrough, load/unload churn, large-coordinate, and
+resize/minimize scenes. Integer/hash-based generation and frame-indexed stress schedules make the
+workloads reproducible. The recorder excludes warm-up frames, retains complete per-frame renderer
+statistics, computes median/p95/p99/max frame time and 1%/0.1% low FPS, and exports JSON or CSV.
+Rendering is uncapped unless a frame cap is explicitly requested. Headless is the automation
+default; Vulkan mode opens a native window and adds GPU pass timings.
 
 The backend intentionally remains a one-frame-in-flight MVP and currently supports one
 draw-producing Vulkan pass per unified submission. General multi-pass Vulkan execution, staged

@@ -1,0 +1,413 @@
+#include "engine/core/logging.hpp"
+#include "engine/platform/platform.hpp"
+#include "engine/renderer/benchmark/benchmark_scene.hpp"
+#include "engine/renderer/benchmark/benchmark_statistics.hpp"
+#include "engine/renderer/renderer.hpp"
+#include "engine/renderer/shaders/spirv_loader.hpp"
+
+#include <charconv>
+#include <chrono>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <vector>
+
+namespace {
+
+using namespace heartstead;
+
+enum class OutputFormat {
+    json,
+    csv,
+};
+
+struct Options {
+    renderer::rhi::RenderBackend backend = renderer::rhi::RenderBackend::headless;
+    renderer::benchmark::BenchmarkSceneKind scene =
+        renderer::benchmark::BenchmarkSceneKind::flat_terrain;
+    std::uint64_t seed = 0x485354454144ULL;
+    std::uint64_t warmup_frames = 60;
+    std::uint64_t measured_frames = 300;
+    std::uint32_t chunk_radius = 1;
+    std::uint32_t frame_cap = 0;
+    OutputFormat format = OutputFormat::json;
+    std::filesystem::path output;
+    bool validation = true;
+};
+
+[[nodiscard]] int fail(std::string_view message) {
+    core::log(core::LogLevel::error, message);
+    return 1;
+}
+
+void print_usage() {
+    std::cout
+        << "Usage: heartstead_render_benchmark [options]\n"
+           "  --scene NAME       flat, mountains, caves, checkerboard, forest, rapid-edits,\n"
+           "                     flythrough, churn, large-coordinates, resize-minimize\n"
+           "  --vulkan           Use a native Vulkan window (headless is the default)\n"
+           "  --headless         Use the deterministic validation backend\n"
+           "  --frames N         Measured frames (default 300)\n"
+           "  --warmup N         Unrecorded warm-up frames (default 60)\n"
+           "  --radius N         Horizontal chunk radius, 0..8 (default 1)\n"
+           "  --seed N           Deterministic unsigned 64-bit scene seed\n"
+           "  --frame-cap N      Sleep to cap at N FPS; 0 is uncapped (default)\n"
+           "  --output PATH      Result path (default benchmark-SCENE.json)\n"
+           "  --format json|csv  Result serialization format\n"
+           "  --no-validation    Do not request Vulkan validation\n"
+           "  --list-scenes      Print scene names\n"
+           "  --help             Print this help\n";
+}
+
+void print_scenes() {
+    using Kind = renderer::benchmark::BenchmarkSceneKind;
+    constexpr Kind kinds[]{
+        Kind::flat_terrain,          Kind::mountainous_terrain,
+        Kind::dense_caves,           Kind::checkerboard_geometry,
+        Kind::forest_cross_planes,   Kind::rapid_voxel_edits,
+        Kind::high_speed_flythrough, Kind::chunk_load_unload_churn,
+        Kind::large_coordinates,     Kind::resize_minimize_stress,
+    };
+    for (const auto kind : kinds) {
+        std::cout << renderer::benchmark::benchmark_scene_name(kind) << '\n';
+    }
+}
+
+template <typename Integer>
+[[nodiscard]] std::optional<Integer> parse_unsigned(std::string_view text) noexcept {
+    Integer value = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+[[nodiscard]] core::Result<Options> parse_options(int argc, char** argv) {
+    Options options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument = argv[index];
+        const auto next_value = [&]() -> core::Result<std::string_view> {
+            if (index + 1 >= argc) {
+                return core::Result<std::string_view>::failure(
+                    "renderer.benchmark_missing_argument",
+                    std::string(argument) + " requires a value");
+            }
+            ++index;
+            return core::Result<std::string_view>::success(argv[index]);
+        };
+        if (argument == "--help") {
+            print_usage();
+            std::exit(0);
+        }
+        if (argument == "--list-scenes") {
+            print_scenes();
+            std::exit(0);
+        }
+        if (argument == "--vulkan") {
+            options.backend = renderer::rhi::RenderBackend::vulkan;
+        } else if (argument == "--headless") {
+            options.backend = renderer::rhi::RenderBackend::headless;
+        } else if (argument == "--no-validation") {
+            options.validation = false;
+        } else if (argument == "--scene") {
+            auto value = next_value();
+            if (!value) {
+                return core::Result<Options>::failure(value.error().code, value.error().message);
+            }
+            const auto scene = renderer::benchmark::parse_benchmark_scene(value.value());
+            if (!scene) {
+                return core::Result<Options>::failure(
+                    "renderer.benchmark_unknown_scene",
+                    "unknown benchmark scene: " + std::string(value.value()));
+            }
+            options.scene = *scene;
+        } else if (argument == "--frames" || argument == "--warmup" || argument == "--seed" ||
+                   argument == "--radius" || argument == "--frame-cap") {
+            auto value = next_value();
+            if (!value) {
+                return core::Result<Options>::failure(value.error().code, value.error().message);
+            }
+            if (argument == "--frames") {
+                const auto parsed = parse_unsigned<std::uint64_t>(value.value());
+                if (!parsed || *parsed == 0) {
+                    return core::Result<Options>::failure(
+                        "renderer.benchmark_invalid_frames", "--frames must be greater than zero");
+                }
+                options.measured_frames = *parsed;
+            } else if (argument == "--warmup") {
+                const auto parsed = parse_unsigned<std::uint64_t>(value.value());
+                if (!parsed) {
+                    return core::Result<Options>::failure(
+                        "renderer.benchmark_invalid_warmup", "--warmup must be an unsigned integer");
+                }
+                options.warmup_frames = *parsed;
+            } else if (argument == "--seed") {
+                const auto parsed = parse_unsigned<std::uint64_t>(value.value());
+                if (!parsed) {
+                    return core::Result<Options>::failure(
+                        "renderer.benchmark_invalid_seed", "--seed must be an unsigned integer");
+                }
+                options.seed = *parsed;
+            } else if (argument == "--radius") {
+                const auto parsed = parse_unsigned<std::uint32_t>(value.value());
+                if (!parsed || *parsed > 8) {
+                    return core::Result<Options>::failure(
+                        "renderer.benchmark_invalid_radius", "--radius must be in the range 0..8");
+                }
+                options.chunk_radius = *parsed;
+            } else {
+                const auto parsed = parse_unsigned<std::uint32_t>(value.value());
+                if (!parsed) {
+                    return core::Result<Options>::failure(
+                        "renderer.benchmark_invalid_frame_cap",
+                        "--frame-cap must be an unsigned integer");
+                }
+                options.frame_cap = *parsed;
+            }
+        } else if (argument == "--output") {
+            auto value = next_value();
+            if (!value) {
+                return core::Result<Options>::failure(value.error().code, value.error().message);
+            }
+            options.output = value.value();
+        } else if (argument == "--format") {
+            auto value = next_value();
+            if (!value) {
+                return core::Result<Options>::failure(value.error().code, value.error().message);
+            }
+            if (value.value() == "json") {
+                options.format = OutputFormat::json;
+            } else if (value.value() == "csv") {
+                options.format = OutputFormat::csv;
+            } else {
+                return core::Result<Options>::failure(
+                    "renderer.benchmark_invalid_format", "--format must be json or csv");
+            }
+        } else {
+            return core::Result<Options>::failure(
+                "renderer.benchmark_unknown_option", "unknown option: " + std::string(argument));
+        }
+    }
+    if (options.output.empty()) {
+        options.output = "benchmark-" +
+                         std::string(renderer::benchmark::benchmark_scene_name(options.scene)) +
+                         (options.format == OutputFormat::json ? ".json" : ".csv");
+    }
+    return core::Result<Options>::success(options);
+}
+
+struct NativeWindow {
+    std::unique_ptr<platform::IPlatform> platform;
+    platform::WindowId id;
+};
+
+[[nodiscard]] core::Result<NativeWindow>
+create_native_window(renderer::rhi::RenderExtent extent) {
+    auto active_platform = platform::create_platform({platform::PlatformBackend::native});
+    if (!active_platform) {
+        return core::Result<NativeWindow>::failure(active_platform.error().code,
+                                                   active_platform.error().message);
+    }
+    auto window = active_platform.value()->create_window(
+        {"Heartstead Renderer Benchmark", extent.width, extent.height, true});
+    if (!window) {
+        return core::Result<NativeWindow>::failure(window.error().code, window.error().message);
+    }
+    return core::Result<NativeWindow>::success(
+        NativeWindow{std::move(active_platform).value(), window.value()});
+}
+
+[[nodiscard]] bool pump_native_events(NativeWindow& window,
+                                      renderer::Renderer& active_renderer,
+                                      renderer::RenderCamera& camera) {
+    window.platform->begin_frame();
+    while (auto event = window.platform->poll_event()) {
+        if (event->kind == platform::PlatformEventKind::quit_requested ||
+            event->kind == platform::PlatformEventKind::window_closed) {
+            window.platform->request_quit();
+        } else if (event->kind == platform::PlatformEventKind::window_resized &&
+                   event->window_id == window.id && event->width != 0 && event->height != 0) {
+            const renderer::rhi::RenderExtent extent{event->width, event->height};
+            if (!active_renderer.resize(extent) ||
+                !camera.set_aspect_ratio(static_cast<float>(extent.width) /
+                                         static_cast<float>(extent.height))) {
+                window.platform->request_quit();
+            }
+        }
+    }
+    return !window.platform->should_quit();
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    using namespace heartstead;
+    const auto parsed_options = parse_options(argc, argv);
+    if (!parsed_options) {
+        print_usage();
+        return fail(parsed_options.error().message);
+    }
+    const auto options = parsed_options.value();
+    constexpr renderer::rhi::RenderExtent initial_extent{1280, 720};
+
+    renderer::benchmark::BenchmarkSceneConfig scene_config;
+    scene_config.kind = options.scene;
+    scene_config.seed = options.seed;
+    scene_config.chunk_radius = options.chunk_radius;
+    scene_config.initial_extent = initial_extent;
+    auto scene = renderer::benchmark::BenchmarkScene::create(scene_config);
+    if (!scene) {
+        return fail(scene.error().message);
+    }
+
+    std::optional<NativeWindow> native_window;
+    std::optional<platform::NativeWindowHandle> native_handle;
+    if (options.backend == renderer::rhi::RenderBackend::vulkan) {
+        auto window = create_native_window(initial_extent);
+        if (!window) {
+            return fail(window.error().message);
+        }
+        native_window = std::move(window).value();
+        native_handle = native_window->platform->native_window_handle(native_window->id);
+        if (!native_handle) {
+            return fail("native platform did not expose a Vulkan window handle");
+        }
+    }
+
+    renderer::rhi::RenderDeviceDesc device_desc;
+    device_desc.backend = options.backend;
+    device_desc.application_name = "Heartstead Renderer Benchmark";
+    device_desc.initial_extent = initial_extent;
+    device_desc.present_mode = renderer::rhi::PresentMode::immediate;
+    device_desc.enable_validation = options.validation;
+    device_desc.native_window = native_handle;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    if (!device) {
+        return fail(device.error().message);
+    }
+
+    std::vector<std::uint32_t> vertex_spirv;
+    std::vector<std::uint32_t> fragment_spirv;
+    if (options.backend == renderer::rhi::RenderBackend::vulkan) {
+        const auto shader_root =
+            std::filesystem::path{HEARTSTEAD_RENDER_BENCHMARK_ASSET_DIR} / "shaders";
+        auto vertex = renderer::shaders::load_spirv_file(shader_root / "terrain.vert.spv");
+        auto fragment = renderer::shaders::load_spirv_file(shader_root / "terrain.frag.spv");
+        if (!vertex || !fragment) {
+            return fail(!vertex ? vertex.error().message : fragment.error().message);
+        }
+        vertex_spirv = std::move(vertex).value();
+        fragment_spirv = std::move(fragment).value();
+    } else {
+        vertex_spirv = {0x07230203, 0x00010000, 0, 1, 0};
+        fragment_spirv = vertex_spirv;
+    }
+
+    renderer::RendererInitDesc renderer_init;
+    renderer_init.device = std::move(device).value();
+    renderer_init.terrain_vertex_spirv = std::move(vertex_spirv);
+    renderer_init.terrain_fragment_spirv = std::move(fragment_spirv);
+    renderer_init.voxel_palette = &scene.value()->palette();
+    renderer_init.chunk_config.max_chunks_meshed_per_frame = 64;
+    renderer_init.chunk_config.max_bytes_uploaded_per_frame = 512U * 1024U * 1024U;
+    renderer::Renderer active_renderer;
+    auto status = active_renderer.initialize(std::move(renderer_init));
+    if (!status) {
+        return fail(status.error().message);
+    }
+
+    const auto scene_name =
+        std::string(renderer::benchmark::benchmark_scene_name(options.scene));
+    renderer::benchmark::BenchmarkRecorder recorder(scene_name, options.seed);
+    core::log(core::LogLevel::info,
+              "Benchmark " + scene_name + " starting: " +
+                  std::to_string(options.warmup_frames) + " warm-up, " +
+                  std::to_string(options.measured_frames) + " measured, " +
+                  (options.frame_cap == 0 ? "uncapped" : std::to_string(options.frame_cap) + " FPS") +
+                  ", backend=" +
+                  std::string(renderer::rhi::render_backend_name(options.backend)));
+
+    std::uint64_t simulation_frame = 0;
+    std::uint64_t rendered_frames = 0;
+    std::uint64_t measured_frames = 0;
+    bool keep_running = true;
+    while (keep_running && measured_frames < options.measured_frames) {
+        const auto frame_started = std::chrono::steady_clock::now();
+        if (native_window &&
+            !pump_native_events(*native_window, active_renderer, scene.value()->camera())) {
+            break;
+        }
+        auto step = scene.value()->advance(simulation_frame++);
+        if (!step) {
+            return fail(step.error().message);
+        }
+        if (step.value().requested_extent && step.value().requested_extent->is_valid()) {
+            const auto extent = *step.value().requested_extent;
+            status = active_renderer.resize(extent);
+            if (!status) {
+                return fail(status.error().message);
+            }
+            status = scene.value()->camera().set_aspect_ratio(
+                static_cast<float>(extent.width) / static_cast<float>(extent.height));
+            if (!status) {
+                return fail(status.error().message);
+            }
+        }
+        if (!step.value().skip_render) {
+            status = active_renderer.synchronize_chunks(scene.value()->world(),
+                                                        scene.value()->camera());
+            if (!status) {
+                return fail(status.error().message);
+            }
+            auto frame = active_renderer.render(scene.value()->camera());
+            if (!frame) {
+                return fail(frame.error().message);
+            }
+            ++rendered_frames;
+            if (rendered_frames > options.warmup_frames) {
+                recorder.record(active_renderer.stats());
+                ++measured_frames;
+            }
+            if (rendered_frames <= 3 || rendered_frames % 120 == 0) {
+                core::log(core::LogLevel::info,
+                          renderer::format_renderer_stats(active_renderer.stats()));
+            }
+        }
+        if (options.frame_cap != 0) {
+            const auto frame_duration =
+                std::chrono::duration<double>(1.0 / static_cast<double>(options.frame_cap));
+            std::this_thread::sleep_until(frame_started +
+                                          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+                                              frame_duration));
+        }
+    }
+
+    status = active_renderer.shutdown();
+    if (!status) {
+        return fail(status.error().message);
+    }
+    if (native_window && native_window->platform->find_window(native_window->id) != nullptr) {
+        (void)native_window->platform->close_window(native_window->id);
+    }
+    if (measured_frames != options.measured_frames) {
+        return fail("benchmark stopped before collecting the requested measured frames");
+    }
+
+    status = options.format == OutputFormat::json ? recorder.write_json(options.output)
+                                                   : recorder.write_csv(options.output);
+    if (!status) {
+        return fail(status.error().message);
+    }
+    core::log(core::LogLevel::info,
+              renderer::benchmark::format_benchmark_summary(recorder.summarize()));
+    core::log(core::LogLevel::info, "Wrote benchmark results to " + options.output.string());
+    return 0;
+}

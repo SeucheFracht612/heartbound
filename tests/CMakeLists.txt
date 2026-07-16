@@ -48,6 +48,20 @@ endfunction()
 
 heartstead_add_smoke_test(smoke.platform heartstead_platform_smoke)
 heartstead_add_smoke_test(smoke.renderer heartstead_renderer_smoke)
+heartstead_add_smoke_test(
+  smoke.render_benchmark
+  heartstead_render_benchmark
+  --scene
+  flat
+  --radius
+  0
+  --warmup
+  1
+  --frames
+  3
+  --output
+  ${CMAKE_CURRENT_BINARY_DIR}/smoke_render_benchmark.json
+)
 heartstead_add_smoke_test(smoke.physics heartstead_physics_sandbox)
 heartstead_add_smoke_test(smoke.network heartstead_network_sandbox)
 heartstead_add_smoke_test(smoke.scripting heartstead_scripting_sandbox)

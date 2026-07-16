@@ -1,1 +1,2 @@
 add_subdirectory(render_smoke)
+add_subdirectory(render_benchmark)

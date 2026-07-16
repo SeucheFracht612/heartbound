@@ -172,6 +172,9 @@ Implemented in this repository:
 - native Milestone 2 Vulkan application backed by a retained renderer, budgeted chunk mesh/upload
   queues, revision/generation-safe GPU cache, frustum culling, camera-relative multi-chunk indexed
   drawing, resize/minimize handling, validation callbacks, and clean shutdown
+- Milestone 3 CPU zones, delayed Vulkan timestamp queries and debug labels, unified renderer
+  counters, ten deterministic benchmark/stress scenes, percentile and low-FPS summaries, uncapped
+  execution, and complete JSON/CSV frame export
 - CTest coverage for unit tests plus headless-safe sample and tool smoke tests
 
 Gameplay system rules, general multi-pass production rendering, production physics/networking/
@@ -242,6 +245,17 @@ Run the native Vulkan terrain milestone (requires X11 and a present-capable Vulk
 Use WASD and Space to move, hold the right mouse button to look, and press Escape or close the
 window to exit. See [`docs/dev/build_instructions.md`](docs/dev/build_instructions.md) for shader
 rebuild commands and validation details.
+
+Run an uncapped deterministic renderer benchmark (headless by default, add `--vulkan` for GPU
+timestamps and a native window):
+
+```bash
+./build/default-debug/apps/render_benchmark/heartstead_render_benchmark \
+  --scene flat --warmup 120 --frames 1000 --output build/benchmarks/flat.json
+```
+
+Use `--list-scenes` to enumerate the static and stress workloads. The output includes every
+per-frame renderer timing/counter plus median, p95, p99, maximum, 1% low, and 0.1% low statistics.
 
 Useful tools after building:
 

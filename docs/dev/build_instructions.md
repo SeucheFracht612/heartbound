@@ -119,6 +119,29 @@ spirv-val apps/render_smoke/assets/shaders/terrain.frag.spv
 The build copies these assets beside `heartstead_render_smoke`, and the application loads and
 checks the SPIR-V header before creating Vulkan shader modules.
 
+Run a deterministic renderer benchmark headlessly:
+
+```bash
+./build/default-debug/apps/render_benchmark/heartstead_render_benchmark \
+  --scene mountains --warmup 120 --frames 1000 --radius 2 \
+  --output build/benchmarks/mountains.json
+```
+
+Use the native Vulkan backend to collect delayed GPU timestamp measurements:
+
+```bash
+./build/default-debug/apps/render_benchmark/heartstead_render_benchmark \
+  --vulkan --scene checkerboard --warmup 120 --frames 1000 --radius 1 \
+  --format csv --output build/benchmarks/checkerboard-vulkan.csv
+```
+
+The runner is uncapped by default. Add `--frame-cap 60` only when a capped comparison is intended.
+Use `--list-scenes` for all deterministic workloads. JSON contains a summary plus full per-frame
+records; CSV contains the same timing and renderer-counter columns. The summary reports median,
+95th/99th percentiles, 1%/0.1% low FPS, maximum frame time, and mean CPU, GPU, meshing, upload, and
+GPU-wait times. Vulkan validation is requested by default and remains optional when the Khronos
+layer is not installed.
+
 Run mod/prototype validation tools:
 
 ```bash

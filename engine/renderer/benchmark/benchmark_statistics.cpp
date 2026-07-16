@@ -179,18 +179,35 @@ std::string BenchmarkRecorder::to_json() const {
         output << "    {\"frame\": " << sample.frame_index
                << ", \"cpu_frame_ms\": " << sample.cpu_frame_ms
                << ", \"gpu_valid\": " << (sample.gpu_timing_valid ? "true" : "false")
+               << ", \"gpu_timing_frame\": " << sample.gpu_timing_frame_index
+               << ", \"gpu_latency_frames\": " << sample.gpu_timing_latency_frames
                << ", \"gpu_frame_ms\": " << sample.gpu_frame_ms
+               << ", \"gpu_opaque_ms\": " << sample.gpu_opaque_terrain_ms
+               << ", \"gpu_transfer_ms\": " << sample.gpu_transfer_ms
+               << ", \"gpu_final_copy_ms\": " << sample.gpu_final_copy_ms
+               << ", \"extraction_ms\": " << sample.render_extraction_ms
                << ", \"sync_ms\": " << sample.chunk_synchronization_ms
                << ", \"culling_ms\": " << sample.culling_ms
+               << ", \"draw_list_ms\": " << sample.draw_list_ms
                << ", \"command_build_ms\": " << sample.command_build_ms
                << ", \"command_recording_ms\": " << sample.command_recording_ms
+               << ", \"snapshot_ms\": " << sample.chunk_snapshot_ms
                << ", \"meshing_ms\": " << sample.meshing_ms
+               << ", \"upload_preparation_ms\": " << sample.upload_preparation_ms
                << ", \"upload_ms\": " << sample.upload_ms
                << ", \"gpu_wait_ms\": " << sample.gpu_wait_ms
+               << ", \"loaded_chunks\": " << sample.loaded_chunks
+               << ", \"mesh_pending_chunks\": " << sample.mesh_pending_chunks
+               << ", \"upload_pending_chunks\": " << sample.upload_pending_chunks
                << ", \"resident_chunks\": " << sample.resident_chunks
                << ", \"visible_chunks\": " << sample.visible_chunks
+               << ", \"culled_chunks\": " << sample.culled_chunks
+               << ", \"drawn_chunks\": " << sample.drawn_chunks
                << ", \"draw_calls\": " << sample.draw_calls
+               << ", \"vertices\": " << sample.vertices
                << ", \"triangles\": " << sample.triangles
+               << ", \"resident_mesh_bytes\": " << sample.resident_mesh_bytes
+               << ", \"pending_upload_bytes\": " << sample.pending_upload_bytes
                << ", \"uploaded_bytes\": " << sample.uploaded_bytes_this_frame << "}";
         output << (index + 1 == samples_.size() ? "\n" : ",\n");
     }
@@ -201,19 +218,29 @@ std::string BenchmarkRecorder::to_json() const {
 std::string BenchmarkRecorder::to_csv() const {
     std::ostringstream output;
     output << std::fixed << std::setprecision(6);
-    output << "scene,seed,frame,cpu_frame_ms,gpu_valid,gpu_frame_ms,sync_ms,culling_ms,"
-              "command_build_ms,command_recording_ms,meshing_ms,upload_ms,gpu_wait_ms,"
-              "loaded_chunks,resident_chunks,visible_chunks,draw_calls,vertices,triangles,"
-              "resident_mesh_bytes,pending_upload_bytes,uploaded_bytes\n";
+    output << "scene,seed,frame,cpu_frame_ms,gpu_valid,gpu_timing_frame,gpu_latency_frames,"
+              "gpu_frame_ms,gpu_opaque_ms,gpu_transfer_ms,gpu_final_copy_ms,extraction_ms,"
+              "sync_ms,culling_ms,draw_list_ms,command_build_ms,command_recording_ms,snapshot_ms,"
+              "meshing_ms,upload_preparation_ms,upload_ms,gpu_wait_ms,loaded_chunks,"
+              "mesh_pending_chunks,upload_pending_chunks,resident_chunks,visible_chunks,"
+              "culled_chunks,drawn_chunks,draw_calls,vertices,triangles,resident_mesh_bytes,"
+              "pending_upload_bytes,uploaded_bytes\n";
     for (const auto& sample : samples_) {
         output << '"' << scene_ << "\"," << seed_ << ',' << sample.frame_index << ','
                << sample.cpu_frame_ms << ',' << (sample.gpu_timing_valid ? 1 : 0) << ','
-               << sample.gpu_frame_ms << ',' << sample.chunk_synchronization_ms << ','
-               << sample.culling_ms << ',' << sample.command_build_ms << ','
-               << sample.command_recording_ms << ',' << sample.meshing_ms << ','
-               << sample.upload_ms << ',' << sample.gpu_wait_ms << ',' << sample.loaded_chunks << ','
+               << sample.gpu_timing_frame_index << ',' << sample.gpu_timing_latency_frames << ','
+               << sample.gpu_frame_ms << ',' << sample.gpu_opaque_terrain_ms << ','
+               << sample.gpu_transfer_ms << ',' << sample.gpu_final_copy_ms << ','
+               << sample.render_extraction_ms << ',' << sample.chunk_synchronization_ms << ','
+               << sample.culling_ms << ',' << sample.draw_list_ms << ','
+               << sample.command_build_ms << ',' << sample.command_recording_ms << ','
+               << sample.chunk_snapshot_ms << ',' << sample.meshing_ms << ','
+               << sample.upload_preparation_ms << ',' << sample.upload_ms << ','
+               << sample.gpu_wait_ms << ',' << sample.loaded_chunks << ','
+               << sample.mesh_pending_chunks << ',' << sample.upload_pending_chunks << ','
                << sample.resident_chunks << ',' << sample.visible_chunks << ','
-               << sample.draw_calls << ',' << sample.vertices << ',' << sample.triangles << ','
+               << sample.culled_chunks << ',' << sample.drawn_chunks << ',' << sample.draw_calls
+               << ',' << sample.vertices << ',' << sample.triangles << ','
                << sample.resident_mesh_bytes << ',' << sample.pending_upload_bytes << ','
                << sample.uploaded_bytes_this_frame << '\n';
     }
