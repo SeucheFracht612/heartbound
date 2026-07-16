@@ -345,6 +345,7 @@ struct RenderComputePipelineStats {
 enum class RenderVertexAttributeFormat : std::uint8_t {
     float2,
     float3,
+    float4,
     sint16x4,
     uint16x2,
     uint16,
@@ -355,6 +356,7 @@ enum class RenderVertexAttributeFormat : std::uint8_t {
 
 enum class RenderPrimitiveTopology : std::uint8_t {
     triangle_list,
+    line_list,
 };
 
 enum class RenderPolygonMode : std::uint8_t {

@@ -78,6 +78,29 @@ struct Options {
             }
         }
     }
+    const auto debug_center = camera.local_position + camera.forward() * 8.0F;
+    auto debug_origin = world::WorldPosition::from_anchor(
+        camera.floating_origin.block,
+        {static_cast<double>(debug_center.x), static_cast<double>(debug_center.y),
+         static_cast<double>(debug_center.z)});
+    if (!debug_origin) {
+        return core::Status::failure(debug_origin.error().code, debug_origin.error().message);
+    }
+    auto* debug = active_renderer.debug_renderer();
+    if (debug == nullptr) {
+        return core::Status::failure("renderer.benchmark_missing_debug_renderer",
+                                     "forest benchmark requires the debug renderer");
+    }
+    auto debug_status = debug->submit_axes(debug_origin.value(), 2.0F, 3'600.0F);
+    if (!debug_status) {
+        return debug_status;
+    }
+    debug_status = debug->submit_aabb(debug_origin.value(), {{-4.0F, -2.0F, -4.0F},
+                                                             {4.0F, 2.0F, 4.0F}},
+                                      {1.0F, 0.72F, 0.12F, 1.0F}, 3'600.0F);
+    if (!debug_status) {
+        return debug_status;
+    }
     return core::Status::ok();
 }
 
@@ -331,6 +354,8 @@ int main(int argc, char** argv) {
     std::vector<std::uint32_t> fragment_spirv;
     std::vector<std::uint32_t> static_vertex_spirv;
     std::vector<std::uint32_t> static_fragment_spirv;
+    std::vector<std::uint32_t> debug_vertex_spirv;
+    std::vector<std::uint32_t> debug_fragment_spirv;
     if (options.backend == renderer::rhi::RenderBackend::vulkan) {
         const auto shader_root =
             std::filesystem::path{HEARTSTEAD_RENDER_BENCHMARK_ASSET_DIR} / "shaders";
@@ -340,22 +365,33 @@ int main(int argc, char** argv) {
             renderer::shaders::load_spirv_file(shader_root / "static_mesh.vert.spv");
         auto static_fragment =
             renderer::shaders::load_spirv_file(shader_root / "static_mesh.frag.spv");
-        if (!vertex || !fragment || !static_vertex || !static_fragment) {
+        auto debug_vertex =
+            renderer::shaders::load_spirv_file(shader_root / "debug_line.vert.spv");
+        auto debug_fragment =
+            renderer::shaders::load_spirv_file(shader_root / "debug_line.frag.spv");
+        if (!vertex || !fragment || !static_vertex || !static_fragment || !debug_vertex ||
+            !debug_fragment) {
             const auto& error = !vertex          ? vertex.error()
                                 : !fragment      ? fragment.error()
                                 : !static_vertex ? static_vertex.error()
-                                                 : static_fragment.error();
+                                : !static_fragment ? static_fragment.error()
+                                : !debug_vertex    ? debug_vertex.error()
+                                                   : debug_fragment.error();
             return fail(error.message);
         }
         vertex_spirv = std::move(vertex).value();
         fragment_spirv = std::move(fragment).value();
         static_vertex_spirv = std::move(static_vertex).value();
         static_fragment_spirv = std::move(static_fragment).value();
+        debug_vertex_spirv = std::move(debug_vertex).value();
+        debug_fragment_spirv = std::move(debug_fragment).value();
     } else {
         vertex_spirv = {0x07230203, 0x00010000, 0, 1, 0};
         fragment_spirv = vertex_spirv;
         static_vertex_spirv = vertex_spirv;
         static_fragment_spirv = vertex_spirv;
+        debug_vertex_spirv = vertex_spirv;
+        debug_fragment_spirv = vertex_spirv;
     }
 
     renderer::RendererInitDesc renderer_init;
@@ -364,6 +400,8 @@ int main(int argc, char** argv) {
     renderer_init.terrain_fragment_spirv = std::move(fragment_spirv);
     renderer_init.static_mesh_vertex_spirv = std::move(static_vertex_spirv);
     renderer_init.static_mesh_fragment_spirv = std::move(static_fragment_spirv);
+    renderer_init.debug_vertex_spirv = std::move(debug_vertex_spirv);
+    renderer_init.debug_fragment_spirv = std::move(debug_fragment_spirv);
     renderer_init.voxel_palette = &scene.value()->palette();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 64;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 512U * 1024U * 1024U;

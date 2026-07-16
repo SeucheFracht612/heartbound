@@ -7,6 +7,7 @@
 #include "engine/renderer/assets/shader_manager.hpp"
 #include "engine/renderer/assets/texture_manager.hpp"
 #include "engine/renderer/chunks/chunk_render_system.hpp"
+#include "engine/renderer/debug/debug_renderer.hpp"
 #include "engine/renderer/frame/frame_builder.hpp"
 #include "engine/renderer/materials/material_runtime_cache.hpp"
 #include "engine/renderer/materials/pipeline_cache.hpp"
@@ -32,11 +33,14 @@ struct RendererInitDesc {
     std::vector<std::uint32_t> terrain_fragment_spirv;
     std::vector<std::uint32_t> static_mesh_vertex_spirv;
     std::vector<std::uint32_t> static_mesh_fragment_spirv;
+    std::vector<std::uint32_t> debug_vertex_spirv;
+    std::vector<std::uint32_t> debug_fragment_spirv;
     const world::VoxelPalette* voxel_palette = nullptr;
     ChunkRenderConfig chunk_config{};
     ChunkGpuCacheConfig chunk_gpu_cache_config{};
     MeshManagerConfig mesh_manager_config{};
     SceneRenderConfig scene_render_config{};
+    DebugRendererConfig debug_renderer_config{};
     rhi::ClearColor clear_color{0.055F, 0.09F, 0.14F, 1.0F};
     rhi::RenderEnvironmentData environment{};
     bool development_shader_hot_reload = false;
@@ -63,7 +67,8 @@ class Renderer {
     process_chunk_evictions(const world::ChunkStreamEvictionReport& eviction);
 
     [[nodiscard]] core::Result<rhi::RenderFrameStats> render(const RenderCamera& camera,
-                                                             float simulation_alpha = 1.0F);
+                                                             float simulation_alpha = 1.0F,
+                                                             float delta_seconds = 0.0F);
     [[nodiscard]] core::Status resize(rhi::RenderExtent extent);
     [[nodiscard]] core::Status set_environment(rhi::RenderEnvironmentData environment);
     [[nodiscard]] RenderObjectId reserve_object_id();
@@ -80,12 +85,18 @@ class Renderer {
     [[nodiscard]] core::Status
     reload_static_mesh_shaders(std::span<const std::uint32_t> vertex_spirv,
                                std::span<const std::uint32_t> fragment_spirv);
+    [[nodiscard]] core::Status
+    reload_debug_shaders(std::span<const std::uint32_t> vertex_spirv,
+                         std::span<const std::uint32_t> fragment_spirv);
 
     [[nodiscard]] bool is_initialized() const noexcept;
     [[nodiscard]] const ChunkRenderStats& chunk_stats() const noexcept;
     [[nodiscard]] const RendererStats& stats() const noexcept;
     [[nodiscard]] const SceneRenderStats& scene_stats() const noexcept;
     [[nodiscard]] RenderMeshHandle fallback_mesh() const noexcept;
+    [[nodiscard]] DebugRenderer* debug_renderer() noexcept;
+    [[nodiscard]] const DebugRenderer* debug_renderer() const noexcept;
+    [[nodiscard]] std::span<const DebugTextLabelFrame> debug_text_labels() const noexcept;
     [[nodiscard]] rhi::IRenderDevice* device() noexcept;
     [[nodiscard]] const rhi::IRenderDevice* device() const noexcept;
 
@@ -97,6 +108,9 @@ class Renderer {
     [[nodiscard]] core::Status
     create_scene_pipelines(std::span<const std::uint32_t> vertex_spirv,
                            std::span<const std::uint32_t> fragment_spirv);
+    [[nodiscard]] core::Status
+    create_debug_pipelines(std::span<const std::uint32_t> vertex_spirv,
+                           std::span<const std::uint32_t> fragment_spirv);
     void update_frontend_stats(std::size_t loaded_chunk_count) noexcept;
     void update_backend_stats(const rhi::RenderFrameStats& frame) noexcept;
 
@@ -105,8 +119,11 @@ class Renderer {
     std::array<GraphicsPipelineKey, 4> terrain_pipeline_keys_{};
     ScenePipelineSet scene_pipelines_{};
     std::array<GraphicsPipelineKey, 3> scene_pipeline_keys_{};
+    DebugPipelineSet debug_pipelines_{};
+    std::array<GraphicsPipelineKey, 2> debug_pipeline_keys_{};
     ShaderProgramHandle terrain_shader_program_;
     ShaderProgramHandle scene_shader_program_;
+    ShaderProgramHandle debug_shader_program_;
     TextureHandle terrain_texture_array_;
     rhi::RenderResourceHandle terrain_sampler_;
     std::unique_ptr<ShaderManager> shader_manager_;
@@ -118,12 +135,15 @@ class Renderer {
     std::unique_ptr<ChunkGpuCache> chunk_cache_;
     std::unique_ptr<ChunkRenderSystem> chunk_system_;
     std::unique_ptr<SceneRenderSystem> scene_render_system_;
+    std::unique_ptr<DebugRenderer> debug_renderer_;
     std::unique_ptr<FrameBuilder> frame_builder_;
     RenderScene scene_;
     profiling::CpuTimingRecorder cpu_timings_{};
     std::vector<rhi::RenderDrawCommand> chunk_draw_scratch_;
     RenderCommandLists draw_command_scratch_;
     SceneDrawCommands scene_draw_scratch_;
+    DebugFrameCommands debug_frame_scratch_;
+    std::vector<DebugTextLabelFrame> debug_text_labels_;
     rhi::RenderEnvironmentData environment_{};
     RendererStats stats_{};
     std::chrono::steady_clock::time_point frame_started_at_{};

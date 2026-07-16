@@ -60,6 +60,9 @@ struct RendererStats {
     std::uint32_t instance_draw_calls = 0;
     std::uint32_t dropped_instances = 0;
     std::uint32_t resident_static_meshes = 0;
+    std::uint32_t debug_lines = 0;
+    std::uint32_t debug_draw_calls = 0;
+    std::uint32_t debug_labels = 0;
 
     std::uint64_t vertices = 0;
     std::uint64_t triangles = 0;
@@ -67,6 +70,8 @@ struct RendererStats {
     std::uint64_t resident_mesh_bytes = 0;
     std::uint64_t resident_static_mesh_bytes = 0;
     std::uint64_t uploaded_instance_bytes = 0;
+    std::uint64_t debug_overflow = 0;
+    std::uint64_t debug_uploaded_bytes = 0;
     std::uint64_t gpu_terrain_budget_bytes = 0;
     std::uint64_t distance_evicted_meshes = 0;
     std::uint64_t memory_pressure_evicted_meshes = 0;

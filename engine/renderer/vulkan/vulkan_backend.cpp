@@ -779,6 +779,8 @@ vulkan_primitive_topology(rhi::RenderPrimitiveTopology topology) noexcept {
     switch (topology) {
     case rhi::RenderPrimitiveTopology::triangle_list:
         return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    case rhi::RenderPrimitiveTopology::line_list:
+        return VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
     }
     return VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 }
@@ -2432,6 +2434,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     break;
                 case rhi::RenderVertexAttributeFormat::float3:
                     format = VK_FORMAT_R32G32B32_SFLOAT;
+                    break;
+                case rhi::RenderVertexAttributeFormat::float4:
+                    format = VK_FORMAT_R32G32B32A32_SFLOAT;
                     break;
                 case rhi::RenderVertexAttributeFormat::sint16x4:
                     format = VK_FORMAT_R16G16B16A16_SINT;

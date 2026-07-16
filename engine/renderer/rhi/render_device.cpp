@@ -1153,6 +1153,9 @@ core::Status validate_render_graphics_pipeline_shape(const RenderGraphicsPipelin
         case RenderVertexAttributeFormat::float3:
             byte_size = 12;
             break;
+        case RenderVertexAttributeFormat::float4:
+            byte_size = 16;
+            break;
         case RenderVertexAttributeFormat::sint16x4:
             byte_size = 8;
             break;
@@ -1180,6 +1183,7 @@ core::Status validate_render_graphics_pipeline_shape(const RenderGraphicsPipelin
     }
     switch (desc.topology) {
     case RenderPrimitiveTopology::triangle_list:
+    case RenderPrimitiveTopology::line_list:
         break;
     }
     switch (desc.polygon_mode) {
@@ -1514,6 +1518,8 @@ std::string_view render_primitive_topology_name(RenderPrimitiveTopology value) n
     switch (value) {
     case RenderPrimitiveTopology::triangle_list:
         return "triangle_list";
+    case RenderPrimitiveTopology::line_list:
+        return "line_list";
     }
     return "unknown";
 }

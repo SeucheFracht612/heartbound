@@ -78,6 +78,7 @@ target_sources(
     renderer/chunks/chunk_gpu_cache.cpp
     renderer/chunks/chunk_mesh_scheduler.cpp
     renderer/chunks/chunk_render_system.cpp
+    renderer/debug/debug_renderer.cpp
     renderer/frame/frame_builder.cpp
     renderer/memory/gpu_buffer_arena.cpp
     renderer/memory/staging_ring.cpp
@@ -229,6 +230,7 @@ target_sources(
       renderer/chunks/chunk_gpu_cache.hpp
       renderer/chunks/chunk_mesh_scheduler.hpp
       renderer/chunks/chunk_render_system.hpp
+      renderer/debug/debug_renderer.hpp
       renderer/frame/frame_builder.hpp
       renderer/frame/render_commands.hpp
       renderer/memory/gpu_buffer_arena.hpp

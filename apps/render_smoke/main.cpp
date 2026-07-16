@@ -107,6 +107,10 @@ int main() {
         renderer::shaders::load_spirv_file(shader_root / "static_mesh.vert.spv");
     auto static_fragment_spirv =
         renderer::shaders::load_spirv_file(shader_root / "static_mesh.frag.spv");
+    auto debug_vertex_spirv =
+        renderer::shaders::load_spirv_file(shader_root / "debug_line.vert.spv");
+    auto debug_fragment_spirv =
+        renderer::shaders::load_spirv_file(shader_root / "debug_line.frag.spv");
     if (!vertex_spirv) {
         return fail("Vertex shader loading failed visibly: " + vertex_spirv.error().message);
     }
@@ -118,6 +122,11 @@ int main() {
                     (!static_vertex_spirv ? static_vertex_spirv.error().message
                                           : static_fragment_spirv.error().message));
     }
+    if (!debug_vertex_spirv || !debug_fragment_spirv) {
+        return fail("Debug shader loading failed visibly: " +
+                    (!debug_vertex_spirv ? debug_vertex_spirv.error().message
+                                         : debug_fragment_spirv.error().message));
+    }
 
     renderer::RendererInitDesc renderer_init;
     renderer_init.device = std::move(device).value();
@@ -125,6 +134,8 @@ int main() {
     renderer_init.terrain_fragment_spirv = std::move(fragment_spirv).value();
     renderer_init.static_mesh_vertex_spirv = std::move(static_vertex_spirv).value();
     renderer_init.static_mesh_fragment_spirv = std::move(static_fragment_spirv).value();
+    renderer_init.debug_vertex_spirv = std::move(debug_vertex_spirv).value();
+    renderer_init.debug_fragment_spirv = std::move(debug_fragment_spirv).value();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 2;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 4 * 1024 * 1024;
     renderer::Renderer retained_renderer;
@@ -255,7 +266,7 @@ int main() {
         if (!renderer_status) {
             return fail(renderer_status.error().message);
         }
-        auto frame = retained_renderer.render(camera);
+        auto frame = retained_renderer.render(camera, 1.0F, delta_seconds);
         if (!frame) {
             return fail(frame.error().message);
         }
