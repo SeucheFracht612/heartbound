@@ -71,7 +71,9 @@ slowest frame. GPU means include only samples whose validity flag is true.
 
 Terrain uses integer coordinate hashes and an explicit seed. Dynamic edits, churn, camera motion,
 and resize phases are indexed by simulation frame. Initial chunks settle to resident meshes before
-warm-up begins. Rendering is uncapped when `--frame-cap` is zero, which is the default.
+warm-up begins. The flythrough follows a triangular high-speed path bounded by the loaded terrain
+footprint, so long measurements continue to cull and draw geometry instead of flying into an empty
+world. Rendering is uncapped when `--frame-cap` is zero, which is the default.
 
 JSON uses schema `heartstead.renderer_benchmark.v1`. Both export formats record the scene, seed,
 backend, mesher, initial resolution, radius, warm-up/measured frame counts, frame cap, and validation
@@ -122,4 +124,3 @@ columns, including the upload submission serial and timing validity fields.
 the intended availability warning and continued; the native logs contained no renderer error,
 VUID, or debug-messenger diagnostics. A validation-layer run remains part of the normal verification
 command on a host or CI image that provides the layer.
-

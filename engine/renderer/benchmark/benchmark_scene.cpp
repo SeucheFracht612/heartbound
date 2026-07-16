@@ -36,8 +36,7 @@ constexpr std::uint16_t foliage_type = 4;
     return mix_hash(value);
 }
 
-[[nodiscard]] std::size_t cell_index(std::uint16_t x, std::uint16_t y,
-                                     std::uint16_t z) noexcept {
+[[nodiscard]] std::size_t cell_index(std::uint16_t x, std::uint16_t y, std::uint16_t z) noexcept {
     constexpr auto edge = static_cast<std::size_t>(world::VoxelChunk::edge_length);
     return static_cast<std::size_t>(z) * edge * edge + static_cast<std::size_t>(y) * edge +
            static_cast<std::size_t>(x);
@@ -46,8 +45,8 @@ constexpr std::uint16_t foliage_type = 4;
 [[nodiscard]] core::Result<core::PrototypeId> prototype(std::string_view value) {
     auto parsed = core::PrototypeId::parse(value);
     if (!parsed) {
-        return core::Result<core::PrototypeId>::failure(
-            "renderer.benchmark_invalid_prototype", "invalid built-in benchmark prototype id");
+        return core::Result<core::PrototypeId>::failure("renderer.benchmark_invalid_prototype",
+                                                        "invalid built-in benchmark prototype id");
     }
     return core::Result<core::PrototypeId>::success(std::move(*parsed));
 }
@@ -100,16 +99,11 @@ std::string_view benchmark_scene_name(BenchmarkSceneKind kind) noexcept {
 
 std::optional<BenchmarkSceneKind> parse_benchmark_scene(std::string_view name) noexcept {
     constexpr std::array kinds{
-        BenchmarkSceneKind::flat_terrain,
-        BenchmarkSceneKind::mountainous_terrain,
-        BenchmarkSceneKind::dense_caves,
-        BenchmarkSceneKind::checkerboard_geometry,
-        BenchmarkSceneKind::forest_cross_planes,
-        BenchmarkSceneKind::rapid_voxel_edits,
-        BenchmarkSceneKind::high_speed_flythrough,
-        BenchmarkSceneKind::chunk_load_unload_churn,
-        BenchmarkSceneKind::large_coordinates,
-        BenchmarkSceneKind::resize_minimize_stress,
+        BenchmarkSceneKind::flat_terrain,          BenchmarkSceneKind::mountainous_terrain,
+        BenchmarkSceneKind::dense_caves,           BenchmarkSceneKind::checkerboard_geometry,
+        BenchmarkSceneKind::forest_cross_planes,   BenchmarkSceneKind::rapid_voxel_edits,
+        BenchmarkSceneKind::high_speed_flythrough, BenchmarkSceneKind::chunk_load_unload_churn,
+        BenchmarkSceneKind::large_coordinates,     BenchmarkSceneKind::resize_minimize_stress,
     };
     const auto found = std::ranges::find_if(
         kinds, [name](BenchmarkSceneKind kind) { return benchmark_scene_name(kind) == name; });
@@ -134,8 +128,7 @@ BenchmarkScene::BenchmarkScene(BenchmarkSceneConfig config) : config_(config) {
     }
 }
 
-core::Result<std::unique_ptr<BenchmarkScene>> BenchmarkScene::create(
-    BenchmarkSceneConfig config) {
+core::Result<std::unique_ptr<BenchmarkScene>> BenchmarkScene::create(BenchmarkSceneConfig config) {
     auto status = config.validate();
     if (!status) {
         return core::Result<std::unique_ptr<BenchmarkScene>>::failure(status.error().code,
@@ -286,8 +279,7 @@ core::Status BenchmarkScene::insert_generated_chunk(world::ChunkCoord coordinate
     return world_.chunks().insert_generated(std::move(chunk), world_.dirty_regions());
 }
 
-std::vector<world::VoxelCell>
-BenchmarkScene::generate_cells(world::ChunkCoord coordinate) const {
+std::vector<world::VoxelCell> BenchmarkScene::generate_cells(world::ChunkCoord coordinate) const {
     std::vector<world::VoxelCell> cells(world::VoxelChunk::total_cells, world::VoxelCell::air());
     constexpr auto edge_i64 = static_cast<std::int64_t>(world::VoxelChunk::edge_length);
     const auto shape = terrain_shape_for(config_.kind);
@@ -312,8 +304,7 @@ BenchmarkScene::generate_cells(world::ChunkCoord coordinate) const {
                     const auto height = std::clamp<std::int64_t>(
                         31 - folded_x / 3 - folded_z / 4 + roughness, 4, 31);
                     if (static_cast<std::int64_t>(y) <= height) {
-                        type = static_cast<std::int64_t>(y) == height ? surface_type
-                                                                     : stone_type;
+                        type = static_cast<std::int64_t>(y) == height ? surface_type : stone_type;
                     }
                     break;
                 }
@@ -332,8 +323,8 @@ BenchmarkScene::generate_cells(world::ChunkCoord coordinate) const {
                 case BenchmarkSceneKind::forest_cross_planes:
                     if (y <= 6) {
                         type = y == 6 ? surface_type : soil_type;
-                    } else if (y == 7 && coordinate_hash(global_x, 0, global_z, config_.seed) % 29 ==
-                                             0) {
+                    } else if (y == 7 &&
+                               coordinate_hash(global_x, 0, global_z, config_.seed) % 29 == 0) {
                         type = foliage_type;
                     }
                     break;
@@ -410,10 +401,10 @@ core::Status BenchmarkScene::apply_rapid_edits(std::uint64_t frame_index) {
         const auto y = static_cast<std::uint16_t>(10U + (edit % 8U));
         const auto z = static_cast<std::uint16_t>((frame_index * 3U + edit * 11U) % 32U);
         const auto filled = ((frame_index + static_cast<std::uint64_t>(edit)) & 1U) == 0;
-        const auto cell = filled ? world::VoxelCell{stone_type, 255, 0, 0}
-                                 : world::VoxelCell::air();
-        auto status = world_.chunks().set(coordinate, {x, y, z}, cell, world_.dirty_regions(),
-                                          palette_);
+        const auto cell =
+            filled ? world::VoxelCell{stone_type, 255, 0, 0} : world::VoxelCell::air();
+        auto status =
+            world_.chunks().set(coordinate, {x, y, z}, cell, world_.dirty_regions(), palette_);
         if (!status) {
             return status;
         }
@@ -438,7 +429,12 @@ void BenchmarkScene::update_flythrough_camera(std::uint64_t frame_index) noexcep
     constexpr auto edge = static_cast<std::int64_t>(world::VoxelChunk::edge_length);
     const auto center_x = center_chunk_.x * edge + 16;
     const auto center_z = center_chunk_.z * edge + 16;
-    const auto travel = static_cast<std::int64_t>(frame_index % 2'000) * 4;
+    const auto amplitude =
+        std::max<std::int64_t>(edge / 2, static_cast<std::int64_t>(config_.chunk_radius) * edge);
+    const auto path_length = amplitude * 4;
+    const auto phase =
+        static_cast<std::int64_t>((frame_index * 4) % static_cast<std::uint64_t>(path_length));
+    const auto travel = phase <= amplitude * 2 ? -amplitude + phase : amplitude * 3 - phase;
     camera_.floating_origin.block = {center_x + travel, 0, center_z + edge * 3};
     camera_.local_position = {0.25F, 24.0F, 0.5F};
     camera_.yaw_radians = -0.15F;

@@ -155,8 +155,15 @@ void test_dynamic_scene_schedules() {
     fly_config.chunk_radius = 0;
     auto flythrough = BenchmarkScene::create(fly_config);
     assert(flythrough);
+    assert(flythrough.value()->advance(0));
+    const auto first_flythrough_x = flythrough.value()->camera().floating_origin.block.x;
+    assert(flythrough.value()->advance(3));
+    const auto moved_flythrough_x = flythrough.value()->camera().floating_origin.block.x;
+    assert(first_flythrough_x != moved_flythrough_x);
     assert(flythrough.value()->advance(99));
     assert(flythrough.value()->camera().floating_origin.block.x > 30'000'000'000LL);
+    assert(std::abs(flythrough.value()->camera().floating_origin.block.x - 32'000'000'016LL) <=
+           static_cast<std::int64_t>(heartstead::world::VoxelChunk::edge_length));
     assert(std::abs(flythrough.value()->camera().local_position.x) < 1.0F);
 
     BenchmarkSceneConfig resize_config;
