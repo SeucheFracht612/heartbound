@@ -43,10 +43,22 @@ struct BenchmarkSummary {
     double mean_cpu_frame_ms = 0.0;
     double mean_gpu_frame_ms = 0.0;
     double mean_gpu_upload_ms = 0.0;
+    double mean_render_extraction_ms = 0.0;
+    double mean_chunk_synchronization_ms = 0.0;
+    double mean_culling_ms = 0.0;
+    double mean_draw_list_ms = 0.0;
+    double mean_command_build_ms = 0.0;
+    double mean_command_recording_ms = 0.0;
+    double mean_chunk_snapshot_ms = 0.0;
     double mean_meshing_ms = 0.0;
+    double mean_upload_preparation_ms = 0.0;
     double mean_upload_ms = 0.0;
     double mean_gpu_wait_ms = 0.0;
+    double mean_gpu_opaque_terrain_ms = 0.0;
+    double mean_gpu_transfer_ms = 0.0;
+    double mean_gpu_final_copy_ms = 0.0;
     std::uint64_t total_uploaded_bytes = 0;
+    RendererStats slowest_frame{};
 };
 
 class BenchmarkRecorder {

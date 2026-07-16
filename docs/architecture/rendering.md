@@ -280,6 +280,10 @@ statistics, computes median/p95/p99/max frame time and 1%/0.1% low FPS, and expo
 Both exports carry a versioned schema and the complete run configuration (scene, seed, backend,
 mesher, resolution, radius, warm-up/measurement counts, frame cap, and validation request); CSV
 repeats summary statistics on each frame row so it remains self-contained for tabular analysis.
+The summary aggregates every CPU and GPU interval independently and preserves the complete CPU
+subsystem breakdown for the slowest frame, while the frame records retain delayed GPU source-frame
+and upload-submission identities. A spike can therefore be attributed without aligning asynchronous
+GPU results to the wrong CPU frame.
 Rendering is uncapped unless a frame cap is explicitly requested. Headless is the automation
 default; Vulkan mode opens a native window and adds GPU pass timings. Before warm-up and measured
 simulation begin, the benchmark settles all initially loaded chunks to resident meshes. Streaming

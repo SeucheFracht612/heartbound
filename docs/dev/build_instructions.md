@@ -151,10 +151,12 @@ Use `--list-scenes` for all deterministic workloads. JSON contains a summary plu
 records; CSV contains the same timing and renderer-counter columns and repeats the run summary on
 each row for standalone analysis. Both formats record a versioned schema plus backend, mesher,
 initial resolution, chunk radius, warm-up/measured frame counts, frame cap, validation request,
-scene, and seed so a result file carries the configuration needed to reproduce it. The summary reports median,
-95th/99th percentiles, 1%/0.1% low FPS, maximum frame time, and mean CPU, GPU, meshing, upload, and
-GPU-wait times. Vulkan validation is requested by default and remains optional when the Khronos
-layer is not installed.
+scene, and seed so a result file carries the configuration needed to reproduce it. The summary
+reports median, 95th/99th percentiles, 1%/0.1% low FPS, maximum frame time, and mean CPU, GPU,
+meshing, upload, and GPU-wait times. It also reports mean extraction, synchronization, culling,
+draw-list, command-build, command-recording, snapshot, upload-preparation, and GPU pass intervals,
+plus the full CPU timing breakdown of the slowest measured frame. Vulkan validation is requested by
+default and remains optional when the Khronos layer is not installed.
 
 Run mod/prototype validation tools:
 

@@ -26,6 +26,8 @@ void test_benchmark_statistics() {
         RendererStats stats;
         stats.frame_index = index;
         stats.cpu_frame_ms = frame_times[index];
+        stats.chunk_synchronization_ms = static_cast<double>(index) * 2.0;
+        stats.command_recording_ms = 0.125 * static_cast<double>(index);
         stats.meshing_ms = static_cast<double>(index);
         stats.upload_ms = 0.5;
         stats.gpu_wait_ms = 0.25;
@@ -56,6 +58,9 @@ void test_benchmark_statistics() {
     assert(std::abs(summary.point_one_percent_low_fps - 10.0) < 0.0001);
     assert(summary.maximum_frame_ms == 100.0);
     assert(summary.total_uploaded_bytes == 64);
+    assert(summary.slowest_frame.frame_index == 3);
+    assert(std::abs(summary.mean_chunk_synchronization_ms - 3.0) < 0.0001);
+    assert(std::abs(summary.mean_command_recording_ms - 0.1875) < 0.0001);
     assert(recorder.metadata().initial_width == 1920);
     assert(recorder.to_json().find("\"schema\": \"heartstead.renderer_benchmark.v1\"") !=
            std::string::npos);
@@ -63,6 +68,7 @@ void test_benchmark_statistics() {
     assert(recorder.to_json().find("\"p99_frame_ms\": 97.090000") != std::string::npos);
     assert(recorder.to_json().find("\"frames\": [") != std::string::npos);
     assert(recorder.to_json().find("\"gpu_upload_ms\": 0.750000") != std::string::npos);
+    assert(recorder.to_json().find("\"slowest_frame\": {\"frame\": 3") != std::string::npos);
     assert(
         recorder.to_csv().find(
             "scene,seed,backend,mesher,initial_width,initial_height,chunk_radius,warmup_frames") ==

@@ -138,18 +138,40 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
     double cpu_total = 0.0;
     double gpu_total = 0.0;
     double gpu_upload_total = 0.0;
+    double extraction_total = 0.0;
+    double synchronization_total = 0.0;
+    double culling_total = 0.0;
+    double draw_list_total = 0.0;
+    double command_build_total = 0.0;
+    double command_recording_total = 0.0;
+    double snapshot_total = 0.0;
     double meshing_total = 0.0;
+    double upload_preparation_total = 0.0;
     double upload_total = 0.0;
     double gpu_wait_total = 0.0;
+    double gpu_opaque_total = 0.0;
+    double gpu_transfer_total = 0.0;
+    double gpu_final_copy_total = 0.0;
     for (const auto& sample : samples_) {
         frame_times.push_back(sample.cpu_frame_ms);
         cpu_total += sample.cpu_frame_ms;
+        extraction_total += sample.render_extraction_ms;
+        synchronization_total += sample.chunk_synchronization_ms;
+        culling_total += sample.culling_ms;
+        draw_list_total += sample.draw_list_ms;
+        command_build_total += sample.command_build_ms;
+        command_recording_total += sample.command_recording_ms;
+        snapshot_total += sample.chunk_snapshot_ms;
         meshing_total += sample.meshing_ms;
+        upload_preparation_total += sample.upload_preparation_ms;
         upload_total += sample.upload_ms;
         gpu_wait_total += sample.gpu_wait_ms;
         summary.total_uploaded_bytes += sample.uploaded_bytes_this_frame;
         if (sample.gpu_timing_valid) {
             gpu_total += sample.gpu_frame_ms;
+            gpu_opaque_total += sample.gpu_opaque_terrain_ms;
+            gpu_transfer_total += sample.gpu_transfer_ms;
+            gpu_final_copy_total += sample.gpu_final_copy_ms;
             ++summary.gpu_sample_count;
         }
         if (sample.gpu_upload_timing_valid) {
@@ -164,13 +186,29 @@ BenchmarkSummary BenchmarkRecorder::summarize() const {
     summary.one_percent_low_fps = low_fps(frame_times, 0.01);
     summary.point_one_percent_low_fps = low_fps(frame_times, 0.001);
     summary.maximum_frame_ms = frame_times.back();
+    summary.slowest_frame = *std::ranges::max_element(
+        samples_, {}, [](const RendererStats& sample) { return sample.cpu_frame_ms; });
     const auto sample_count = static_cast<double>(samples_.size());
     summary.mean_cpu_frame_ms = cpu_total / sample_count;
+    summary.mean_render_extraction_ms = extraction_total / sample_count;
+    summary.mean_chunk_synchronization_ms = synchronization_total / sample_count;
+    summary.mean_culling_ms = culling_total / sample_count;
+    summary.mean_draw_list_ms = draw_list_total / sample_count;
+    summary.mean_command_build_ms = command_build_total / sample_count;
+    summary.mean_command_recording_ms = command_recording_total / sample_count;
+    summary.mean_chunk_snapshot_ms = snapshot_total / sample_count;
     summary.mean_meshing_ms = meshing_total / sample_count;
+    summary.mean_upload_preparation_ms = upload_preparation_total / sample_count;
     summary.mean_upload_ms = upload_total / sample_count;
     summary.mean_gpu_wait_ms = gpu_wait_total / sample_count;
     if (summary.gpu_sample_count != 0) {
         summary.mean_gpu_frame_ms = gpu_total / static_cast<double>(summary.gpu_sample_count);
+        summary.mean_gpu_opaque_terrain_ms =
+            gpu_opaque_total / static_cast<double>(summary.gpu_sample_count);
+        summary.mean_gpu_transfer_ms =
+            gpu_transfer_total / static_cast<double>(summary.gpu_sample_count);
+        summary.mean_gpu_final_copy_ms =
+            gpu_final_copy_total / static_cast<double>(summary.gpu_sample_count);
     }
     if (summary.gpu_upload_sample_count != 0) {
         summary.mean_gpu_upload_ms =
@@ -211,10 +249,35 @@ std::string BenchmarkRecorder::to_json() const {
            << "    \"mean_cpu_frame_ms\": " << summary.mean_cpu_frame_ms << ",\n"
            << "    \"mean_gpu_frame_ms\": " << summary.mean_gpu_frame_ms << ",\n"
            << "    \"mean_gpu_upload_ms\": " << summary.mean_gpu_upload_ms << ",\n"
+           << "    \"mean_render_extraction_ms\": " << summary.mean_render_extraction_ms << ",\n"
+           << "    \"mean_chunk_synchronization_ms\": " << summary.mean_chunk_synchronization_ms
+           << ",\n"
+           << "    \"mean_culling_ms\": " << summary.mean_culling_ms << ",\n"
+           << "    \"mean_draw_list_ms\": " << summary.mean_draw_list_ms << ",\n"
+           << "    \"mean_command_build_ms\": " << summary.mean_command_build_ms << ",\n"
+           << "    \"mean_command_recording_ms\": " << summary.mean_command_recording_ms << ",\n"
+           << "    \"mean_chunk_snapshot_ms\": " << summary.mean_chunk_snapshot_ms << ",\n"
            << "    \"mean_meshing_ms\": " << summary.mean_meshing_ms << ",\n"
+           << "    \"mean_upload_preparation_ms\": " << summary.mean_upload_preparation_ms << ",\n"
            << "    \"mean_upload_ms\": " << summary.mean_upload_ms << ",\n"
            << "    \"mean_gpu_wait_ms\": " << summary.mean_gpu_wait_ms << ",\n"
-           << "    \"total_uploaded_bytes\": " << summary.total_uploaded_bytes << "\n"
+           << "    \"mean_gpu_opaque_terrain_ms\": " << summary.mean_gpu_opaque_terrain_ms << ",\n"
+           << "    \"mean_gpu_transfer_ms\": " << summary.mean_gpu_transfer_ms << ",\n"
+           << "    \"mean_gpu_final_copy_ms\": " << summary.mean_gpu_final_copy_ms << ",\n"
+           << "    \"total_uploaded_bytes\": " << summary.total_uploaded_bytes << ",\n"
+           << "    \"slowest_frame\": {\"frame\": " << summary.slowest_frame.frame_index
+           << ", \"cpu_frame_ms\": " << summary.slowest_frame.cpu_frame_ms
+           << ", \"extraction_ms\": " << summary.slowest_frame.render_extraction_ms
+           << ", \"sync_ms\": " << summary.slowest_frame.chunk_synchronization_ms
+           << ", \"culling_ms\": " << summary.slowest_frame.culling_ms
+           << ", \"draw_list_ms\": " << summary.slowest_frame.draw_list_ms
+           << ", \"command_build_ms\": " << summary.slowest_frame.command_build_ms
+           << ", \"command_recording_ms\": " << summary.slowest_frame.command_recording_ms
+           << ", \"snapshot_ms\": " << summary.slowest_frame.chunk_snapshot_ms
+           << ", \"meshing_ms\": " << summary.slowest_frame.meshing_ms
+           << ", \"upload_preparation_ms\": " << summary.slowest_frame.upload_preparation_ms
+           << ", \"upload_ms\": " << summary.slowest_frame.upload_ms
+           << ", \"gpu_wait_ms\": " << summary.slowest_frame.gpu_wait_ms << "}\n"
            << "  },\n  \"frames\": [\n";
     for (std::size_t index = 0; index < samples_.size(); ++index) {
         const auto& sample = samples_[index];
@@ -352,8 +415,12 @@ std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     } else {
         output << summary.mean_gpu_upload_ms << "ms";
     }
-    output << " mesh=" << summary.mean_meshing_ms << "ms upload=" << summary.mean_upload_ms
-           << "ms wait=" << summary.mean_gpu_wait_ms << "ms";
+    output << " sync=" << summary.mean_chunk_synchronization_ms
+           << "ms cull=" << summary.mean_culling_ms << "ms build=" << summary.mean_command_build_ms
+           << "ms record=" << summary.mean_command_recording_ms
+           << "ms mesh=" << summary.mean_meshing_ms << "ms upload=" << summary.mean_upload_ms
+           << "ms wait=" << summary.mean_gpu_wait_ms
+           << "ms slowest_frame=" << summary.slowest_frame.frame_index;
     return output.str();
 }
 
