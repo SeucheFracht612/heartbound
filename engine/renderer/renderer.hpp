@@ -24,9 +24,32 @@
 #include <array>
 #include <memory>
 #include <span>
+#include <thread>
 #include <vector>
 
 namespace heartstead::renderer {
+
+enum class ChunkRenderUpdateKind : std::uint8_t {
+    loaded,
+    evicted,
+};
+
+struct ChunkRenderUpdate {
+    ChunkRenderUpdateKind kind = ChunkRenderUpdateKind::loaded;
+    world::ChunkStreamLoadReport load;
+    world::ChunkIdentity identity;
+};
+
+struct RenderFrameInput {
+    RenderCamera camera;
+    float simulation_alpha = 1.0F;
+    float delta_seconds = 0.0F;
+};
+
+struct RenderFrameResult {
+    rhi::RenderFrameStats frame;
+    RendererStats renderer;
+};
 
 struct RendererInitDesc {
     std::unique_ptr<rhi::IRenderDevice> device;
@@ -69,10 +92,13 @@ class Renderer {
     process_chunk_evictions(std::span<const world::ChunkIdentity> evictions);
     [[nodiscard]] core::Status
     process_chunk_evictions(const world::ChunkStreamEvictionReport& eviction);
+    [[nodiscard]] core::Status
+    process_world_render_updates(std::span<const ChunkRenderUpdate> updates);
 
     [[nodiscard]] core::Result<rhi::RenderFrameStats> render(const RenderCamera& camera,
                                                              float simulation_alpha = 1.0F,
                                                              float delta_seconds = 0.0F);
+    [[nodiscard]] core::Result<RenderFrameResult> render_frame(const RenderFrameInput& input);
     [[nodiscard]] core::Status resize(rhi::RenderExtent extent);
     [[nodiscard]] core::Status set_environment(rhi::RenderEnvironmentData environment);
     [[nodiscard]] RenderObjectId reserve_object_id();
@@ -97,6 +123,7 @@ class Renderer {
                       std::span<const std::uint32_t> fragment_spirv);
 
     [[nodiscard]] bool is_initialized() const noexcept;
+    [[nodiscard]] bool is_owner_thread() const noexcept;
     [[nodiscard]] const ChunkRenderStats& chunk_stats() const noexcept;
     [[nodiscard]] const RendererStats& stats() const noexcept;
     [[nodiscard]] const SceneRenderStats& scene_stats() const noexcept;
@@ -166,6 +193,7 @@ class Renderer {
     RendererStats stats_{};
     std::chrono::steady_clock::time_point frame_started_at_{};
     bool frame_timing_active_ = false;
+    std::thread::id owner_thread_{};
 };
 
 } // namespace heartstead::renderer

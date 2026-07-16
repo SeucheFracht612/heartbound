@@ -275,7 +275,7 @@ int main() {
         if (!renderer_status) {
             return fail(renderer_status.error().message);
         }
-        auto frame = retained_renderer.render(camera, 1.0F, delta_seconds);
+        auto frame = retained_renderer.render_frame({camera, 1.0F, delta_seconds});
         if (!frame) {
             return fail(frame.error().message);
         }

@@ -642,6 +642,11 @@ void test_renderer_frontend_submits_headless_frames() {
 
     renderer::Renderer retained_renderer;
     assert(retained_renderer.initialize(std::move(init)));
+    assert(retained_renderer.is_owner_thread());
+    bool worker_reports_owner = true;
+    std::thread ownership_probe([&] { worker_reports_owner = retained_renderer.is_owner_thread(); });
+    ownership_probe.join();
+    assert(!worker_reports_owner);
     assert(retained_renderer.is_initialized());
     assert(retained_renderer.device() != nullptr);
     const auto initialized_resource_count = retained_renderer.device()->live_resource_count();
@@ -684,8 +689,11 @@ void test_renderer_frontend_submits_headless_frames() {
     world::ChunkStreamLoadReport load_report;
     load_report.coord = identity.coordinate;
     load_report.identity = identity;
-    const std::array<world::ChunkStreamLoadReport, 1> loads{load_report};
-    assert(retained_renderer.process_chunk_loads(loads));
+    renderer::ChunkRenderUpdate load_update;
+    load_update.kind = renderer::ChunkRenderUpdateKind::loaded;
+    load_update.load = load_report;
+    const std::array renderer_loads{load_update};
+    assert(retained_renderer.process_world_render_updates(renderer_loads));
     renderer::RenderCamera camera;
     camera.floating_origin.block = {16, 16, 64};
     assert(camera.set_aspect_ratio(640.0F / 360.0F));
@@ -700,16 +708,25 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(retained_renderer.chunk_stats().cache.resident_buffer_count == 2);
     assert(retained_renderer.device()->live_resource_count() == initialized_resource_count + 2);
 
-    auto first_frame = retained_renderer.render(camera);
-    assert(first_frame);
-    assert(first_frame.value().draw_count == 1);
-    assert(first_frame.value().render_pass_count == 8);
-    assert(first_frame.value().opaque_terrain_draw_count == 1);
-    assert(first_frame.value().alpha_tested_terrain_draw_count == 0);
-    assert(first_frame.value().transparent_terrain_draw_count == 0);
-    assert(first_frame.value().indexed_draw_count == 1);
-    assert(first_frame.value().pipeline_bind_count == 1);
-    assert(first_frame.value().total_indices > 0);
+    renderer::RenderFrameInput frame_input;
+    frame_input.camera = camera;
+    frame_input.simulation_alpha = 1.0F;
+    frame_input.delta_seconds = 1.0F / 60.0F;
+    auto first_frame_result = retained_renderer.render_frame(frame_input);
+    assert(first_frame_result);
+    const auto& first_frame = first_frame_result.value().frame;
+    assert(first_frame_result.value().renderer.frame_index == first_frame.frame_index);
+    assert(first_frame.draw_count == 1);
+    auto invalid_frame_input = frame_input;
+    invalid_frame_input.simulation_alpha = 2.0F;
+    assert(!retained_renderer.render_frame(invalid_frame_input));
+    assert(first_frame.render_pass_count == 8);
+    assert(first_frame.opaque_terrain_draw_count == 1);
+    assert(first_frame.alpha_tested_terrain_draw_count == 0);
+    assert(first_frame.transparent_terrain_draw_count == 0);
+    assert(first_frame.indexed_draw_count == 1);
+    assert(first_frame.pipeline_bind_count == 1);
+    assert(first_frame.total_indices > 0);
     assert(retained_renderer.chunk_stats().visible_chunk_count == 1);
     assert(retained_renderer.chunk_stats().culled_chunk_count == 0);
     const auto& renderer_stats = retained_renderer.stats();
@@ -835,10 +852,11 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(resized_frame.value().draw_count == 1);
 
     assert(world.chunks().erase(identity.coordinate));
-    world::ChunkStreamEvictionReport eviction_report;
-    eviction_report.evicted_chunks.push_back(identity.coordinate);
-    eviction_report.evicted_identities.push_back(identity);
-    assert(retained_renderer.process_chunk_evictions(eviction_report));
+    renderer::ChunkRenderUpdate eviction_update;
+    eviction_update.kind = renderer::ChunkRenderUpdateKind::evicted;
+    eviction_update.identity = identity;
+    const std::array renderer_evictions{eviction_update};
+    assert(retained_renderer.process_world_render_updates(renderer_evictions));
     assert(retained_renderer.device()->live_resource_count() == initialized_resource_count + 2);
     auto empty_frame = retained_renderer.render(camera);
     assert(empty_frame);

@@ -201,7 +201,8 @@ core::Status UiRenderer::submit_text(const UiTextDesc& text) {
     auto cursor = text.position_pixels;
     const auto line_start_x = cursor.x;
     std::uint32_t glyph_count = 0;
-    for (const unsigned char character : text.text) {
+    for (const char raw_character : text.text) {
+        const auto character = static_cast<unsigned char>(raw_character);
         if (character == '\n') {
             cursor.x = line_start_x;
             cursor.y += text.glyph_size_pixels;

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <iterator>
 #include <limits>
@@ -240,6 +241,7 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         return core::Status::failure("renderer.missing_device",
                                      "renderer initialization requires a render device");
     }
+    owner_thread_ = std::this_thread::get_id();
     auto config_status = desc.chunk_config.validate();
     if (!config_status) {
         return config_status;
@@ -442,6 +444,7 @@ core::Status Renderer::shutdown() {
     terrain_sampler_ = {};
     environment_ = {};
     device_.reset();
+    owner_thread_ = {};
     return first_failure;
 }
 
@@ -487,6 +490,35 @@ core::Status Renderer::process_chunk_evictions(const world::ChunkStreamEvictionR
             "renderer must be initialized before processing chunk evictions");
     }
     return chunk_system_->process_chunk_evictions(eviction);
+}
+
+core::Status
+Renderer::process_world_render_updates(std::span<const ChunkRenderUpdate> updates) {
+    if (chunk_system_ == nullptr) {
+        return core::Status::failure(
+            "renderer.not_initialized",
+            "renderer must be initialized before processing world render updates");
+    }
+    for (const auto& update : updates) {
+        auto status = core::Status::ok();
+        switch (update.kind) {
+        case ChunkRenderUpdateKind::loaded:
+            status = process_chunk_loads(
+                std::span<const world::ChunkStreamLoadReport>{&update.load, 1});
+            break;
+        case ChunkRenderUpdateKind::evicted:
+            status = process_chunk_evictions(
+                std::span<const world::ChunkIdentity>{&update.identity, 1});
+            break;
+        default:
+            return core::Status::failure("renderer.invalid_world_render_update",
+                                         "world render update kind is invalid");
+        }
+        if (!status) {
+            return status;
+        }
+    }
+    return core::Status::ok();
 }
 
 core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera,
@@ -607,6 +639,22 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera,
     update_backend_stats(executed.value());
     frame_timing_active_ = false;
     return executed;
+}
+
+core::Result<RenderFrameResult> Renderer::render_frame(const RenderFrameInput& input) {
+    if (!std::isfinite(input.simulation_alpha) || input.simulation_alpha < 0.0F ||
+        input.simulation_alpha > 1.0F || !std::isfinite(input.delta_seconds) ||
+        input.delta_seconds < 0.0F) {
+        return core::Result<RenderFrameResult>::failure(
+            "renderer.invalid_frame_input",
+            "frame interpolation must be in [0,1] and delta time must be finite and nonnegative");
+    }
+    auto rendered = render(input.camera, input.simulation_alpha, input.delta_seconds);
+    if (!rendered) {
+        return core::Result<RenderFrameResult>::failure(rendered.error().code,
+                                                        rendered.error().message);
+    }
+    return core::Result<RenderFrameResult>::success({rendered.value(), stats_});
 }
 
 core::Status Renderer::resize(rhi::RenderExtent extent) {
@@ -803,6 +851,10 @@ bool Renderer::is_initialized() const noexcept {
            ui_renderer_ != nullptr &&
            terrain_pipelines_.is_valid() &&
            scene_pipelines_.is_valid() && debug_pipelines_.is_valid() && ui_pipeline_.is_valid();
+}
+
+bool Renderer::is_owner_thread() const noexcept {
+    return owner_thread_ != std::thread::id{} && owner_thread_ == std::this_thread::get_id();
 }
 
 const ChunkRenderStats& Renderer::chunk_stats() const noexcept {

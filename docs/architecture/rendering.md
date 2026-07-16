@@ -30,7 +30,8 @@ Implemented foundation:
   - can write descriptor bindings for material scalar/color uniform buffers, storage buffers, and
     sampled texture arrays with shared samplers without exposing backend descriptor set handles
   - retains the old material-based `bind_mesh_draws()` API only as a deprecated compatibility path;
-    visible rendering uses explicit pipeline handles through `execute_frame()`
+    it is isolated to the legacy renderer smoke sample and RHI regression tests, while every visible
+    application/front-end path uses explicit pipeline handles through `execute_frame()`
   - builds renderer-neutral frame execution plans so Vulkan barriers and image-layout transitions
     are derived from the public RHI contract rather than hidden backend inference
   - can structurally bind material pipeline layouts, including shader template and descriptor slots,
@@ -307,6 +308,10 @@ code should not depend on Vulkan types, swapchain objects, descriptor handles, o
 backend-specific allocation details. Future render features should enter through
 engine-owned abstractions such as material definitions, asset handles, render passes,
 debug draw, and validated shader-pack extension points.
+
+The finalized gameplay boundary, ownership rules, frame lifecycle, coordinate conventions,
+failure behavior, and performance budgets are specified in
+[`renderer_v1_handoff.md`](renderer_v1_handoff.md).
 
 The `apps/render_smoke` visible path now exercises the Milestone 2 front end. It opens a native X11
 window, populates nine real far-world chunks, loads checked-in validated SPIR-V, and lets `Renderer`

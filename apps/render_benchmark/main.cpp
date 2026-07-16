@@ -490,7 +490,7 @@ int main(int argc, char** argv) {
                 return fail(status.error().message);
             }
         }
-        auto frame = active_renderer.render(scene.value()->camera());
+        auto frame = active_renderer.render_frame({scene.value()->camera()});
         if (!frame) {
             return fail(frame.error().message);
         }
@@ -568,7 +568,7 @@ int main(int argc, char** argv) {
                     return fail(status.error().message);
                 }
             }
-            auto frame = active_renderer.render(scene.value()->camera());
+            auto frame = active_renderer.render_frame({scene.value()->camera()});
             if (!frame) {
                 return fail(frame.error().message);
             }
