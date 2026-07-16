@@ -79,10 +79,12 @@ Implemented foundation:
 
 - Renderer-neutral chunk mesh data
   - `ChunkMesher` extracts CPU-side terrain surface meshes outside the renderer backend
-  - `GpuChunkVertex` defines a stable 40-byte GPU ABI with asserted field offsets and explicit
-    float/integer shader locations, so compiler padding cannot silently change Vulkan input
-  - the renderer uploads converted vertex data and uint32 indices without making chunks depend on
-    Vulkan objects
+  - `GpuTerrainVertex` defines a stable 24-byte compact GPU ABI with asserted field offsets and
+    explicit integer/normalized shader locations; position and UV use fixed-point encoding, while
+    normal, lighting, ambient occlusion, corner, and flags use byte fields
+  - the renderer uploads converted vertex data and selects 16-bit indices whenever the complete
+    mesh fits, retaining a 32-bit fallback for pathological meshes; index type is explicit in every
+    draw command
   - each terrain draw carries a camera-relative chunk origin while the exact world anchor remains in
     `FloatingOrigin`
 

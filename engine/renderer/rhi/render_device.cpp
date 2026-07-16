@@ -187,7 +187,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
                         "renderer.invalid_index_buffer_usage",
                         "render draw index buffer has non-index usage");
                 }
-                const auto available_indices = index->second.byte_size / sizeof(std::uint32_t);
+                const auto available_indices =
+                    index->second.byte_size / render_index_type_size(draw.index_type);
                 const auto end_index = static_cast<std::size_t>(draw.first_index) +
                                        static_cast<std::size_t>(draw.index_count);
                 if (end_index > available_indices) {
@@ -1141,8 +1142,18 @@ core::Status validate_render_graphics_pipeline_shape(const RenderGraphicsPipelin
         case RenderVertexAttributeFormat::float3:
             byte_size = 12;
             break;
+        case RenderVertexAttributeFormat::sint16x4:
+            byte_size = 8;
+            break;
+        case RenderVertexAttributeFormat::uint16x2:
+            byte_size = 4;
+            break;
         case RenderVertexAttributeFormat::uint16:
             byte_size = 2;
+            break;
+        case RenderVertexAttributeFormat::snorm8x4:
+        case RenderVertexAttributeFormat::uint8x4:
+            byte_size = 4;
             break;
         case RenderVertexAttributeFormat::uint8:
             byte_size = 1;

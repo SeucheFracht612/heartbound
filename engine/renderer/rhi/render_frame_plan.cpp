@@ -83,8 +83,9 @@ struct ResourceAccessState {
     return RenderResourceState::undefined;
 }
 
-[[nodiscard]] RenderResourceState resource_state_for_access(
-    RenderResourceAccess access, const RenderResourceDesc& resource) noexcept {
+[[nodiscard]] RenderResourceState
+resource_state_for_access(RenderResourceAccess access,
+                          const RenderResourceDesc& resource) noexcept {
     switch (access) {
     case RenderResourceAccess::read:
         return RenderResourceState::shader_read;
@@ -489,6 +490,14 @@ core::Status validate_render_frame_submission_shape(const RenderFrameSubmission&
         }
 
         for (const auto& draw : pass_commands.draws) {
+            switch (draw.index_type) {
+            case RenderIndexType::uint16:
+            case RenderIndexType::uint32:
+                break;
+            default:
+                return core::Status::failure("renderer.invalid_index_type",
+                                             "render draw must use a supported index element type");
+            }
             if (!draw.pipeline.is_valid()) {
                 return core::Status::failure("renderer.invalid_draw_pipeline",
                                              "render draw must reference a graphics pipeline");

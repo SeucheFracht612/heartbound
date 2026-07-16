@@ -2423,8 +2423,20 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 case rhi::RenderVertexAttributeFormat::float3:
                     format = VK_FORMAT_R32G32B32_SFLOAT;
                     break;
+                case rhi::RenderVertexAttributeFormat::sint16x4:
+                    format = VK_FORMAT_R16G16B16A16_SINT;
+                    break;
+                case rhi::RenderVertexAttributeFormat::uint16x2:
+                    format = VK_FORMAT_R16G16_UINT;
+                    break;
                 case rhi::RenderVertexAttributeFormat::uint16:
                     format = VK_FORMAT_R16_UINT;
+                    break;
+                case rhi::RenderVertexAttributeFormat::snorm8x4:
+                    format = VK_FORMAT_R8G8B8A8_SNORM;
+                    break;
+                case rhi::RenderVertexAttributeFormat::uint8x4:
+                    format = VK_FORMAT_R8G8B8A8_UINT;
                     break;
                 case rhi::RenderVertexAttributeFormat::uint8:
                     format = VK_FORMAT_R8_UINT;
@@ -4375,7 +4387,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 return core::Status::failure("renderer.invalid_index_buffer_usage",
                                              "render draw index buffer has non-index usage");
             }
-            const auto available_indices = index->second.byte_size / sizeof(std::uint32_t);
+            const auto available_indices =
+                index->second.byte_size / rhi::render_index_type_size(draw.index_type);
             const auto end_index = static_cast<std::size_t>(draw.first_index) +
                                    static_cast<std::size_t>(draw.index_count);
             if (end_index > available_indices) {
@@ -4733,7 +4746,10 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 }
                 const VkDeviceSize vertex_buffer_offset = 0;
                 vkCmdBindVertexBuffers(frame_commands, 0, 1, &vertex.buffer, &vertex_buffer_offset);
-                vkCmdBindIndexBuffer(frame_commands, index.buffer, 0, VK_INDEX_TYPE_UINT32);
+                vkCmdBindIndexBuffer(frame_commands, index.buffer, 0,
+                                     draw.index_type == rhi::RenderIndexType::uint16
+                                         ? VK_INDEX_TYPE_UINT16
+                                         : VK_INDEX_TYPE_UINT32);
                 const rhi::ChunkPushConstants constants{
                     frame.camera.view_projection,
                     {draw.camera_relative_origin.x, draw.camera_relative_origin.y,

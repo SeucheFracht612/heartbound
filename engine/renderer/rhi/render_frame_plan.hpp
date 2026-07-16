@@ -124,6 +124,7 @@ struct RenderDrawCommand {
     std::uint32_t first_instance = 0;
 
     math::Vec3f camera_relative_origin{};
+    RenderIndexType index_type = RenderIndexType::uint32;
 };
 
 struct RenderPassCommands {
@@ -151,8 +152,8 @@ class RenderFramePlanBuilder {
 
 [[nodiscard]] RenderFramePlan make_clear_present_frame_plan(RenderExtent extent,
                                                             ClearColor clear_color, bool present);
-[[nodiscard]] core::Status validate_render_frame_submission_shape(
-    const RenderFrameSubmission& frame);
+[[nodiscard]] core::Status
+validate_render_frame_submission_shape(const RenderFrameSubmission& frame);
 
 [[nodiscard]] std::string_view
 render_resource_lifetime_name(RenderResourceLifetime lifetime) noexcept;

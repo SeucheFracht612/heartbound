@@ -281,12 +281,14 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
             draw.vertex_buffer = visible.entry->mesh.vertices.buffer;
             draw.index_buffer = visible.entry->mesh.indices.buffer;
             draw.index_count = visible.entry->mesh.index_count;
-            draw.first_index = static_cast<std::uint32_t>(visible.entry->mesh.indices.offset /
-                                                          sizeof(std::uint32_t));
+            draw.first_index = static_cast<std::uint32_t>(
+                visible.entry->mesh.indices.offset /
+                rhi::render_index_type_size(visible.entry->mesh.index_type));
             draw.vertex_offset = static_cast<std::int32_t>(visible.entry->mesh.vertices.offset /
                                                            sizeof(terrain::GpuChunkVertex));
             draw.instance_count = 1;
             draw.camera_relative_origin = visible.origin;
+            draw.index_type = visible.entry->mesh.index_type;
             result.draws.push_back(draw);
             result.vertex_count += visible.entry->mesh.vertex_count;
             result.index_count += visible.entry->mesh.index_count;

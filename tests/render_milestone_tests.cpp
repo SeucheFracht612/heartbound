@@ -78,16 +78,34 @@ void test_gpu_chunk_vertex_contract() {
     const world::ChunkMeshVertex cpu_vertex{
         {1.0F, 2.0F, 3.0F}, {0.0F, 1.0F, 0.0F}, 0.25F, 0.75F, 42, 190, 0x1234};
     const auto gpu_vertex = renderer::terrain::to_gpu_chunk_vertex(cpu_vertex);
-    assert(gpu_vertex.position[0] == 1.0F);
-    assert(gpu_vertex.normal[1] == 1.0F);
-    assert(gpu_vertex.uv[0] == 0.25F);
-    assert(gpu_vertex.voxel_type == 42);
-    assert(gpu_vertex.light == 190);
+    assert(sizeof(renderer::terrain::GpuTerrainVertex) == 24);
+    assert(renderer::terrain::decode_terrain_vertex_position(gpu_vertex) == cpu_vertex.position);
+    assert(renderer::terrain::decode_terrain_vertex_normal(gpu_vertex) == cpu_vertex.normal);
+    assert(renderer::terrain::decode_terrain_vertex_uv(gpu_vertex)[0] == cpu_vertex.u);
+    assert(gpu_vertex.material == 42);
+    assert(gpu_vertex.lighting[0] == 190);
+    assert(gpu_vertex.lighting[1] == 255);
     assert(gpu_vertex.state_bits == 0x1234);
-    assert(renderer::terrain::gpu_chunk_vertex_attributes[3].format ==
+    assert(renderer::terrain::gpu_chunk_vertex_attributes[0].format ==
+           renderer::rhi::RenderVertexAttributeFormat::sint16x4);
+    assert(renderer::terrain::gpu_chunk_vertex_attributes[2].format ==
            renderer::rhi::RenderVertexAttributeFormat::uint16);
-    assert(renderer::terrain::gpu_chunk_vertex_attributes[4].format ==
-           renderer::rhi::RenderVertexAttributeFormat::uint8);
+    assert(renderer::terrain::gpu_chunk_vertex_attributes[5].format ==
+           renderer::rhi::RenderVertexAttributeFormat::uint8x4);
+
+    const world::ChunkMeshVertex fractional{
+        {-0.35F, 17.125F, 40.0F}, {0.70710677F, 0.0F, -0.70710677F}, 31.5F, 2.25F, 9, 255, 0};
+    const auto packed = renderer::terrain::to_gpu_chunk_vertex(fractional, 3);
+    const auto decoded_position = renderer::terrain::decode_terrain_vertex_position(packed);
+    const auto decoded_normal = renderer::terrain::decode_terrain_vertex_normal(packed);
+    const auto decoded_uv = renderer::terrain::decode_terrain_vertex_uv(packed);
+    assert(std::abs(decoded_position.x - fractional.position.x) <= 1.0F / 256.0F);
+    assert(std::abs(decoded_position.y - fractional.position.y) <= 1.0F / 256.0F);
+    assert(std::abs(decoded_normal.x - fractional.normal.x) <= 1.0F / 127.0F);
+    assert(std::abs(decoded_normal.z - fractional.normal.z) <= 1.0F / 127.0F);
+    assert(decoded_uv[0] == fractional.u);
+    assert(decoded_uv[1] == fractional.v);
+    assert(packed.lighting[2] == 3);
 }
 
 void test_spirv_validation() {
@@ -210,6 +228,12 @@ void test_unified_headless_frame_submission() {
     assert(stats.value().pipeline_bind_count == 1);
     assert(stats.value().total_indices == 3);
     assert(stats.value().presented);
+
+    frame.pass_commands.front().draws.front().index_type = static_cast<RenderIndexType>(0xff);
+    auto invalid_index_type = device.value()->execute_frame(frame);
+    assert(!invalid_index_type);
+    assert(invalid_index_type.error().code == "renderer.invalid_index_type");
+    frame.pass_commands.front().draws.front().index_type = RenderIndexType::uint32;
 
     frame.pass_commands.front().draws.front().first_index = 1;
     auto out_of_bounds = device.value()->execute_frame(frame);

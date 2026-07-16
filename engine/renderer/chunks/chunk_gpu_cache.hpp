@@ -30,6 +30,7 @@ struct ChunkGpuMesh {
     GpuAllocation indices;
     std::uint32_t vertex_count = 0;
     std::uint32_t index_count = 0;
+    rhi::RenderIndexType index_type = rhi::RenderIndexType::uint16;
 
     [[nodiscard]] bool is_empty() const noexcept;
 };
@@ -65,6 +66,8 @@ struct ChunkGpuCacheStats {
     std::size_t resident_buffer_count = 0;
     std::size_t resident_allocation_count = 0;
     std::size_t resident_bytes = 0;
+    std::size_t uint16_index_chunk_count = 0;
+    std::size_t uint32_index_chunk_count = 0;
     std::uint64_t uploaded_chunk_count = 0;
     std::uint64_t uploaded_bytes = 0;
     std::uint64_t upload_batch_count = 0;

@@ -1,6 +1,8 @@
 #include "engine/renderer/chunks/chunk_gpu_cache.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <ranges>
 #include <set>
@@ -281,10 +283,18 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
                 "chunk_gpu_cache.mesh_too_large",
                 "chunk GPU mesh counts exceed uint32 draw limits");
         }
+        if (std::ranges::any_of(upload.indices, [&upload](std::uint32_t value) {
+                return value >= upload.vertices.size();
+            })) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.index_out_of_bounds",
+                "chunk GPU mesh contains an index outside its vertex range");
+        }
     }
 
     struct PreparedUpload {
         ChunkGpuMesh mesh;
+        std::vector<std::byte> compact_index_bytes;
         std::size_t uploaded_bytes = 0;
     };
     std::vector<PreparedUpload> prepared;
@@ -314,7 +324,28 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
             continue;
         }
         const auto vertex_bytes = std::as_bytes(upload.vertices);
-        const auto index_bytes = std::as_bytes(upload.indices);
+        std::span<const std::byte> index_bytes;
+        const bool uses_uint16 =
+            upload.vertices.size() <=
+                static_cast<std::size_t>(std::numeric_limits<std::uint16_t>::max()) + 1U &&
+            std::ranges::all_of(upload.indices, [](std::uint32_t value) {
+                return value <= std::numeric_limits<std::uint16_t>::max();
+            });
+        if (uses_uint16) {
+            candidate.mesh.index_type = rhi::RenderIndexType::uint16;
+            const auto raw_bytes = upload.indices.size() * sizeof(std::uint16_t);
+            const auto padded_bytes = (raw_bytes + 3U) & ~std::size_t{3U};
+            candidate.compact_index_bytes.resize(padded_bytes);
+            for (std::size_t element = 0; element < upload.indices.size(); ++element) {
+                const auto compact = static_cast<std::uint16_t>(upload.indices[element]);
+                std::memcpy(candidate.compact_index_bytes.data() + element * sizeof(std::uint16_t),
+                            &compact, sizeof(compact));
+            }
+            index_bytes = candidate.compact_index_bytes;
+        } else {
+            candidate.mesh.index_type = rhi::RenderIndexType::uint32;
+            index_bytes = std::as_bytes(upload.indices);
+        }
         auto vertices =
             vertex_arena_->allocate(vertex_bytes.size(), sizeof(terrain::GpuChunkVertex));
         if (!vertices) {
@@ -324,7 +355,7 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
                                                                     vertices.error().message);
         }
         candidate.mesh.vertices = vertices.value();
-        auto indices = index_arena_->allocate(index_bytes.size(), sizeof(std::uint32_t));
+        auto indices = index_arena_->allocate(index_bytes.size(), 4);
         if (!indices) {
             rollback();
             ++stats_.failed_upload_count;
@@ -427,6 +458,8 @@ void ChunkGpuCache::refresh_current_stats() noexcept {
     stats_.empty_chunk_count = 0;
     stats_.resident_allocation_count = 0;
     stats_.resident_bytes = 0;
+    stats_.uint16_index_chunk_count = 0;
+    stats_.uint32_index_chunk_count = 0;
     for (const auto& [_, entry] : entries_) {
         if (entry.state != ChunkGpuState::resident) {
             continue;
@@ -438,6 +471,10 @@ void ChunkGpuCache::refresh_current_stats() noexcept {
             static_cast<std::size_t>(entry.mesh.indices.is_valid());
         if (!entry.has_drawable_mesh()) {
             ++stats_.empty_chunk_count;
+        } else if (entry.mesh.index_type == rhi::RenderIndexType::uint16) {
+            ++stats_.uint16_index_chunk_count;
+        } else {
+            ++stats_.uint32_index_chunk_count;
         }
     }
     stats_.vertex_arena = vertex_arena_ == nullptr ? GpuBufferArenaStats{} : vertex_arena_->stats();

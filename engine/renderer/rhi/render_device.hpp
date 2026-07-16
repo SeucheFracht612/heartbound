@@ -46,6 +46,15 @@ enum class RenderBufferMemory {
     device_local,
 };
 
+enum class RenderIndexType : std::uint8_t {
+    uint16,
+    uint32,
+};
+
+[[nodiscard]] constexpr std::size_t render_index_type_size(RenderIndexType type) noexcept {
+    return type == RenderIndexType::uint16 ? sizeof(std::uint16_t) : sizeof(std::uint32_t);
+}
+
 enum class RenderImageFormat {
     rgba8_unorm,
     rgba8_srgb,
@@ -329,7 +338,11 @@ struct RenderComputePipelineStats {
 enum class RenderVertexAttributeFormat : std::uint8_t {
     float2,
     float3,
+    sint16x4,
+    uint16x2,
     uint16,
+    snorm8x4,
+    uint8x4,
     uint8,
 };
 

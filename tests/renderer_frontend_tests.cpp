@@ -70,21 +70,20 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(!cache.insert(identity));
     assert(!cache.insert({identity.coordinate, 42}));
 
-    const std::array<renderer::terrain::GpuChunkVertex, 3> vertices{
-        renderer::terrain::GpuChunkVertex{{0.0F, 0.0F, 0.0F}},
-        renderer::terrain::GpuChunkVertex{{1.0F, 0.0F, 0.0F}},
-        renderer::terrain::GpuChunkVertex{{0.0F, 1.0F, 0.0F}},
-    };
+    const std::array<renderer::terrain::GpuChunkVertex, 3> vertices{};
     const std::array<std::uint32_t, 3> indices{0, 1, 2};
     const math::Bounds3f bounds{{0.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 0.0F}};
     auto first_upload = cache.replace_mesh(identity, 5, bounds, vertices, indices);
     assert(first_upload);
-    assert(first_upload.value().uploaded_bytes == sizeof(vertices) + sizeof(indices));
+    assert(first_upload.value().uploaded_bytes == sizeof(vertices) + 8U);
     assert(device.value()->live_resource_count() == baseline_resources + 2);
     const auto* first_entry = cache.find(identity);
     assert(first_entry != nullptr);
     assert(first_entry->has_drawable_mesh());
     assert(first_entry->resident_content_revision == 5);
+    assert(first_entry->mesh.index_type == renderer::rhi::RenderIndexType::uint16);
+    assert(cache.stats().uint16_index_chunk_count == 1);
+    assert(cache.stats().uint32_index_chunk_count == 0);
     const auto first_vertex_allocation = first_entry->mesh.vertices;
     const auto first_index_allocation = first_entry->mesh.indices;
 
@@ -104,7 +103,16 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(replaced_entry->mesh.indices != first_index_allocation);
     assert(replaced_entry->resident_content_revision == 6);
 
-    auto empty_replacement = cache.replace_mesh(identity, 7, {}, {}, {});
+    const std::vector<renderer::terrain::GpuChunkVertex> pathological_vertices(65'537);
+    const std::array<std::uint32_t, 3> pathological_indices{65'536, 1, 2};
+    auto uint32_replacement =
+        cache.replace_mesh(identity, 7, bounds, pathological_vertices, pathological_indices);
+    assert(uint32_replacement);
+    assert(cache.find(identity)->mesh.index_type == renderer::rhi::RenderIndexType::uint32);
+    assert(cache.stats().uint16_index_chunk_count == 0);
+    assert(cache.stats().uint32_index_chunk_count == 1);
+
+    auto empty_replacement = cache.replace_mesh(identity, 8, {}, {}, {});
     assert(empty_replacement);
     assert(empty_replacement.value().empty);
     assert(device.value()->live_resource_count() == baseline_resources + 2);
@@ -112,7 +120,9 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(!cache.find(identity)->has_drawable_mesh());
     assert(cache.stats().resident_chunk_count == 1);
     assert(cache.stats().empty_chunk_count == 1);
-    assert(cache.stats().uploaded_chunk_count == 3);
+    assert(cache.stats().uint16_index_chunk_count == 0);
+    assert(cache.stats().uint32_index_chunk_count == 0);
+    assert(cache.stats().uploaded_chunk_count == 4);
 
     auto stale_erase = cache.erase({identity.coordinate, 40});
     assert(!stale_erase);
@@ -146,11 +156,7 @@ void test_chunk_gpu_cache_batches_device_local_arena_uploads() {
     const world::ChunkIdentity second{{1, 0, 0}, 2};
     assert(cache.insert(first));
     assert(cache.insert(second));
-    const std::array<renderer::terrain::GpuChunkVertex, 3> vertices{
-        renderer::terrain::GpuChunkVertex{{0.0F, 0.0F, 0.0F}},
-        renderer::terrain::GpuChunkVertex{{1.0F, 0.0F, 0.0F}},
-        renderer::terrain::GpuChunkVertex{{0.0F, 1.0F, 0.0F}},
-    };
+    const std::array<renderer::terrain::GpuChunkVertex, 3> vertices{};
     const std::array<std::uint32_t, 3> indices{0, 1, 2};
     const math::Bounds3f bounds{{0.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 0.0F}};
     const std::array<renderer::ChunkGpuMeshUpload, 2> uploads{
