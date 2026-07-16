@@ -1,4 +1,5 @@
 #include "engine/renderer/memory/gpu_buffer_arena.hpp"
+#include "engine/renderer/memory/staging_ring.hpp"
 #include "engine/renderer/rhi/render_device.hpp"
 
 #include <array>
@@ -116,10 +117,39 @@ void test_arena_growth_respects_budget() {
     assert(over_budget.error().code == "gpu_arena.budget_exhausted");
 }
 
+void test_staging_ring_tracks_serials_and_wraps() {
+    using namespace heartstead::renderer;
+    StagingRingAllocator ring(64);
+    auto first = ring.allocate(20, 4, 1, 0);
+    auto second = ring.allocate(20, 4, 2, 0);
+    assert(first && second);
+    assert(first.value().offset == 0);
+    assert(second.value().offset == 20);
+
+    ring.release_completed(1);
+    auto third = ring.allocate(16, 8, 3, 1);
+    assert(third);
+    assert(third.value().offset == 40);
+    ring.release_completed(2);
+    auto wrapped = ring.allocate(24, 8, 4, 2);
+    assert(wrapped);
+    assert(wrapped.value().offset == 0);
+    assert(ring.stats().wrap_count == 1);
+    assert(ring.stats().pending_range_count == 2);
+
+    auto full = ring.allocate(32, 4, 5, 2);
+    assert(!full);
+    assert(full.error().code == "staging_ring.full");
+    ring.release_completed(4);
+    assert(ring.stats().used_bytes == 0);
+    assert(ring.stats().free_bytes == 64);
+}
+
 } // namespace
 
 int main() {
     test_generation_safe_allocation_retirement_and_merging();
     test_arena_growth_respects_budget();
+    test_staging_ring_tracks_serials_and_wraps();
     return 0;
 }

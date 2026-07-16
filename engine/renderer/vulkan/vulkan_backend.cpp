@@ -2,6 +2,7 @@
 
 #if HEARTSTEAD_HAS_VULKAN
 #include "engine/core/logging.hpp"
+#include "engine/renderer/memory/staging_ring.hpp"
 #include "engine/renderer/rhi/render_frame_plan.hpp"
 
 #include <vulkan/vulkan.h>
@@ -1610,10 +1611,14 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         }
 
         constexpr std::size_t persistent_staging_capacity = 32U * 1024U * 1024U;
-        const bool use_fallback = staging_bytes > persistent_staging_capacity;
+        const auto upload_serial = ++next_upload_submission_serial_;
+        auto ring_range = staging_ring_.allocate(staging_bytes, 4, upload_serial,
+                                                 completed_upload_submission_serial_);
+        const bool use_fallback = !ring_range;
         VulkanBufferResource fallback;
         VkBuffer staging_buffer = VK_NULL_HANDLE;
         void* mapped = nullptr;
+        std::size_t staging_base_offset = 0;
         if (use_fallback) {
             auto fallback_status = create_staging_buffer(staging_bytes, fallback, mapped);
             if (!fallback_status) {
@@ -1629,17 +1634,19 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             }
             staging_buffer = staging_buffer_.buffer;
             mapped = staging_mapped_;
+            staging_base_offset = ring_range.value().offset;
         }
 
         std::vector<VkBufferCopy> copy_regions;
         copy_regions.reserve(writes.size());
         std::size_t source_offset = 0;
         for (const auto& write : writes) {
-            std::memcpy(static_cast<std::byte*>(mapped) + source_offset, write.bytes.data(),
-                        write.bytes.size());
-            copy_regions.push_back(VkBufferCopy{static_cast<VkDeviceSize>(source_offset),
-                                                static_cast<VkDeviceSize>(write.destination_offset),
-                                                static_cast<VkDeviceSize>(write.bytes.size())});
+            std::memcpy(static_cast<std::byte*>(mapped) + staging_base_offset + source_offset,
+                        write.bytes.data(), write.bytes.size());
+            copy_regions.push_back(
+                VkBufferCopy{static_cast<VkDeviceSize>(staging_base_offset + source_offset),
+                             static_cast<VkDeviceSize>(write.destination_offset),
+                             static_cast<VkDeviceSize>(write.bytes.size())});
             source_offset += write.bytes.size();
         }
 
@@ -1649,6 +1656,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             if (use_fallback) {
                 vkUnmapMemory(device_, fallback.memory);
                 destroy_buffer_resource(fallback);
+            } else {
+                staging_ring_.release_completed(upload_serial);
             }
             return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
                 "renderer.vulkan_wait_fence_failed",
@@ -1669,6 +1678,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             if (use_fallback) {
                 vkUnmapMemory(device_, fallback.memory);
                 destroy_buffer_resource(fallback);
+            } else {
+                staging_ring_.release_completed(upload_serial);
             }
             return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
                 "renderer.vulkan_buffer_upload_begin_failed",
@@ -1738,6 +1749,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         if (use_fallback) {
             vkUnmapMemory(device_, fallback.memory);
             destroy_buffer_resource(fallback);
+        } else if (result == VK_SUCCESS) {
+            completed_upload_submission_serial_ = upload_serial;
+            staging_ring_.release_completed(completed_upload_submission_serial_);
+        } else {
+            staging_ring_.release_completed(upload_serial);
         }
         if (result != VK_SUCCESS) {
             return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
@@ -4751,6 +4767,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     std::unordered_map<std::uint64_t, VulkanBufferResource> buffer_resources_;
     VulkanBufferResource staging_buffer_;
     void* staging_mapped_ = nullptr;
+    StagingRingAllocator staging_ring_{32U * 1024U * 1024U};
+    std::uint64_t next_upload_submission_serial_ = 0;
+    std::uint64_t completed_upload_submission_serial_ = 0;
     std::unordered_map<std::uint64_t, VulkanImageResource> image_resources_;
     std::unordered_map<std::uint64_t, VulkanShaderModuleResource> shader_modules_;
     std::unordered_map<std::uint64_t, VulkanComputePipelineResource> compute_pipelines_;

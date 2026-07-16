@@ -7,6 +7,7 @@
 #include "engine/math/vector.hpp"
 #include "engine/platform/platform.hpp"
 
+#include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -93,6 +94,8 @@ struct RenderResourceHandle {
     [[nodiscard]] bool is_valid() const noexcept {
         return value != 0;
     }
+
+    friend auto operator<=>(const RenderResourceHandle&, const RenderResourceHandle&) = default;
 };
 
 struct RenderExtent {

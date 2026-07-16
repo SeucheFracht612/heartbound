@@ -22,16 +22,15 @@ namespace {
     return sorted[lower] * (1.0 - weight) + sorted[upper] * weight;
 }
 
-[[nodiscard]] double low_fps(const std::vector<double>& sorted,
-                             double slow_fraction) noexcept {
+[[nodiscard]] double low_fps(const std::vector<double>& sorted, double slow_fraction) noexcept {
     if (sorted.empty()) {
         return 0.0;
     }
     const auto count = std::max<std::size_t>(
         1, static_cast<std::size_t>(std::ceil(static_cast<double>(sorted.size()) * slow_fraction)));
     const auto start = sorted.size() - count;
-    const auto total = std::accumulate(sorted.begin() + static_cast<std::ptrdiff_t>(start),
-                                       sorted.end(), 0.0);
+    const auto total =
+        std::accumulate(sorted.begin() + static_cast<std::ptrdiff_t>(start), sorted.end(), 0.0);
     const auto mean_slow_frame_ms = total / static_cast<double>(count);
     return mean_slow_frame_ms > 0.0 ? 1'000.0 / mean_slow_frame_ms : 0.0;
 }
@@ -164,8 +163,7 @@ std::string BenchmarkRecorder::to_json() const {
            << "    \"p95_frame_ms\": " << summary.p95_frame_ms << ",\n"
            << "    \"p99_frame_ms\": " << summary.p99_frame_ms << ",\n"
            << "    \"one_percent_low_fps\": " << summary.one_percent_low_fps << ",\n"
-           << "    \"point_one_percent_low_fps\": "
-           << summary.point_one_percent_low_fps << ",\n"
+           << "    \"point_one_percent_low_fps\": " << summary.point_one_percent_low_fps << ",\n"
            << "    \"maximum_frame_ms\": " << summary.maximum_frame_ms << ",\n"
            << "    \"mean_cpu_frame_ms\": " << summary.mean_cpu_frame_ms << ",\n"
            << "    \"mean_gpu_frame_ms\": " << summary.mean_gpu_frame_ms << ",\n"
@@ -203,10 +201,13 @@ std::string BenchmarkRecorder::to_json() const {
                << ", \"visible_chunks\": " << sample.visible_chunks
                << ", \"culled_chunks\": " << sample.culled_chunks
                << ", \"drawn_chunks\": " << sample.drawn_chunks
-               << ", \"draw_calls\": " << sample.draw_calls
-               << ", \"vertices\": " << sample.vertices
+               << ", \"draw_calls\": " << sample.draw_calls << ", \"vertices\": " << sample.vertices
                << ", \"triangles\": " << sample.triangles
                << ", \"resident_mesh_bytes\": " << sample.resident_mesh_bytes
+               << ", \"gpu_arena_capacity_bytes\": " << sample.gpu_arena_capacity_bytes
+               << ", \"gpu_arena_used_bytes\": " << sample.gpu_arena_used_bytes
+               << ", \"gpu_arena_free_bytes\": " << sample.gpu_arena_free_bytes
+               << ", \"gpu_arena_fragmentation\": " << sample.gpu_arena_fragmentation
                << ", \"pending_upload_bytes\": " << sample.pending_upload_bytes
                << ", \"uploaded_bytes\": " << sample.uploaded_bytes_this_frame << "}";
         output << (index + 1 == samples_.size() ? "\n" : ",\n");
@@ -224,7 +225,8 @@ std::string BenchmarkRecorder::to_csv() const {
               "meshing_ms,upload_preparation_ms,upload_ms,gpu_wait_ms,loaded_chunks,"
               "mesh_pending_chunks,upload_pending_chunks,resident_chunks,visible_chunks,"
               "culled_chunks,drawn_chunks,draw_calls,vertices,triangles,resident_mesh_bytes,"
-              "pending_upload_bytes,uploaded_bytes\n";
+              "gpu_arena_capacity_bytes,gpu_arena_used_bytes,gpu_arena_free_bytes,"
+              "gpu_arena_fragmentation,pending_upload_bytes,uploaded_bytes\n";
     for (const auto& sample : samples_) {
         output << '"' << scene_ << "\"," << seed_ << ',' << sample.frame_index << ','
                << sample.cpu_frame_ms << ',' << (sample.gpu_timing_valid ? 1 : 0) << ','
@@ -232,16 +234,17 @@ std::string BenchmarkRecorder::to_csv() const {
                << sample.gpu_frame_ms << ',' << sample.gpu_opaque_terrain_ms << ','
                << sample.gpu_transfer_ms << ',' << sample.gpu_final_copy_ms << ','
                << sample.render_extraction_ms << ',' << sample.chunk_synchronization_ms << ','
-               << sample.culling_ms << ',' << sample.draw_list_ms << ','
-               << sample.command_build_ms << ',' << sample.command_recording_ms << ','
-               << sample.chunk_snapshot_ms << ',' << sample.meshing_ms << ','
-               << sample.upload_preparation_ms << ',' << sample.upload_ms << ','
-               << sample.gpu_wait_ms << ',' << sample.loaded_chunks << ','
-               << sample.mesh_pending_chunks << ',' << sample.upload_pending_chunks << ','
+               << sample.culling_ms << ',' << sample.draw_list_ms << ',' << sample.command_build_ms
+               << ',' << sample.command_recording_ms << ',' << sample.chunk_snapshot_ms << ','
+               << sample.meshing_ms << ',' << sample.upload_preparation_ms << ','
+               << sample.upload_ms << ',' << sample.gpu_wait_ms << ',' << sample.loaded_chunks
+               << ',' << sample.mesh_pending_chunks << ',' << sample.upload_pending_chunks << ','
                << sample.resident_chunks << ',' << sample.visible_chunks << ','
                << sample.culled_chunks << ',' << sample.drawn_chunks << ',' << sample.draw_calls
                << ',' << sample.vertices << ',' << sample.triangles << ','
-               << sample.resident_mesh_bytes << ',' << sample.pending_upload_bytes << ','
+               << sample.resident_mesh_bytes << ',' << sample.gpu_arena_capacity_bytes << ','
+               << sample.gpu_arena_used_bytes << ',' << sample.gpu_arena_free_bytes << ','
+               << sample.gpu_arena_fragmentation << ',' << sample.pending_upload_bytes << ','
                << sample.uploaded_bytes_this_frame << '\n';
     }
     return output.str();
@@ -257,10 +260,9 @@ core::Status BenchmarkRecorder::write_csv(const std::filesystem::path& path) con
 
 std::string format_benchmark_summary(const BenchmarkSummary& summary) {
     std::ostringstream output;
-    output << std::fixed << std::setprecision(3) << summary.scene << ": n="
-           << summary.sample_count << " median=" << summary.median_frame_ms
-           << "ms p95=" << summary.p95_frame_ms << "ms p99=" << summary.p99_frame_ms
-           << "ms 1%low=" << summary.one_percent_low_fps
+    output << std::fixed << std::setprecision(3) << summary.scene << ": n=" << summary.sample_count
+           << " median=" << summary.median_frame_ms << "ms p95=" << summary.p95_frame_ms
+           << "ms p99=" << summary.p99_frame_ms << "ms 1%low=" << summary.one_percent_low_fps
            << "fps 0.1%low=" << summary.point_one_percent_low_fps
            << "fps max=" << summary.maximum_frame_ms << "ms cpu=" << summary.mean_cpu_frame_ms
            << "ms gpu=";

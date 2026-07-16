@@ -91,23 +91,26 @@ Implemented foundation:
   - initial synchronization discovers chunks that predate renderer startup, while explicit
     `ChunkStreamer` load and generation-aware eviction reports can be forwarded without an event bus
   - each `ChunkGpuEntry` records its exact `ChunkIdentity`, resident content and block-render-table
-    revisions, complete neighbor dependency stamps, buffers, counts, local render bounds, state,
-    and resident bytes
+    revisions, complete neighbor dependency stamps, generation-safe vertex/index arena ranges,
+    counts, local render bounds, state, and resident bytes
   - immutable snapshot, asynchronous mesh-result, and owner-thread upload queues retain work across
     frames, prioritize visible/missing/nearby chunks, and enforce per-frame snapshot, scheduling,
     result-drain, and upload-byte budgets
-  - replacement buffers become resident only after both uploads succeed; the prior mesh remains
-    drawable while a rebuild is queued or an upload fails
+  - accepted chunk uploads are suballocated from growing device-local vertex and index arenas and
+    copied in one batch per frame budget; replacements become resident only after all writes succeed
+  - the prior mesh remains drawable while a rebuild is queued or an allocation/upload fails
   - empty chunks become valid resident entries without allocating vertex or index buffers
   - mesh dirty regions have one renderer consumer; mesh dirtiness clears only after the requested
     identity, content revision, render-table revision, and all neighbor dependencies remain current
     following a successful upload
   - six Vulkan-depth frustum planes cull camera-relative chunk AABBs, including rich-model bounds,
     before opaque terrain commands are built
-  - debug statistics expose resident/empty counts and bytes, pending mesh/upload work, per-frame
-    mesh/upload work, visible/culled chunks, draws, vertices, and indices
-  - the current one-frame fence makes immediate post-frame buffer retirement safe; multiple frame
-    contexts and submission-serial retirement remain a later scheduling improvement
+  - evictions and replacements return ranges through serial-tagged retirement; the current
+    one-frame fence completes them immediately, while the allocator contract is ready for delayed
+    collection with multiple frame contexts
+  - debug statistics expose resident/empty counts and bytes, arena capacity/usage/free space and
+    fragmentation, pending mesh/upload work, batched writes, visible/culled chunks, draws, vertices,
+    and indices
 
 - Camera and shader constants
   - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention
@@ -175,8 +178,8 @@ Implemented foundation:
   - can allocate host-visible Vulkan buffers and copy renderer-neutral upload bytes into them behind
     opaque RHI handles
   - creates device-local arena buffers with transfer-destination usage and batches subrange copies
-    through a persistently mapped 32 MiB staging buffer; an oversized batch uses a temporary
-    fallback staging allocation
+    through a persistently mapped 32 MiB staging ring whose ranges carry submission serials; an
+    oversized or temporarily full batch uses a dedicated fallback staging allocation
   - can allocate private `VkShaderModule` objects from validated SPIR-V words behind opaque RHI
     handles
   - can upload small RGBA8 sampled images through a private staging buffer, optimal-tiled image,
@@ -251,10 +254,10 @@ before upload. Rebuilds keep the prior resident mesh visible, and rapid requests
 cancelled before expensive work when possible.
 
 The backend intentionally remains a one-frame-in-flight MVP and currently supports one
-draw-producing Vulkan pass per unified submission. General multi-pass Vulkan execution, staged
-device-local mesh uploads, chunk material sections, descriptor lifetime policy for textured
-materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to later
-integration slices.
+draw-producing Vulkan pass per unified submission. General multi-pass Vulkan execution,
+nonblocking staging-ring reuse across frames, chunk material sections, descriptor lifetime policy
+for textured materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to
+later integration slices.
 
 The current shader compiler has development validators plus a production SPIR-V passthrough
 profile. Development preserves source bytes behind explicit compiled-shader metadata and rejects

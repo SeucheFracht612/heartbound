@@ -20,6 +20,7 @@ namespace heartstead::renderer {
 
 struct ChunkRenderConfig {
     std::size_t max_chunks_meshed_per_frame = 4;
+    std::size_t max_chunks_uploaded_per_frame = 4;
     std::size_t max_bytes_uploaded_per_frame = 8 * 1024 * 1024;
     std::size_t max_snapshot_cells_per_frame = 512 * 1024;
     std::size_t max_completed_mesh_results_per_frame = 16;

@@ -35,9 +35,9 @@ namespace {
 } // namespace
 
 core::Status ChunkRenderConfig::validate() const {
-    if (max_chunks_meshed_per_frame == 0) {
+    if (max_chunks_meshed_per_frame == 0 || max_chunks_uploaded_per_frame == 0) {
         return core::Status::failure("renderer.invalid_chunk_mesh_budget",
-                                     "chunk mesh budget must allow at least one chunk");
+                                     "chunk mesh and upload budgets must allow at least one chunk");
     }
     if (max_bytes_uploaded_per_frame == 0) {
         return core::Status::failure("renderer.invalid_chunk_upload_budget",
@@ -262,14 +262,18 @@ ChunkDrawList ChunkRenderSystem::build_draw_list(const RenderCamera& camera) {
             }
             rhi::RenderDrawCommand draw;
             draw.pipeline = terrain_pipeline_;
-            draw.vertex_buffer = visible.entry->vertex_buffer;
-            draw.index_buffer = visible.entry->index_buffer;
-            draw.index_count = visible.entry->index_count;
+            draw.vertex_buffer = visible.entry->mesh.vertices.buffer;
+            draw.index_buffer = visible.entry->mesh.indices.buffer;
+            draw.index_count = visible.entry->mesh.index_count;
+            draw.first_index = static_cast<std::uint32_t>(visible.entry->mesh.indices.offset /
+                                                          sizeof(std::uint32_t));
+            draw.vertex_offset = static_cast<std::int32_t>(visible.entry->mesh.vertices.offset /
+                                                           sizeof(terrain::GpuChunkVertex));
             draw.instance_count = 1;
             draw.camera_relative_origin = visible.origin;
             result.draws.push_back(draw);
-            result.vertex_count += visible.entry->vertex_count;
-            result.index_count += visible.entry->index_count;
+            result.vertex_count += visible.entry->mesh.vertex_count;
+            result.index_count += visible.entry->mesh.index_count;
         }
         std::ranges::stable_sort(result.draws, [](const rhi::RenderDrawCommand& left,
                                                   const rhi::RenderDrawCommand& right) {
@@ -604,15 +608,18 @@ core::Status ChunkRenderSystem::schedule_mesh_jobs(world::WorldState& world,
 core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
                                                      const RenderCamera& camera) {
     prioritize_upload_queue(camera);
-    core::Status first_failure = core::Status::ok();
     const auto available_at_start = pending_uploads_.size();
     std::size_t attempted = 0;
-    while (!pending_uploads_.empty() && attempted < available_at_start) {
+    std::size_t selected_bytes = 0;
+    std::vector<PendingUpload> selected;
+    selected.reserve(std::min(config_.max_chunks_uploaded_per_frame, available_at_start));
+    while (!pending_uploads_.empty() && attempted < available_at_start &&
+           selected.size() < config_.max_chunks_uploaded_per_frame) {
         const auto bytes = pending_uploads_.front().byte_size();
         const bool budget_available =
-            stats_.uploaded_bytes <= config_.max_bytes_uploaded_per_frame &&
-            bytes <= config_.max_bytes_uploaded_per_frame - stats_.uploaded_bytes;
-        if (!budget_available && stats_.uploaded_chunk_count > 0) {
+            selected_bytes <= config_.max_bytes_uploaded_per_frame &&
+            bytes <= config_.max_bytes_uploaded_per_frame - selected_bytes;
+        if (!budget_available && !selected.empty()) {
             break;
         }
 
@@ -626,25 +633,37 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
             }
             continue;
         }
+        selected_bytes += pending.byte_size();
+        selected.push_back(std::move(pending));
+    }
+    if (selected.empty()) {
+        return core::Status::ok();
+    }
 
-        auto upload = [&]() {
-            profiling::ScopedCpuTimingZone upload_zone(timings_, profiling::CpuTimingZone::upload);
-            return cache_->replace_mesh(
-                pending.identity, pending.content_revision, pending.local_bounds, pending.vertices,
-                pending.indices, pending.render_table_revision, pending.dependency_revisions);
-        }();
-        if (!upload) {
-            ++stats_.failed_upload_count;
+    std::vector<ChunkGpuMeshUpload> requests;
+    requests.reserve(selected.size());
+    for (const auto& pending : selected) {
+        requests.push_back({pending.identity, pending.content_revision,
+                            pending.render_table_revision, pending.local_bounds, pending.vertices,
+                            pending.indices, pending.dependency_revisions});
+    }
+    auto upload = [&]() {
+        profiling::ScopedCpuTimingZone upload_zone(timings_, profiling::CpuTimingZone::upload);
+        return cache_->replace_meshes(requests);
+    }();
+    if (!upload) {
+        stats_.failed_upload_count += selected.size();
+        for (auto& pending : selected) {
             pending.sequence = next_sequence_++;
             pending_uploads_.push_back(std::move(pending));
-            if (first_failure) {
-                first_failure = core::Status::failure(upload.error().code, upload.error().message);
-            }
-            continue;
         }
+        return core::Status::failure(upload.error().code, upload.error().message);
+    }
 
+    for (std::size_t index = 0; index < selected.size(); ++index) {
+        const auto& pending = selected[index];
         ++stats_.uploaded_chunk_count;
-        stats_.uploaded_bytes += upload.value().uploaded_bytes;
+        stats_.uploaded_bytes += upload.value().uploads[index].uploaded_bytes;
         auto* chunk = world.chunks().find(pending.identity.coordinate);
         if (chunk != nullptr && pending_upload_is_current(pending, world)) {
             chunk->clear_dirty(world::ChunkDirtyFlag::mesh);
@@ -655,7 +674,7 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
             }
         }
     }
-    return first_failure;
+    return core::Status::ok();
 }
 
 void ChunkRenderSystem::prioritize_mesh_queue(const world::WorldState& world,

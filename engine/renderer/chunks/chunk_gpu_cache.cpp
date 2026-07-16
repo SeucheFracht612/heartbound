@@ -1,23 +1,120 @@
 #include "engine/renderer/chunks/chunk_gpu_cache.hpp"
 
+#include <array>
 #include <limits>
+#include <ranges>
+#include <set>
 #include <string>
+#include <utility>
 
 namespace heartstead::renderer {
 
+bool ChunkGpuMesh::is_empty() const noexcept {
+    return !vertices.is_valid() && !indices.is_valid() && vertex_count == 0 && index_count == 0;
+}
+
 bool ChunkGpuEntry::has_drawable_mesh() const noexcept {
-    return state == ChunkGpuState::resident && vertex_buffer.is_valid() &&
-           index_buffer.is_valid() && vertex_count > 0 && index_count > 0;
+    return state == ChunkGpuState::resident && mesh.vertices.is_valid() &&
+           mesh.indices.is_valid() && mesh.vertex_count > 0 && mesh.index_count > 0;
 }
 
 std::size_t ChunkGpuEntry::resident_bytes() const noexcept {
-    return vertex_bytes + index_bytes;
+    return static_cast<std::size_t>(mesh.vertices.size + mesh.indices.size);
+}
+
+core::Status ChunkGpuCacheConfig::validate() const {
+    constexpr auto maximum_vertex_address =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) *
+        sizeof(terrain::GpuChunkVertex);
+    constexpr auto maximum_index_address =
+        static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) *
+        sizeof(std::uint32_t);
+    if (vertex_maximum_bytes > maximum_vertex_address ||
+        index_maximum_bytes > maximum_index_address) {
+        return core::Status::failure(
+            "chunk_gpu_cache.draw_offset_capacity_exceeded",
+            "chunk GPU arena budgets exceed indexed-draw offset addressability");
+    }
+    if (vertex_maximum_bytes > std::numeric_limits<std::size_t>::max() ||
+        index_maximum_bytes > std::numeric_limits<std::size_t>::max() ||
+        vertex_maximum_bytes > std::numeric_limits<std::size_t>::max() - index_maximum_bytes) {
+        return core::Status::failure("chunk_gpu_cache.combined_budget_unsupported",
+                                     "combined chunk GPU arena budgets overflow size_t");
+    }
+    GpuBufferArenaConfig vertex;
+    vertex.usage = rhi::RenderBufferUsage::vertex;
+    vertex.initial_block_bytes = vertex_initial_bytes;
+    vertex.maximum_capacity_bytes = vertex_maximum_bytes;
+    vertex.debug_name = "chunk_vertex_arena";
+    auto status = vertex.validate();
+    if (!status) {
+        return status;
+    }
+    GpuBufferArenaConfig index;
+    index.usage = rhi::RenderBufferUsage::index;
+    index.initial_block_bytes = index_initial_bytes;
+    index.maximum_capacity_bytes = index_maximum_bytes;
+    index.debug_name = "chunk_index_arena";
+    return index.validate();
 }
 
 ChunkGpuCache::ChunkGpuCache(rhi::IRenderDevice& device) noexcept : device_(&device) {}
 
 ChunkGpuCache::~ChunkGpuCache() {
-    (void)clear();
+    (void)shutdown();
+}
+
+core::Status ChunkGpuCache::initialize(ChunkGpuCacheConfig config) {
+    if (vertex_arena_ != nullptr || index_arena_ != nullptr) {
+        return core::Status::failure("chunk_gpu_cache.already_initialized",
+                                     "chunk GPU cache cannot be initialized twice");
+    }
+    auto status = config.validate();
+    if (!status) {
+        return status;
+    }
+    GpuBufferArenaConfig vertex_config;
+    vertex_config.usage = rhi::RenderBufferUsage::vertex;
+    vertex_config.initial_block_bytes = config.vertex_initial_bytes;
+    vertex_config.maximum_capacity_bytes = config.vertex_maximum_bytes;
+    vertex_config.debug_name = "chunk_vertex_arena";
+    auto vertices = GpuBufferArena::create(*device_, std::move(vertex_config));
+    if (!vertices) {
+        return core::Status::failure(vertices.error().code, vertices.error().message);
+    }
+    GpuBufferArenaConfig index_config;
+    index_config.usage = rhi::RenderBufferUsage::index;
+    index_config.initial_block_bytes = config.index_initial_bytes;
+    index_config.maximum_capacity_bytes = config.index_maximum_bytes;
+    index_config.debug_name = "chunk_index_arena";
+    auto indices = GpuBufferArena::create(*device_, std::move(index_config));
+    if (!indices) {
+        return core::Status::failure(indices.error().code, indices.error().message);
+    }
+    vertex_arena_ = std::move(vertices).value();
+    index_arena_ = std::move(indices).value();
+    refresh_current_stats();
+    return core::Status::ok();
+}
+
+core::Status ChunkGpuCache::shutdown() {
+    core::Status first_failure = clear();
+    if (vertex_arena_ != nullptr) {
+        auto status = vertex_arena_->shutdown();
+        if (!status && first_failure) {
+            first_failure = status;
+        }
+        vertex_arena_.reset();
+    }
+    if (index_arena_ != nullptr) {
+        auto status = index_arena_->shutdown();
+        if (!status && first_failure) {
+            first_failure = status;
+        }
+        index_arena_.reset();
+    }
+    refresh_current_stats();
+    return first_failure;
 }
 
 core::Status ChunkGpuCache::insert(world::ChunkIdentity identity) {
@@ -37,7 +134,7 @@ core::Status ChunkGpuCache::insert(world::ChunkIdentity identity) {
 
     ChunkGpuEntry entry;
     entry.identity = identity;
-    entries_.emplace(identity, entry);
+    entries_.emplace(identity, std::move(entry));
     refresh_current_stats();
     return core::Status::ok();
 }
@@ -53,21 +150,23 @@ core::Status ChunkGpuCache::erase(world::ChunkIdentity identity) {
                                         : "chunk GPU eviction references a stale load generation");
     }
 
-    auto release_status = release_entry_resources(found->second);
+    auto retirement = retire_entry_allocations(found->second, device_->completed_frame_count());
     entries_.erase(found);
+    collect_retired();
     refresh_current_stats();
-    return release_status;
+    return retirement;
 }
 
 core::Status ChunkGpuCache::clear() {
     core::Status first_failure = core::Status::ok();
     for (const auto& [_, entry] : entries_) {
-        auto status = release_entry_resources(entry);
+        auto status = retire_entry_allocations(entry, device_->completed_frame_count());
         if (!status && first_failure) {
             first_failure = status;
         }
     }
     entries_.clear();
+    collect_retired();
     refresh_current_stats();
     return first_failure;
 }
@@ -130,103 +229,182 @@ core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
     std::span<const terrain::GpuChunkVertex> vertices, std::span<const std::uint32_t> indices,
     std::uint64_t render_table_revision,
     std::span<const world::ChunkDependencyRevision> dependency_revisions) {
-    auto* entry = find(identity);
-    if (entry == nullptr) {
-        return core::Result<ChunkGpuUploadResult>::failure(
-            "chunk_gpu_cache.missing_identity", "cannot upload a mesh for an uncached chunk");
+    const std::array<ChunkGpuMeshUpload, 1> uploads{
+        ChunkGpuMeshUpload{identity, content_revision, render_table_revision, local_bounds,
+                           vertices, indices, dependency_revisions}};
+    auto batch = replace_meshes(uploads);
+    if (!batch) {
+        return core::Result<ChunkGpuUploadResult>::failure(batch.error().code,
+                                                           batch.error().message);
     }
-    if (content_revision == 0) {
-        return core::Result<ChunkGpuUploadResult>::failure(
-            "chunk_gpu_cache.invalid_content_revision",
-            "chunk GPU uploads require a nonzero content revision");
-    }
-    if (render_table_revision == 0) {
-        return core::Result<ChunkGpuUploadResult>::failure(
-            "chunk_gpu_cache.invalid_render_table_revision",
-            "chunk GPU uploads require a nonzero block-render table revision");
-    }
-    if (vertices.empty() != indices.empty()) {
-        return core::Result<ChunkGpuUploadResult>::failure(
-            "chunk_gpu_cache.incomplete_mesh",
-            "chunk GPU meshes must provide both vertex and index data or neither");
-    }
-    if (vertices.size() > std::numeric_limits<std::uint32_t>::max() ||
-        indices.size() > std::numeric_limits<std::uint32_t>::max()) {
-        return core::Result<ChunkGpuUploadResult>::failure(
-            "chunk_gpu_cache.mesh_too_large", "chunk GPU mesh counts exceed uint32 draw limits");
-    }
+    return core::Result<ChunkGpuUploadResult>::success(batch.value().uploads.front());
+}
 
-    ChunkGpuUploadResult result;
-    result.empty = vertices.empty();
-    result.replaced_resident_mesh = entry->state == ChunkGpuState::resident;
-    const auto vertex_bytes = std::as_bytes(vertices);
-    const auto index_bytes = std::as_bytes(indices);
-    result.uploaded_bytes = vertex_bytes.size() + index_bytes.size();
-
-    rhi::RenderResourceHandle new_vertex;
-    rhi::RenderResourceHandle new_index;
-    if (!vertices.empty()) {
-        auto vertex_upload = device_->upload_buffer(
-            {rhi::RenderBufferUsage::vertex, vertex_bytes.size(), "chunk_vertices"}, vertex_bytes);
-        if (!vertex_upload) {
-            mark_failed(identity);
-            ++stats_.failed_upload_count;
-            return core::Result<ChunkGpuUploadResult>::failure(vertex_upload.error().code,
-                                                               vertex_upload.error().message);
+core::Result<ChunkGpuBatchUploadResult>
+ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
+    if (uploads.empty()) {
+        return core::Result<ChunkGpuBatchUploadResult>::failure(
+            "chunk_gpu_cache.empty_upload_batch", "chunk GPU upload batch must not be empty");
+    }
+    if (vertex_arena_ == nullptr || index_arena_ == nullptr) {
+        auto status = initialize();
+        if (!status) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(status.error().code,
+                                                                    status.error().message);
         }
-        new_vertex = vertex_upload.value().handle;
-
-        auto index_upload = device_->upload_buffer(
-            {rhi::RenderBufferUsage::index, index_bytes.size(), "chunk_indices"}, index_bytes);
-        if (!index_upload) {
-            (void)device_->release_resource(new_vertex);
-            mark_failed(identity);
-            ++stats_.failed_upload_count;
-            return core::Result<ChunkGpuUploadResult>::failure(index_upload.error().code,
-                                                               index_upload.error().message);
-        }
-        new_index = index_upload.value().handle;
     }
 
-    const auto old_entry = *entry;
-    entry->resident_content_revision = content_revision;
-    entry->resident_render_table_revision = render_table_revision;
-    entry->resident_dependency_revisions.assign(dependency_revisions.begin(),
-                                                dependency_revisions.end());
-    entry->vertex_buffer = new_vertex;
-    entry->index_buffer = new_index;
-    entry->vertex_count = static_cast<std::uint32_t>(vertices.size());
-    entry->index_count = static_cast<std::uint32_t>(indices.size());
-    entry->local_bounds = local_bounds;
-    entry->state = ChunkGpuState::resident;
-    entry->vertex_bytes = vertex_bytes.size();
-    entry->index_bytes = index_bytes.size();
+    std::set<world::ChunkIdentity> identities;
+    for (const auto& upload : uploads) {
+        if (find(upload.identity) == nullptr) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.missing_identity", "cannot upload a mesh for an uncached chunk");
+        }
+        if (!identities.insert(upload.identity).second) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.duplicate_batch_identity",
+                "chunk GPU upload batch contains an identity more than once");
+        }
+        if (upload.content_revision == 0 || upload.render_table_revision == 0) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.invalid_revision",
+                "chunk GPU uploads require nonzero content and render-table revisions");
+        }
+        if (upload.vertices.empty() != upload.indices.empty()) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.incomplete_mesh",
+                "chunk GPU meshes must provide both vertex and index data or neither");
+        }
+        if (upload.vertices.size() > std::numeric_limits<std::uint32_t>::max() ||
+            upload.indices.size() > std::numeric_limits<std::uint32_t>::max()) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.mesh_too_large",
+                "chunk GPU mesh counts exceed uint32 draw limits");
+        }
+    }
 
-    auto release_status = release_entry_resources(old_entry);
-    ++stats_.uploaded_chunk_count;
+    struct PreparedUpload {
+        ChunkGpuMesh mesh;
+        std::size_t uploaded_bytes = 0;
+    };
+    std::vector<PreparedUpload> prepared;
+    prepared.resize(uploads.size());
+    const auto rollback = [this, &prepared]() {
+        for (const auto& candidate : prepared) {
+            if (candidate.mesh.vertices.is_valid()) {
+                (void)vertex_arena_->retire(candidate.mesh.vertices, 0);
+            }
+            if (candidate.mesh.indices.is_valid()) {
+                (void)index_arena_->retire(candidate.mesh.indices, 0);
+            }
+        }
+        vertex_arena_->collect(0);
+        index_arena_->collect(0);
+        refresh_current_stats();
+    };
+
+    std::vector<rhi::RenderBufferWrite> writes;
+    writes.reserve(uploads.size() * 2);
+    for (std::size_t index = 0; index < uploads.size(); ++index) {
+        const auto& upload = uploads[index];
+        auto& candidate = prepared[index];
+        candidate.mesh.vertex_count = static_cast<std::uint32_t>(upload.vertices.size());
+        candidate.mesh.index_count = static_cast<std::uint32_t>(upload.indices.size());
+        if (upload.vertices.empty()) {
+            continue;
+        }
+        const auto vertex_bytes = std::as_bytes(upload.vertices);
+        const auto index_bytes = std::as_bytes(upload.indices);
+        auto vertices =
+            vertex_arena_->allocate(vertex_bytes.size(), sizeof(terrain::GpuChunkVertex));
+        if (!vertices) {
+            rollback();
+            ++stats_.failed_upload_count;
+            return core::Result<ChunkGpuBatchUploadResult>::failure(vertices.error().code,
+                                                                    vertices.error().message);
+        }
+        candidate.mesh.vertices = vertices.value();
+        auto indices = index_arena_->allocate(index_bytes.size(), sizeof(std::uint32_t));
+        if (!indices) {
+            rollback();
+            ++stats_.failed_upload_count;
+            return core::Result<ChunkGpuBatchUploadResult>::failure(indices.error().code,
+                                                                    indices.error().message);
+        }
+        candidate.mesh.indices = indices.value();
+        candidate.uploaded_bytes = vertex_bytes.size() + index_bytes.size();
+        writes.push_back({candidate.mesh.vertices.buffer,
+                          static_cast<std::size_t>(candidate.mesh.vertices.offset), vertex_bytes});
+        writes.push_back({candidate.mesh.indices.buffer,
+                          static_cast<std::size_t>(candidate.mesh.indices.offset), index_bytes});
+    }
+
+    if (!writes.empty()) {
+        auto written = device_->upload_buffer_batch(writes);
+        if (!written) {
+            rollback();
+            ++stats_.failed_upload_count;
+            return core::Result<ChunkGpuBatchUploadResult>::failure(written.error().code,
+                                                                    written.error().message);
+        }
+    }
+
+    ChunkGpuBatchUploadResult result;
+    result.uploads.reserve(uploads.size());
+    result.write_count = writes.size();
+    core::Status retirement_status = core::Status::ok();
+    for (std::size_t index = 0; index < uploads.size(); ++index) {
+        const auto& upload = uploads[index];
+        auto* entry = find(upload.identity);
+        const auto old_entry = *entry;
+        entry->resident_content_revision = upload.content_revision;
+        entry->resident_render_table_revision = upload.render_table_revision;
+        entry->resident_dependency_revisions.assign(upload.dependency_revisions.begin(),
+                                                    upload.dependency_revisions.end());
+        entry->mesh = prepared[index].mesh;
+        entry->local_bounds = upload.local_bounds;
+        entry->state = ChunkGpuState::resident;
+
+        auto status = retire_entry_allocations(old_entry, device_->completed_frame_count());
+        if (!status && retirement_status) {
+            retirement_status = status;
+        }
+        ChunkGpuUploadResult upload_result;
+        upload_result.uploaded_bytes = prepared[index].uploaded_bytes;
+        upload_result.empty = upload.vertices.empty();
+        upload_result.replaced_resident_mesh = old_entry.state == ChunkGpuState::resident;
+        result.uploaded_bytes += upload_result.uploaded_bytes;
+        result.uploads.push_back(upload_result);
+    }
+    collect_retired();
+    stats_.uploaded_chunk_count += uploads.size();
     stats_.uploaded_bytes += result.uploaded_bytes;
+    ++stats_.upload_batch_count;
+    stats_.last_upload_chunk_count = uploads.size();
+    stats_.last_upload_write_count = result.write_count;
     refresh_current_stats();
-    if (!release_status) {
-        return core::Result<ChunkGpuUploadResult>::failure(release_status.error().code,
-                                                           release_status.error().message);
+    if (!retirement_status) {
+        return core::Result<ChunkGpuBatchUploadResult>::failure(retirement_status.error().code,
+                                                                retirement_status.error().message);
     }
-    return core::Result<ChunkGpuUploadResult>::success(result);
+    return core::Result<ChunkGpuBatchUploadResult>::success(std::move(result));
 }
 
 ChunkGpuCacheStats ChunkGpuCache::stats() const noexcept {
     return stats_;
 }
 
-core::Status ChunkGpuCache::release_entry_resources(const ChunkGpuEntry& entry) {
+core::Status ChunkGpuCache::retire_entry_allocations(const ChunkGpuEntry& entry,
+                                                     std::uint64_t submission_serial) {
     core::Status first_failure = core::Status::ok();
-    if (entry.vertex_buffer.is_valid()) {
-        auto status = device_->release_resource(entry.vertex_buffer);
+    if (entry.mesh.vertices.is_valid() && vertex_arena_ != nullptr) {
+        auto status = vertex_arena_->retire(entry.mesh.vertices, submission_serial);
         if (!status) {
             first_failure = status;
         }
     }
-    if (entry.index_buffer.is_valid()) {
-        auto status = device_->release_resource(entry.index_buffer);
+    if (entry.mesh.indices.is_valid() && index_arena_ != nullptr) {
+        auto status = index_arena_->retire(entry.mesh.indices, submission_serial);
         if (!status && first_failure) {
             first_failure = status;
         }
@@ -234,11 +412,20 @@ core::Status ChunkGpuCache::release_entry_resources(const ChunkGpuEntry& entry) 
     return first_failure;
 }
 
+void ChunkGpuCache::collect_retired() noexcept {
+    if (vertex_arena_ != nullptr) {
+        vertex_arena_->collect(device_->completed_frame_count());
+    }
+    if (index_arena_ != nullptr) {
+        index_arena_->collect(device_->completed_frame_count());
+    }
+}
+
 void ChunkGpuCache::refresh_current_stats() noexcept {
     stats_.entry_count = entries_.size();
     stats_.resident_chunk_count = 0;
     stats_.empty_chunk_count = 0;
-    stats_.resident_buffer_count = 0;
+    stats_.resident_allocation_count = 0;
     stats_.resident_bytes = 0;
     for (const auto& [_, entry] : entries_) {
         if (entry.state != ChunkGpuState::resident) {
@@ -246,12 +433,17 @@ void ChunkGpuCache::refresh_current_stats() noexcept {
         }
         ++stats_.resident_chunk_count;
         stats_.resident_bytes += entry.resident_bytes();
-        stats_.resident_buffer_count += static_cast<std::size_t>(entry.vertex_buffer.is_valid()) +
-                                        static_cast<std::size_t>(entry.index_buffer.is_valid());
+        stats_.resident_allocation_count +=
+            static_cast<std::size_t>(entry.mesh.vertices.is_valid()) +
+            static_cast<std::size_t>(entry.mesh.indices.is_valid());
         if (!entry.has_drawable_mesh()) {
             ++stats_.empty_chunk_count;
         }
     }
+    stats_.vertex_arena = vertex_arena_ == nullptr ? GpuBufferArenaStats{} : vertex_arena_->stats();
+    stats_.index_arena = index_arena_ == nullptr ? GpuBufferArenaStats{} : index_arena_->stats();
+    stats_.resident_buffer_count =
+        stats_.vertex_arena.buffer_count + stats_.index_arena.buffer_count;
 }
 
 } // namespace heartstead::renderer

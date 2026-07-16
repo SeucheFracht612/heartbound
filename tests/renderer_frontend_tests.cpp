@@ -64,6 +64,7 @@ void test_chunk_gpu_cache_lifecycle() {
     const auto baseline_resources = device.value()->live_resource_count();
 
     renderer::ChunkGpuCache cache(*device.value());
+    assert(cache.initialize());
     const world::ChunkIdentity identity{{3, -2, 7}, 41};
     assert(cache.insert(identity));
     assert(!cache.insert(identity));
@@ -84,13 +85,13 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(first_entry != nullptr);
     assert(first_entry->has_drawable_mesh());
     assert(first_entry->resident_content_revision == 5);
-    const auto first_vertex_handle = first_entry->vertex_buffer.value;
-    const auto first_index_handle = first_entry->index_buffer.value;
+    const auto first_vertex_allocation = first_entry->mesh.vertices;
+    const auto first_index_allocation = first_entry->mesh.indices;
 
     auto rejected_replacement = cache.replace_mesh(identity, 6, bounds, vertices, {});
     assert(!rejected_replacement);
-    assert(cache.find(identity)->vertex_buffer.value == first_vertex_handle);
-    assert(cache.find(identity)->index_buffer.value == first_index_handle);
+    assert(cache.find(identity)->mesh.vertices == first_vertex_allocation);
+    assert(cache.find(identity)->mesh.indices == first_index_allocation);
     assert(cache.find(identity)->resident_content_revision == 5);
 
     auto replacement = cache.replace_mesh(identity, 6, bounds, vertices, indices);
@@ -99,14 +100,14 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(device.value()->live_resource_count() == baseline_resources + 2);
     const auto* replaced_entry = cache.find(identity);
     assert(replaced_entry != nullptr);
-    assert(replaced_entry->vertex_buffer.value != first_vertex_handle);
-    assert(replaced_entry->index_buffer.value != first_index_handle);
+    assert(replaced_entry->mesh.vertices != first_vertex_allocation);
+    assert(replaced_entry->mesh.indices != first_index_allocation);
     assert(replaced_entry->resident_content_revision == 6);
 
     auto empty_replacement = cache.replace_mesh(identity, 7, {}, {}, {});
     assert(empty_replacement);
     assert(empty_replacement.value().empty);
-    assert(device.value()->live_resource_count() == baseline_resources);
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
     assert(cache.find(identity)->state == renderer::ChunkGpuState::resident);
     assert(!cache.find(identity)->has_drawable_mesh());
     assert(cache.stats().resident_chunk_count == 1);
@@ -119,6 +120,63 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(cache.contains(identity));
     assert(cache.erase(identity));
     assert(cache.stats().entry_count == 0);
+    assert(cache.stats().resident_allocation_count == 0);
+    assert(cache.stats().vertex_arena.used_bytes == 0);
+    assert(cache.stats().index_arena.used_bytes == 0);
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
+    assert(cache.shutdown());
+    assert(device.value()->live_resource_count() == baseline_resources);
+}
+
+void test_chunk_gpu_cache_batches_device_local_arena_uploads() {
+    using namespace heartstead;
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+    const auto baseline_resources = device.value()->live_resource_count();
+    renderer::ChunkGpuCache cache(*device.value());
+    renderer::ChunkGpuCacheConfig config;
+    config.vertex_initial_bytes = 4096;
+    config.vertex_maximum_bytes = 4096;
+    config.index_initial_bytes = 4096;
+    config.index_maximum_bytes = 4096;
+    assert(cache.initialize(config));
+
+    const world::ChunkIdentity first{{0, 0, 0}, 1};
+    const world::ChunkIdentity second{{1, 0, 0}, 2};
+    assert(cache.insert(first));
+    assert(cache.insert(second));
+    const std::array<renderer::terrain::GpuChunkVertex, 3> vertices{
+        renderer::terrain::GpuChunkVertex{{0.0F, 0.0F, 0.0F}},
+        renderer::terrain::GpuChunkVertex{{1.0F, 0.0F, 0.0F}},
+        renderer::terrain::GpuChunkVertex{{0.0F, 1.0F, 0.0F}},
+    };
+    const std::array<std::uint32_t, 3> indices{0, 1, 2};
+    const math::Bounds3f bounds{{0.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 0.0F}};
+    const std::array<renderer::ChunkGpuMeshUpload, 2> uploads{
+        renderer::ChunkGpuMeshUpload{first, 1, 1, bounds, vertices, indices, {}},
+        renderer::ChunkGpuMeshUpload{second, 1, 1, bounds, vertices, indices, {}},
+    };
+    auto uploaded = cache.replace_meshes(uploads);
+    assert(uploaded);
+    assert(uploaded.value().uploads.size() == 2);
+    assert(uploaded.value().write_count == 4);
+    assert(cache.stats().upload_batch_count == 1);
+    assert(cache.stats().last_upload_chunk_count == 2);
+    assert(cache.stats().last_upload_write_count == 4);
+    assert(cache.stats().resident_allocation_count == 4);
+    assert(cache.stats().resident_buffer_count == 2);
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
+    assert(cache.find(first)->mesh.vertices.buffer == cache.find(second)->mesh.vertices.buffer);
+    assert(cache.find(first)->mesh.indices.buffer == cache.find(second)->mesh.indices.buffer);
+    assert(cache.find(first)->mesh.vertices.offset != cache.find(second)->mesh.vertices.offset);
+    assert(cache.find(first)->mesh.indices.offset != cache.find(second)->mesh.indices.offset);
+
+    assert(cache.erase(first));
+    assert(cache.erase(second));
+    assert(cache.stats().vertex_arena.used_bytes == 0);
+    assert(cache.stats().index_arena.used_bytes == 0);
+    assert(cache.shutdown());
     assert(device.value()->live_resource_count() == baseline_resources);
 }
 
@@ -132,6 +190,7 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     const auto baseline_resources = device.value()->live_resource_count();
 
     renderer::ChunkGpuCache cache(*device.value());
+    assert(cache.initialize());
     renderer::ChunkRenderConfig config;
     config.max_chunks_meshed_per_frame = 3;
     config.max_bytes_uploaded_per_frame = 1; // Oversized meshes make progress one at a time.
@@ -174,8 +233,9 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
                chunks.stats().pending_mesh_count == 0 && chunks.stats().pending_upload_count == 0;
     });
     assert(cache.stats().resident_chunk_count == 3);
-    assert(cache.stats().resident_buffer_count == 6);
-    assert(device.value()->live_resource_count() == baseline_resources + 6);
+    assert(cache.stats().resident_buffer_count == 2);
+    assert(cache.stats().resident_allocation_count == 6);
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
     assert(chunks.stats().pending_mesh_count == 0);
     assert(chunks.stats().pending_upload_count == 0);
 
@@ -190,32 +250,35 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
                draw.index_buffer.is_valid() && draw.index_count > 0 &&
                std::abs(draw.camera_relative_origin.z + 64.0F) < 0.001F;
     }));
+    assert(std::ranges::any_of(draws.draws, [](const renderer::rhi::RenderDrawCommand& draw) {
+        return draw.first_index > 0 && draw.vertex_offset > 0;
+    }));
 
     const auto uploads_before_idle_sync = cache.stats().uploaded_chunk_count;
     assert(chunks.synchronize(world, camera));
     assert(chunks.stats().uploaded_chunk_count == 0);
     assert(cache.stats().uploaded_chunk_count == uploads_before_idle_sync);
 
-    const auto old_origin_vertex = cache.find(origin_identity)->vertex_buffer.value;
-    const auto old_neighbor_vertex = cache.find(neighbor_identity)->vertex_buffer.value;
+    const auto old_origin_vertex = cache.find(origin_identity)->mesh.vertices;
+    const auto old_neighbor_vertex = cache.find(neighbor_identity)->mesh.vertices;
     const auto neighbor_revision = world.chunks().find(neighbor_coord)->content_revision();
     assert(world.chunks().set(origin_coord, {31, 8, 31}, world::VoxelCell{2, 220},
                               world.dirty_regions()));
     assert(chunks.synchronize(world, camera));
     assert(chunks.build_draw_list(camera).draws.size() == 2);
-    assert(cache.find(origin_identity)->vertex_buffer.value == old_origin_vertex);
+    assert(cache.find(origin_identity)->mesh.vertices == old_origin_vertex);
     synchronize_until([&] {
         return !world.chunks().find(origin_coord)->dirty().contains(world::ChunkDirtyFlag::mesh) &&
                !world.chunks().find(neighbor_coord)->dirty().contains(world::ChunkDirtyFlag::mesh);
     });
-    assert(cache.find(origin_identity)->vertex_buffer.value != old_origin_vertex);
-    assert(cache.find(neighbor_identity)->vertex_buffer.value != old_neighbor_vertex);
+    assert(cache.find(origin_identity)->mesh.vertices != old_origin_vertex);
+    assert(cache.find(neighbor_identity)->mesh.vertices != old_neighbor_vertex);
     assert(cache.find(origin_identity)->resident_content_revision ==
            world.chunks().find(origin_coord)->content_revision());
     assert(cache.find(neighbor_identity)->resident_content_revision == neighbor_revision);
     assert(!world.chunks().find(origin_coord)->dirty().contains(world::ChunkDirtyFlag::mesh));
     assert(!world.chunks().find(neighbor_coord)->dirty().contains(world::ChunkDirtyFlag::mesh));
-    assert(device.value()->live_resource_count() == baseline_resources + 6);
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
 
     const auto intermediate_revision_before = world.chunks().find(origin_coord)->content_revision();
     assert(world.chunks().set(origin_coord, {30, 8, 31}, world::VoxelCell{1, 220},
@@ -247,13 +310,13 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     assert(cache.find(empty_identity)->state == renderer::ChunkGpuState::resident);
     assert(!cache.find(empty_identity)->has_drawable_mesh());
     assert(cache.stats().empty_chunk_count == 1);
-    assert(device.value()->live_resource_count() == baseline_resources + 6);
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
 
     assert(world.chunks().erase(behind_coord));
     const std::array<world::ChunkIdentity, 1> evictions{behind_identity};
     assert(chunks.process_chunk_evictions(evictions));
     assert(!cache.contains(behind_identity));
-    assert(device.value()->live_resource_count() == baseline_resources + 4);
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
 
     assert(world.chunks().set(empty_coord, {2, 2, 2}, world::VoxelCell{1, 255},
                               world.dirty_regions()));
@@ -273,6 +336,9 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     assert(!cache.contains(empty_identity));
 
     assert(cache.clear());
+    assert(device.value()->live_resource_count() == baseline_resources + 2);
+    chunks.shutdown();
+    assert(cache.shutdown());
     assert(device.value()->live_resource_count() == baseline_resources);
 }
 
@@ -365,7 +431,7 @@ void test_renderer_frontend_submits_headless_frames() {
     eviction_report.evicted_chunks.push_back(identity.coordinate);
     eviction_report.evicted_identities.push_back(identity);
     assert(retained_renderer.process_chunk_evictions(eviction_report));
-    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
+    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count + 2);
     auto empty_frame = retained_renderer.render(camera);
     assert(empty_frame);
     assert(empty_frame.value().draw_count == 0);
@@ -381,6 +447,7 @@ int main() {
     test_scoped_cpu_timing_zones();
     test_frustum_aabb_culling();
     test_chunk_gpu_cache_lifecycle();
+    test_chunk_gpu_cache_batches_device_local_arena_uploads();
     test_chunk_render_system_retains_rebuilds_and_culls();
     test_renderer_frontend_submits_headless_frames();
     return 0;

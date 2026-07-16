@@ -32,6 +32,10 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
     if (!config_status) {
         return config_status;
     }
+    config_status = desc.chunk_gpu_cache_config.validate();
+    if (!config_status) {
+        return config_status;
+    }
 
     device_ = std::move(desc.device);
     auto pipeline_status =
@@ -43,6 +47,12 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
     }
 
     chunk_cache_ = std::make_unique<ChunkGpuCache>(*device_);
+    auto cache_status = chunk_cache_->initialize(desc.chunk_gpu_cache_config);
+    if (!cache_status) {
+        const auto error = cache_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
     chunk_system_ = std::make_unique<ChunkRenderSystem>(*chunk_cache_, terrain_pipeline_,
                                                         desc.voxel_palette, desc.chunk_config);
     auto chunk_system_status = chunk_system_->initialize();
@@ -230,6 +240,18 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
     stats_.vertices = chunks.visible_vertex_count;
     stats_.triangles = chunks.visible_index_count / 3;
     stats_.resident_mesh_bytes = chunks.cache.resident_bytes;
+    stats_.gpu_arena_capacity_bytes =
+        chunks.cache.vertex_arena.capacity_bytes + chunks.cache.index_arena.capacity_bytes;
+    stats_.gpu_arena_used_bytes =
+        chunks.cache.vertex_arena.used_bytes + chunks.cache.index_arena.used_bytes;
+    stats_.gpu_arena_free_bytes =
+        chunks.cache.vertex_arena.free_bytes + chunks.cache.index_arena.free_bytes;
+    const auto arena_free = stats_.gpu_arena_free_bytes;
+    const auto arena_largest = chunks.cache.vertex_arena.largest_free_range_bytes +
+                               chunks.cache.index_arena.largest_free_range_bytes;
+    stats_.gpu_arena_fragmentation = arena_free == 0 ? 0.0
+                                                     : 1.0 - static_cast<double>(arena_largest) /
+                                                                 static_cast<double>(arena_free);
     stats_.pending_upload_bytes = chunks.pending_upload_bytes;
     stats_.uploaded_bytes_this_frame = chunks.uploaded_bytes;
 }

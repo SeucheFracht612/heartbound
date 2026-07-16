@@ -41,6 +41,10 @@ struct RendererStats {
     std::uint64_t vertices = 0;
     std::uint64_t triangles = 0;
     std::uint64_t resident_mesh_bytes = 0;
+    std::uint64_t gpu_arena_capacity_bytes = 0;
+    std::uint64_t gpu_arena_used_bytes = 0;
+    std::uint64_t gpu_arena_free_bytes = 0;
+    double gpu_arena_fragmentation = 0.0;
     std::uint64_t pending_upload_bytes = 0;
     std::uint64_t uploaded_bytes_this_frame = 0;
 };

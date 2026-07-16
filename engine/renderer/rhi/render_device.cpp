@@ -297,6 +297,11 @@ class HeadlessRenderDevice final : public IRenderDevice {
                     "renderer.buffer_write_out_of_bounds",
                     "buffer write exceeds its destination resource");
             }
+            if (byte_size > std::numeric_limits<std::size_t>::max() - write.bytes.size()) {
+                return core::Result<RenderBufferBatchUploadStats>::failure(
+                    "renderer.buffer_write_batch_too_large",
+                    "buffer write batch byte size overflows size_t");
+            }
             byte_size += write.bytes.size();
         }
         RenderBufferBatchUploadStats stats;

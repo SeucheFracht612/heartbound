@@ -20,7 +20,9 @@ std::string format_renderer_stats(const RendererStats& stats) {
            << " record=" << stats.command_recording_ms << "ms" << " wait=" << stats.gpu_wait_ms
            << "ms" << " chunks=" << stats.visible_chunks << '/' << stats.resident_chunks << '/'
            << stats.loaded_chunks << " draws=" << stats.draw_calls
-           << " triangles=" << stats.triangles << " resident_bytes=" << stats.resident_mesh_bytes;
+           << " triangles=" << stats.triangles << " resident_bytes=" << stats.resident_mesh_bytes
+           << " arena=" << stats.gpu_arena_used_bytes << '/' << stats.gpu_arena_capacity_bytes
+           << " arena_frag=" << stats.gpu_arena_fragmentation;
     return stream.str();
 }
 

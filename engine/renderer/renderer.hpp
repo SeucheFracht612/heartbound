@@ -23,6 +23,7 @@ struct RendererInitDesc {
     std::vector<std::uint32_t> terrain_fragment_spirv;
     const world::VoxelPalette* voxel_palette = nullptr;
     ChunkRenderConfig chunk_config{};
+    ChunkGpuCacheConfig chunk_gpu_cache_config{};
     rhi::ClearColor clear_color{0.055F, 0.09F, 0.14F, 1.0F};
 };
 
