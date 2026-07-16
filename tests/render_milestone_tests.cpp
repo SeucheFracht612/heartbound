@@ -1,11 +1,12 @@
 #include "engine/math/matrix.hpp"
+#include "engine/platform/platform.hpp"
 #include "engine/renderer/render_camera.hpp"
 #include "engine/renderer/rhi/render_frame_plan.hpp"
 #include "engine/renderer/shaders/spirv_loader.hpp"
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
 
-#include <cassert>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -21,8 +22,7 @@ namespace {
 void test_matrix_composition() {
     using namespace heartstead::math;
 
-    const auto model = translation_matrix({5.0F, -2.0F, 3.0F}) *
-                       scale_matrix({2.0F, 3.0F, 4.0F});
+    const auto model = translation_matrix({5.0F, -2.0F, 3.0F}) * scale_matrix({2.0F, 3.0F, 4.0F});
     const auto transformed = model * Vec4f{1.0F, 2.0F, -1.0F, 1.0F};
     assert(nearly_equal(transformed.x, 7.0F));
     assert(nearly_equal(transformed.y, 4.0F));
@@ -38,8 +38,8 @@ void test_vulkan_projection() {
 
     constexpr float near_plane = 0.1F;
     constexpr float far_plane = 100.0F;
-    const auto projection = perspective_projection(std::numbers::pi_v<float> * 0.5F, 2.0F,
-                                                   near_plane, far_plane);
+    const auto projection =
+        perspective_projection(std::numbers::pi_v<float> * 0.5F, 2.0F, near_plane, far_plane);
     const auto near_clip = projection * Vec4f{0.0F, 0.0F, -near_plane, 1.0F};
     const auto far_clip = projection * Vec4f{0.0F, 0.0F, -far_plane, 1.0F};
     assert(nearly_equal(near_clip.z / near_clip.w, 0.0F));
@@ -73,13 +73,8 @@ void test_view_and_camera_resize() {
 void test_gpu_chunk_vertex_contract() {
     using namespace heartstead;
 
-    const world::ChunkMeshVertex cpu_vertex{{1.0F, 2.0F, 3.0F},
-                                             {0.0F, 1.0F, 0.0F},
-                                             0.25F,
-                                             0.75F,
-                                             42,
-                                             190,
-                                             0x1234};
+    const world::ChunkMeshVertex cpu_vertex{
+        {1.0F, 2.0F, 3.0F}, {0.0F, 1.0F, 0.0F}, 0.25F, 0.75F, 42, 190, 0x1234};
     const auto gpu_vertex = renderer::terrain::to_gpu_chunk_vertex(cpu_vertex);
     assert(gpu_vertex.position[0] == 1.0F);
     assert(gpu_vertex.normal[1] == 1.0F);
@@ -102,6 +97,32 @@ void test_spirv_validation() {
     const auto invalid = validate_spirv(bad_magic);
     assert(!invalid);
     assert(invalid.error().code == "renderer.invalid_spirv_magic");
+}
+
+void test_minimized_window_and_idempotent_quit() {
+    using namespace heartstead::platform;
+
+    HeadlessPlatform platform;
+    const auto window = platform.create_window({"render milestone platform", 640, 360, true});
+    assert(window);
+    assert(platform.poll_event()); // window_created
+    assert(platform.queue_event(
+        {PlatformEventKind::window_resized, window.value(), KeyCode::unknown, 0, 0, {}}));
+    const auto* minimized = platform.find_window(window.value());
+    assert(minimized != nullptr);
+    assert(minimized->width == 0);
+    assert(minimized->height == 0);
+
+    platform.request_quit();
+    platform.request_quit();
+    std::size_t quit_events = 0;
+    while (const auto event = platform.poll_event()) {
+        if (event->kind == PlatformEventKind::quit_requested) {
+            ++quit_events;
+        }
+    }
+    assert(platform.should_quit());
+    assert(quit_events == 1);
 }
 
 void test_unified_headless_frame_submission() {
@@ -153,36 +174,32 @@ void test_unified_headless_frame_submission() {
 
     RenderFramePlanBuilder builder({640, 360});
     assert(builder.add_resource(
-        {"output", {640, 360}, RenderResourceLifetime::external,
-         RenderImageFormat::rgba8_unorm}));
+        {"output", {640, 360}, RenderResourceLifetime::external, RenderImageFormat::rgba8_unorm}));
     assert(builder.add_resource(
-        {"depth", {640, 360}, RenderResourceLifetime::transient,
-         RenderImageFormat::d32_sfloat}));
+        {"depth", {640, 360}, RenderResourceLifetime::transient, RenderImageFormat::d32_sfloat}));
     assert(builder.add_pass({"world",
                              RenderPassKind::world,
                              {},
                              {"output", "depth"},
                              {0.05F, 0.1F, 0.2F, 1.0F},
                              false}));
-    assert(builder.add_pass(
-        {"present", RenderPassKind::present, {"output"}, {}, {}, true}));
+    assert(builder.add_pass({"present", RenderPassKind::present, {"output"}, {}, {}, true}));
     auto plan = builder.build();
     assert(plan);
 
     RenderFrameSubmission frame;
     frame.plan = plan.value();
     frame.camera.view_projection = math::Mat4f::identity();
-    frame.pass_commands.push_back(
-        {0,
-         {RenderDrawCommand{pipeline.value().handle,
-                            vertex_upload.value().handle,
-                            index_upload.value().handle,
-                            3,
-                            0,
-                            0,
-                            1,
-                            0,
-                            {32.0F, 0.0F, -32.0F}}}});
+    frame.pass_commands.push_back({0,
+                                   {RenderDrawCommand{pipeline.value().handle,
+                                                      vertex_upload.value().handle,
+                                                      index_upload.value().handle,
+                                                      3,
+                                                      0,
+                                                      0,
+                                                      1,
+                                                      0,
+                                                      {32.0F, 0.0F, -32.0F}}}});
 
     auto stats = device.value()->execute_frame(frame);
     assert(stats);
@@ -205,6 +222,7 @@ int main() {
     test_view_and_camera_resize();
     test_gpu_chunk_vertex_contract();
     test_spirv_validation();
+    test_minimized_window_and_idempotent_quit();
     test_unified_headless_frame_submission();
     return 0;
 }

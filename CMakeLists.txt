@@ -8,6 +8,7 @@ project(
 )
 
 option(HEARTSTEAD_BUILD_SAMPLES "Build Heartstead sample executables" ON)
+option(HEARTSTEAD_BUILD_APPS "Build Heartstead runnable applications" ON)
 option(HEARTSTEAD_BUILD_TOOLS "Build Heartstead development tools" ON)
 option(HEARTSTEAD_BUILD_TESTS "Build Heartstead tests" ON)
 option(HEARTSTEAD_WARNINGS_AS_ERRORS "Treat warnings as errors" OFF)
@@ -101,6 +102,10 @@ endfunction()
 
 add_subdirectory(engine)
 add_subdirectory(game)
+
+if(HEARTSTEAD_BUILD_APPS)
+  add_subdirectory(apps)
+endif()
 
 if(HEARTSTEAD_BUILD_SAMPLES)
   add_subdirectory(samples)

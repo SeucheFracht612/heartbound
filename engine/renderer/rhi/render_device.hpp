@@ -307,7 +307,8 @@ struct RenderGraphicsPipelineDesc {
                                std::string fragment_entry, std::string name)
         : vertex_shader(vertex), fragment_shader(fragment), material_id(std::move(material)),
           vertex_entry_point(std::move(vertex_entry)),
-          fragment_entry_point(std::move(fragment_entry)), debug_name(std::move(name)) {}
+          fragment_entry_point(std::move(fragment_entry)), debug_name(std::move(name)),
+          cull_mode(RenderCullMode::none), depth_test_enable(false), depth_write_enable(false) {}
 };
 
 struct RenderGraphicsPipelineStats {
@@ -468,6 +469,7 @@ class IRenderDevice {
     create_graphics_pipeline(RenderGraphicsPipelineDesc desc) = 0;
     [[nodiscard]] virtual core::Result<RenderDescriptorWriteStats>
     write_descriptors(std::span<const RenderDescriptorWrite> writes) = 0;
+    // Deprecated compatibility path. New rendering must submit draws through execute_frame().
     [[nodiscard]] virtual core::Result<RenderDrawStats>
     bind_mesh_draws(std::span<const RenderMeshBinding> draws) = 0;
     [[nodiscard]] virtual core::Status release_resource(RenderResourceHandle handle) = 0;

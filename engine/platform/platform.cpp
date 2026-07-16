@@ -559,6 +559,9 @@ bool HeadlessPlatform::was_mouse_button_released(WindowId window_id,
 }
 
 void HeadlessPlatform::request_quit() {
+    if (quit_requested_) {
+        return;
+    }
     quit_requested_ = true;
     emit_event(PlatformEvent{PlatformEventKind::quit_requested, {}, KeyCode::unknown, 0, 0, {}});
 }
@@ -601,9 +604,9 @@ core::Status HeadlessPlatform::validate_queued_event(const PlatformEvent& event)
         if (!is_window_open(windows_, event.window_id)) {
             return core::Status::failure("platform.window_not_open", "window is not open");
         }
-        if (event.width == 0 || event.height == 0) {
+        if ((event.width == 0) != (event.height == 0)) {
             return core::Status::failure("platform.invalid_window_size",
-                                         "window dimensions must be non-zero");
+                                         "window dimensions must both be zero or both be non-zero");
         }
         return core::Status::ok();
     case PlatformEventKind::key_down:
@@ -989,6 +992,12 @@ class X11NativePlatform final : public IPlatform {
             case ConfigureNotify:
                 handle_configure(event.xconfigure);
                 break;
+            case MapNotify:
+                handle_map(event.xmap);
+                break;
+            case UnmapNotify:
+                handle_unmap(event.xunmap);
+                break;
             case KeyPress:
                 handle_key_press(event.xkey);
                 break;
@@ -1025,22 +1034,46 @@ class X11NativePlatform final : public IPlatform {
         }
     }
 
+    void queue_window_resize(WindowId id, std::uint32_t width, std::uint32_t height) {
+        const auto* state = logical_.find_window(id);
+        if (state != nullptr && state->width == width && state->height == height) {
+            return;
+        }
+        (void)logical_.queue_event(PlatformEvent{
+            PlatformEventKind::window_resized, id, KeyCode::unknown, width, height, {}});
+    }
+
     void handle_configure(const XConfigureEvent& event) {
+        auto id = window_id_for(event.window);
+        if (!id || event.width <= 0 || event.height <= 0) {
+            return;
+        }
+        queue_window_resize(id.value(), static_cast<std::uint32_t>(event.width),
+                            static_cast<std::uint32_t>(event.height));
+    }
+
+    void handle_map(const XMapEvent& event) {
         auto id = window_id_for(event.window);
         if (!id) {
             return;
         }
-        const auto* state = logical_.find_window(id.value());
-        if (state != nullptr && state->width == static_cast<std::uint32_t>(event.width) &&
-            state->height == static_cast<std::uint32_t>(event.height)) {
+        XWindowAttributes attributes{};
+        if (XGetWindowAttributes(display_, event.window, &attributes) == 0 ||
+            attributes.width <= 0 || attributes.height <= 0) {
             return;
         }
-        (void)logical_.queue_event(PlatformEvent{PlatformEventKind::window_resized,
-                                                 id.value(),
-                                                 KeyCode::unknown,
-                                                 static_cast<std::uint32_t>(event.width),
-                                                 static_cast<std::uint32_t>(event.height),
-                                                 {}});
+        queue_window_resize(id.value(), static_cast<std::uint32_t>(attributes.width),
+                            static_cast<std::uint32_t>(attributes.height));
+    }
+
+    void handle_unmap(const XUnmapEvent& event) {
+        if (event.from_configure != False) {
+            return;
+        }
+        auto id = window_id_for(event.window);
+        if (id) {
+            queue_window_resize(id.value(), 0, 0);
+        }
     }
 
     void handle_key_press(XKeyEvent& event) {
@@ -1196,10 +1229,12 @@ class X11NativePlatform final : public IPlatform {
         if (!id) {
             return;
         }
-        (void)close_window(id.value());
-        if (open_window_count() == 0) {
-            request_quit();
-        }
+        // WM_DELETE_WINDOW is a close request, not permission to invalidate graphics surfaces
+        // immediately. Keep the native window alive until the application has torn down Vulkan,
+        // then let its normal close_window() path destroy the X11 window.
+        (void)logical_.queue_event(PlatformEvent{
+            PlatformEventKind::quit_requested, id.value(), KeyCode::unknown, 0, 0, {}});
+        request_quit();
     }
 
     void handle_destroy(const XDestroyWindowEvent& event) {
