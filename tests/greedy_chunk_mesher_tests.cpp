@@ -78,12 +78,36 @@ void test_rectangular_volume_merges_to_six_quads() {
     assert(meshes.greedy.face_count == 6);
     assert(meshes.greedy.vertices.size() == 24);
     assert(meshes.greedy.indices.size() == 36);
+    assert(meshes.greedy.sections.size() == 1);
+    assert(meshes.greedy.sections.front().material_index == 7);
+    assert(meshes.greedy.sections.front().render_phase == world::MeshingRenderPhase::opaque);
+    assert(meshes.greedy.sections.front().first_index == 0);
+    assert(meshes.greedy.sections.front().index_count == meshes.greedy.indices.size());
     assert(meshes.greedy.chunk_coord == chunk.coord());
     const auto reference_area = directional_surface_area(meshes.reference);
     const auto greedy_area = directional_surface_area(meshes.greedy);
     for (std::size_t direction = 0; direction < reference_area.size(); ++direction) {
         assert(std::abs(reference_area[direction] - greedy_area[direction]) < 0.0001);
     }
+}
+
+void test_material_sections_are_grouped_and_cover_indices() {
+    world::ChunkDatabase chunks;
+    auto& chunk = chunks.get_or_create({-3, 2, 8});
+    assert(chunk.set({0, 0, 0}, {1, 200, 4}));
+    assert(chunk.set({1, 0, 0}, {2, 200, 4}));
+    auto meshes = build_pair(chunks, chunk.identity());
+    assert(meshes.greedy.sections.size() == 2);
+    assert(meshes.greedy.sections[0].material_index == 1);
+    assert(meshes.greedy.sections[1].material_index == 2);
+    assert(meshes.greedy.sections[0].first_index == 0);
+    assert(meshes.greedy.sections[1].first_index == meshes.greedy.sections[0].index_count);
+    assert(meshes.greedy.sections[0].index_count + meshes.greedy.sections[1].index_count ==
+           meshes.greedy.indices.size());
+
+    auto invalid = meshes.greedy;
+    invalid.sections.back().first_index += 1;
+    assert(!invalid.validate());
 }
 
 void test_merge_compatibility_respects_light_material_and_state() {
@@ -133,6 +157,7 @@ void test_checkerboard_and_cross_chunk_occlusion_match_reference() {
 int main() {
     test_rectangular_volume_merges_to_six_quads();
     test_merge_compatibility_respects_light_material_and_state();
+    test_material_sections_are_grouped_and_cover_indices();
     test_checkerboard_and_cross_chunk_occlusion_match_reference();
     return 0;
 }

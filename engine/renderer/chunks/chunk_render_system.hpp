@@ -50,6 +50,7 @@ struct ChunkRenderStats {
 
     std::size_t visible_chunk_count = 0;
     std::size_t culled_chunk_count = 0;
+    std::size_t drawn_chunk_count = 0;
     std::size_t draw_count = 0;
     std::size_t visible_vertex_count = 0;
     std::size_t visible_index_count = 0;
@@ -66,6 +67,7 @@ struct ChunkDrawList {
     std::vector<rhi::RenderDrawCommand> draws;
     std::size_t visible_chunk_count = 0;
     std::size_t culled_chunk_count = 0;
+    std::size_t drawn_chunk_count = 0;
     std::size_t vertex_count = 0;
     std::size_t index_count = 0;
 };
@@ -116,6 +118,7 @@ class ChunkRenderSystem {
         math::Bounds3f local_bounds{};
         std::vector<terrain::GpuChunkVertex> vertices;
         std::vector<std::uint32_t> indices;
+        std::vector<world::ChunkMeshSection> sections;
         bool forced = false;
         std::uint64_t sequence = 0;
 

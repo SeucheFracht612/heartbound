@@ -289,11 +289,13 @@ material, voxel type, render phase, light, state, and relevant block flags. Dire
 tests cover all six faces, negative chunk coordinates, cross-chunk occlusion, incompatible merge
 keys, and checkerboard worst cases. In the deterministic flat nine-chunk benchmark this reduced a
 representative visible frame from tens of thousands of triangles to 66 without changing visible
-surface coverage.
+surface coverage. CPU meshes also group their complete index range into validated, nonoverlapping
+material/render-phase sections. The retained GPU cache preserves those ranges, and visibility
+extraction emits one indexed draw per section while counting drawn chunks separately from draws.
 
 The backend currently supports one draw-producing Vulkan pass per unified submission. General
-multi-pass Vulkan execution, chunk material sections, frame-local descriptor allocation for
-textured materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to
+multi-pass Vulkan execution, phase-specific terrain pipelines, frame-local descriptor allocation
+for textured materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to
 later integration slices. Draw-command and visibility vectors retain their capacity between frames;
 the remaining frame-plan metadata is small and will move into the broader frame allocator as more
 passes are introduced.

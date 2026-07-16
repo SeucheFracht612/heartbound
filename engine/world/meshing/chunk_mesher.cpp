@@ -172,10 +172,10 @@ resolve_relative_cell(ChunkCoord center, std::int32_t x, std::int32_t y, std::in
            view.definition->occlusion == BlockOcclusionBehavior::full_cube;
 }
 
-[[nodiscard]] SnapshotCellModelView
-query_cell(const ChunkNeighborhoodSnapshot& neighborhood,
-           const BlockRenderTableSnapshot& render_table, std::int32_t x,
-           std::int32_t y, std::int32_t z) noexcept {
+[[nodiscard]] SnapshotCellModelView query_cell(const ChunkNeighborhoodSnapshot& neighborhood,
+                                               const BlockRenderTableSnapshot& render_table,
+                                               std::int32_t x, std::int32_t y,
+                                               std::int32_t z) noexcept {
     SnapshotCellModelView result;
     result.cell = neighborhood.cell_relative(x, y, z);
     if (!result.cell.is_air()) {
@@ -221,9 +221,24 @@ void include_point(ChunkMesh& mesh, math::Vec3f point) noexcept {
     mesh.local_bounds.max = math::component_max(mesh.local_bounds.max, point);
 }
 
+void append_section_indices(ChunkMesh& mesh, std::uint16_t material_index,
+                            MeshingRenderPhase render_phase, std::uint32_t first_index,
+                            std::uint32_t index_count) {
+    if (!mesh.sections.empty()) {
+        auto& section = mesh.sections.back();
+        if (section.material_index == material_index && section.render_phase == render_phase &&
+            section.first_index + section.index_count == first_index) {
+            section.index_count += index_count;
+            return;
+        }
+    }
+    mesh.sections.push_back({material_index, render_phase, first_index, index_count});
+}
+
 void add_quad(ChunkMesh& mesh, const std::array<math::Vec3f, 4>& positions, math::Vec3f normal,
-              VoxelCell cell) {
+              VoxelCell cell, std::uint16_t material_index, MeshingRenderPhase render_phase) {
     const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
+    const auto first_index = static_cast<std::uint32_t>(mesh.indices.size());
     constexpr std::array<std::pair<float, float>, 4> uvs{
         std::pair{0.0F, 0.0F}, std::pair{1.0F, 0.0F}, std::pair{1.0F, 1.0F}, std::pair{0.0F, 1.0F}};
     for (std::size_t index = 0; index < positions.size(); ++index) {
@@ -234,7 +249,19 @@ void add_quad(ChunkMesh& mesh, const std::array<math::Vec3f, 4>& positions, math
     }
     mesh.indices.insert(mesh.indices.end(), {base_index, base_index + 1, base_index + 2, base_index,
                                              base_index + 2, base_index + 3});
+    append_section_indices(mesh, material_index, render_phase, first_index, 6);
     ++mesh.face_count;
+}
+
+[[nodiscard]] MeshingRenderPhase mesh_render_phase(const CellModelView& view) noexcept {
+    if (view.definition != nullptr &&
+        view.definition->logical_occupancy == BlockLogicalOccupancy::fluid) {
+        return MeshingRenderPhase::fluid;
+    }
+    if (view.model != nullptr && view.model->kind == BlockModelKind::cross_plane) {
+        return MeshingRenderPhase::alpha_tested;
+    }
+    return MeshingRenderPhase::opaque;
 }
 
 [[nodiscard]] math::Vec3f box_corner(const BlockModelBox& box, math::Vec3f corner,
@@ -245,7 +272,8 @@ void add_quad(ChunkMesh& mesh, const std::array<math::Vec3f, 4>& positions, math
 }
 
 void add_box(ChunkMesh& mesh, const ChunkMeshingContext& context, VoxelCoord coord, VoxelCell cell,
-             const BlockModelBox& box) {
+             const BlockModelBox& box, std::uint16_t material_index,
+             MeshingRenderPhase render_phase) {
     const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
                              static_cast<float>(coord.z)};
     for (const auto& face : face_templates()) {
@@ -262,21 +290,23 @@ void add_box(ChunkMesh& mesh, const ChunkMeshingContext& context, VoxelCoord coo
         for (std::size_t index = 0; index < positions.size(); ++index) {
             positions[index] = box_corner(box, face.corners[index], origin);
         }
-        add_quad(mesh, positions, chunk_mesh_face_normal(face.direction), cell);
+        add_quad(mesh, positions, chunk_mesh_face_normal(face.direction), cell, material_index,
+                 render_phase);
     }
 }
 
 void add_box(ChunkMesh& mesh, const ChunkNeighborhoodSnapshot& neighborhood,
              const BlockRenderTableSnapshot& render_table, VoxelCoord coord, VoxelCell cell,
-             const BlockModelBox& box) {
+             const BlockModelBox& box, std::uint16_t material_index,
+             MeshingRenderPhase render_phase) {
     const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
                              static_cast<float>(coord.z)};
     for (const auto& face : face_templates()) {
         if (box_face_is_on_cell_boundary(box, face.direction)) {
-            const auto neighbor = query_cell(
-                neighborhood, render_table, static_cast<std::int32_t>(coord.x) + face.offset_x,
-                static_cast<std::int32_t>(coord.y) + face.offset_y,
-                static_cast<std::int32_t>(coord.z) + face.offset_z);
+            const auto neighbor = query_cell(neighborhood, render_table,
+                                             static_cast<std::int32_t>(coord.x) + face.offset_x,
+                                             static_cast<std::int32_t>(coord.y) + face.offset_y,
+                                             static_cast<std::int32_t>(coord.z) + face.offset_z);
             if (is_full_occluder(neighbor)) {
                 continue;
             }
@@ -285,11 +315,13 @@ void add_box(ChunkMesh& mesh, const ChunkNeighborhoodSnapshot& neighborhood,
         for (std::size_t index = 0; index < positions.size(); ++index) {
             positions[index] = box_corner(box, face.corners[index], origin);
         }
-        add_quad(mesh, positions, chunk_mesh_face_normal(face.direction), cell);
+        add_quad(mesh, positions, chunk_mesh_face_normal(face.direction), cell, material_index,
+                 render_phase);
     }
 }
 
-void add_cross_planes(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell) {
+void add_cross_planes(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell,
+                      std::uint16_t material_index, MeshingRenderPhase render_phase) {
     const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
                              static_cast<float>(coord.z)};
     const std::array<math::Vec3f, 4> diagonal_a{
@@ -299,12 +331,12 @@ void add_cross_planes(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell) {
         origin + math::Vec3f{1.0F, 0.0F, 0.0F}, origin + math::Vec3f{1.0F, 1.0F, 0.0F},
         origin + math::Vec3f{0.0F, 1.0F, 1.0F}, origin + math::Vec3f{0.0F, 0.0F, 1.0F}};
     constexpr float diagonal = 0.70710677F;
-    add_quad(mesh, diagonal_a, {diagonal, 0.0F, -diagonal}, cell);
+    add_quad(mesh, diagonal_a, {diagonal, 0.0F, -diagonal}, cell, material_index, render_phase);
     add_quad(mesh, {diagonal_a[3], diagonal_a[2], diagonal_a[1], diagonal_a[0]},
-             {-diagonal, 0.0F, diagonal}, cell);
-    add_quad(mesh, diagonal_b, {-diagonal, 0.0F, -diagonal}, cell);
+             {-diagonal, 0.0F, diagonal}, cell, material_index, render_phase);
+    add_quad(mesh, diagonal_b, {-diagonal, 0.0F, -diagonal}, cell, material_index, render_phase);
     add_quad(mesh, {diagonal_b[3], diagonal_b[2], diagonal_b[1], diagonal_b[0]},
-             {diagonal, 0.0F, diagonal}, cell);
+             {diagonal, 0.0F, diagonal}, cell, material_index, render_phase);
 }
 
 void add_rich_instance(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell,
@@ -325,8 +357,7 @@ void add_rich_instance(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell,
                        const MeshingBlockInfo& block) {
     const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
                              static_cast<float>(coord.z)};
-    const math::Bounds3f bounds{origin + block.render_bounds.min,
-                               origin + block.render_bounds.max};
+    const math::Bounds3f bounds{origin + block.render_bounds.min, origin + block.render_bounds.max};
     if (mesh.vertices.empty() && mesh.rich_instances.empty()) {
         mesh.local_bounds = bounds;
     } else {
@@ -361,6 +392,61 @@ bool ChunkMesh::empty() const noexcept {
     return vertices.empty() && indices.empty() && rich_instances.empty() && face_count == 0;
 }
 
+core::Status ChunkMesh::finalize_sections() {
+    if (indices.empty()) {
+        sections.clear();
+        return core::Status::ok();
+    }
+    if (sections.empty()) {
+        return core::Status::failure("chunk_mesh.missing_sections",
+                                     "indexed chunk geometry has no material sections");
+    }
+    std::size_t covered_indices = 0;
+    for (const auto& section : sections) {
+        if (section.material_index == 0 || section.index_count == 0 ||
+            section.first_index != covered_indices ||
+            section.index_count > indices.size() - covered_indices) {
+            return core::Status::failure(
+                "chunk_mesh.invalid_section_range",
+                "chunk mesh sections must cover the complete index buffer exactly once");
+        }
+        covered_indices += section.index_count;
+    }
+    if (covered_indices != indices.size()) {
+        return core::Status::failure("chunk_mesh.incomplete_section_coverage",
+                                     "chunk mesh sections do not cover the complete index buffer");
+    }
+
+    std::ranges::stable_sort(sections,
+                             [](const ChunkMeshSection& left, const ChunkMeshSection& right) {
+                                 if (left.render_phase != right.render_phase) {
+                                     return static_cast<std::uint8_t>(left.render_phase) <
+                                            static_cast<std::uint8_t>(right.render_phase);
+                                 }
+                                 return left.material_index < right.material_index;
+                             });
+    std::vector<std::uint32_t> grouped_indices;
+    grouped_indices.reserve(indices.size());
+    std::vector<ChunkMeshSection> grouped_sections;
+    grouped_sections.reserve(sections.size());
+    for (const auto section : sections) {
+        const auto output_first = static_cast<std::uint32_t>(grouped_indices.size());
+        grouped_indices.insert(grouped_indices.end(), indices.begin() + section.first_index,
+                               indices.begin() + section.first_index + section.index_count);
+        if (!grouped_sections.empty() &&
+            grouped_sections.back().material_index == section.material_index &&
+            grouped_sections.back().render_phase == section.render_phase) {
+            grouped_sections.back().index_count += section.index_count;
+        } else {
+            grouped_sections.push_back(
+                {section.material_index, section.render_phase, output_first, section.index_count});
+        }
+    }
+    indices = std::move(grouped_indices);
+    sections = std::move(grouped_sections);
+    return core::Status::ok();
+}
+
 core::Status ChunkMesh::validate() const {
     if (required_halo_radius > provided_halo_radius) {
         return core::Status::failure("chunk_mesh.insufficient_halo",
@@ -375,6 +461,10 @@ core::Status ChunkMesh::validate() const {
     if (vertices.empty() != indices.empty()) {
         return core::Status::failure("chunk_mesh.incomplete",
                                      "chunk mesh has incomplete vertex/index data");
+    }
+    if (indices.empty() != sections.empty()) {
+        return core::Status::failure("chunk_mesh.incomplete_sections",
+                                     "indexed chunk geometry and sections must exist together");
     }
     if (vertices.size() != face_count * 4) {
         return core::Status::failure("chunk_mesh.invalid_vertex_count",
@@ -393,6 +483,24 @@ core::Status ChunkMesh::validate() const {
             return core::Status::failure("chunk_mesh.index_out_of_range",
                                          "chunk mesh index references a missing vertex");
         }
+    }
+    std::size_t covered_indices = 0;
+    for (const auto& section : sections) {
+        const auto phase = static_cast<std::uint8_t>(section.render_phase);
+        if (section.material_index == 0 ||
+            phase > static_cast<std::uint8_t>(MeshingRenderPhase::fluid) ||
+            section.index_count == 0 || section.index_count % 3U != 0 ||
+            section.first_index != covered_indices ||
+            section.index_count > indices.size() - covered_indices) {
+            return core::Status::failure(
+                "chunk_mesh.invalid_section",
+                "chunk mesh section material, phase, or index range is invalid");
+        }
+        covered_indices += section.index_count;
+    }
+    if (covered_indices != indices.size()) {
+        return core::Status::failure("chunk_mesh.incomplete_section_coverage",
+                                     "chunk mesh sections do not cover the complete index buffer");
     }
     for (const auto& vertex : vertices) {
         if (!vertex.position.is_finite() || !vertex.normal.is_finite()) {
@@ -452,20 +560,27 @@ core::Result<ChunkMesh> ChunkMesher::build_surface_mesh(const ChunkMeshingContex
                         "chunk contains a voxel type missing from the active palette");
                 }
                 const auto& model = view.model == nullptr ? legacy_cube_block_model() : *view.model;
+                const auto material_index = cell.value().type;
+                const auto render_phase = mesh_render_phase(view);
                 if (model.kind == BlockModelKind::mesh) {
                     add_rich_instance(mesh, {x, y, z}, cell.value(), model);
                 } else if (model.kind == BlockModelKind::cross_plane) {
-                    add_cross_planes(mesh, {x, y, z}, cell.value());
+                    add_cross_planes(mesh, {x, y, z}, cell.value(), material_index, render_phase);
                 } else {
                     for (const auto& box : model.boxes) {
-                        add_box(mesh, context, {x, y, z}, cell.value(), box);
+                        add_box(mesh, context, {x, y, z}, cell.value(), box, material_index,
+                                render_phase);
                     }
                 }
             }
         }
     }
 
-    auto status = mesh.validate();
+    auto status = mesh.finalize_sections();
+    if (!status) {
+        return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
+    }
+    status = mesh.validate();
     if (!status) {
         return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
     }
@@ -504,16 +619,24 @@ ChunkMesher::build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborhood,
                 if (block->geometry == MeshingGeometryKind::rich_model) {
                     add_rich_instance(mesh, {x, y, z}, cell, *block);
                 } else if (block->geometry == MeshingGeometryKind::cross_plane) {
-                    add_cross_planes(mesh, {x, y, z}, cell);
+                    add_cross_planes(mesh, {x, y, z}, cell,
+                                     block->material_index == 0 ? cell.type : block->material_index,
+                                     block->render_phase);
                 } else {
                     for (const auto& box : block->boxes) {
-                        add_box(mesh, neighborhood, render_table, {x, y, z}, cell, box);
+                        add_box(mesh, neighborhood, render_table, {x, y, z}, cell, box,
+                                block->material_index == 0 ? cell.type : block->material_index,
+                                block->render_phase);
                     }
                 }
             }
         }
     }
 
+    status = mesh.finalize_sections();
+    if (!status) {
+        return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
+    }
     status = mesh.validate();
     if (!status) {
         return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);

@@ -31,6 +31,7 @@ struct ChunkGpuMesh {
     std::uint32_t vertex_count = 0;
     std::uint32_t index_count = 0;
     rhi::RenderIndexType index_type = rhi::RenderIndexType::uint16;
+    std::vector<world::ChunkMeshSection> sections;
 
     [[nodiscard]] bool is_empty() const noexcept;
 };
@@ -68,6 +69,7 @@ struct ChunkGpuCacheStats {
     std::size_t resident_bytes = 0;
     std::size_t uint16_index_chunk_count = 0;
     std::size_t uint32_index_chunk_count = 0;
+    std::size_t resident_section_count = 0;
     std::uint64_t uploaded_chunk_count = 0;
     std::uint64_t uploaded_bytes = 0;
     std::uint64_t upload_batch_count = 0;
@@ -92,6 +94,7 @@ struct ChunkGpuMeshUpload {
     std::span<const terrain::GpuChunkVertex> vertices;
     std::span<const std::uint32_t> indices;
     std::span<const world::ChunkDependencyRevision> dependency_revisions;
+    std::span<const world::ChunkMeshSection> sections;
 };
 
 struct ChunkGpuBatchUploadResult {
@@ -129,7 +132,8 @@ class ChunkGpuCache {
     replace_mesh(world::ChunkIdentity identity, std::uint64_t content_revision,
                  math::Bounds3f local_bounds, std::span<const terrain::GpuChunkVertex> vertices,
                  std::span<const std::uint32_t> indices, std::uint64_t render_table_revision = 1,
-                 std::span<const world::ChunkDependencyRevision> dependency_revisions = {});
+                 std::span<const world::ChunkDependencyRevision> dependency_revisions = {},
+                 std::span<const world::ChunkMeshSection> sections = {});
     [[nodiscard]] core::Result<ChunkGpuBatchUploadResult>
     replace_meshes(std::span<const ChunkGpuMeshUpload> uploads);
 

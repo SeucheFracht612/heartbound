@@ -353,7 +353,7 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
     stats_.resident_chunks = saturating_u32(chunks.cache.resident_chunk_count);
     stats_.visible_chunks = saturating_u32(chunks.visible_chunk_count);
     stats_.culled_chunks = saturating_u32(chunks.culled_chunk_count);
-    stats_.drawn_chunks = saturating_u32(chunks.draw_count);
+    stats_.drawn_chunks = saturating_u32(chunks.drawn_chunk_count);
     if (texture_manager_ != nullptr) {
         stats_.resident_textures = saturating_u32(texture_manager_->stats().resident_texture_count);
         stats_.resident_texture_bytes = texture_manager_->stats().resident_texture_bytes;

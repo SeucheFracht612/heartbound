@@ -12,12 +12,14 @@
 namespace heartstead::renderer {
 
 bool ChunkGpuMesh::is_empty() const noexcept {
-    return !vertices.is_valid() && !indices.is_valid() && vertex_count == 0 && index_count == 0;
+    return !vertices.is_valid() && !indices.is_valid() && vertex_count == 0 && index_count == 0 &&
+           sections.empty();
 }
 
 bool ChunkGpuEntry::has_drawable_mesh() const noexcept {
     return state == ChunkGpuState::resident && mesh.vertices.is_valid() &&
-           mesh.indices.is_valid() && mesh.vertex_count > 0 && mesh.index_count > 0;
+           mesh.indices.is_valid() && mesh.vertex_count > 0 && mesh.index_count > 0 &&
+           !mesh.sections.empty();
 }
 
 std::size_t ChunkGpuEntry::resident_bytes() const noexcept {
@@ -230,10 +232,11 @@ core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
     world::ChunkIdentity identity, std::uint64_t content_revision, math::Bounds3f local_bounds,
     std::span<const terrain::GpuChunkVertex> vertices, std::span<const std::uint32_t> indices,
     std::uint64_t render_table_revision,
-    std::span<const world::ChunkDependencyRevision> dependency_revisions) {
+    std::span<const world::ChunkDependencyRevision> dependency_revisions,
+    std::span<const world::ChunkMeshSection> sections) {
     const std::array<ChunkGpuMeshUpload, 1> uploads{
         ChunkGpuMeshUpload{identity, content_revision, render_table_revision, local_bounds,
-                           vertices, indices, dependency_revisions}};
+                           vertices, indices, dependency_revisions, sections}};
     auto batch = replace_meshes(uploads);
     if (!batch) {
         return core::Result<ChunkGpuUploadResult>::failure(batch.error().code,
@@ -290,6 +293,30 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
                 "chunk_gpu_cache.index_out_of_bounds",
                 "chunk GPU mesh contains an index outside its vertex range");
         }
+        std::size_t covered_indices = 0;
+        for (const auto& section : upload.sections) {
+            const auto phase = static_cast<std::uint8_t>(section.render_phase);
+            if (section.material_index == 0 ||
+                phase > static_cast<std::uint8_t>(world::MeshingRenderPhase::fluid) ||
+                section.index_count == 0 || section.index_count % 3U != 0 ||
+                section.first_index != covered_indices ||
+                section.index_count > upload.indices.size() - covered_indices) {
+                return core::Result<ChunkGpuBatchUploadResult>::failure(
+                    "chunk_gpu_cache.invalid_mesh_section",
+                    "chunk GPU mesh section material, phase, or index range is invalid");
+            }
+            covered_indices += section.index_count;
+        }
+        if (!upload.sections.empty() && covered_indices != upload.indices.size()) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.incomplete_mesh_sections",
+                "chunk GPU mesh sections do not cover the complete index buffer");
+        }
+        if (upload.indices.empty() && !upload.sections.empty()) {
+            return core::Result<ChunkGpuBatchUploadResult>::failure(
+                "chunk_gpu_cache.sections_without_geometry",
+                "empty chunk GPU meshes cannot contain draw sections");
+        }
     }
 
     struct PreparedUpload {
@@ -322,6 +349,13 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
         candidate.mesh.index_count = static_cast<std::uint32_t>(upload.indices.size());
         if (upload.vertices.empty()) {
             continue;
+        }
+        if (upload.sections.empty()) {
+            const auto material = std::max<std::uint16_t>(upload.vertices.front().material, 1U);
+            candidate.mesh.sections.push_back(
+                {material, world::MeshingRenderPhase::opaque, 0, candidate.mesh.index_count});
+        } else {
+            candidate.mesh.sections.assign(upload.sections.begin(), upload.sections.end());
         }
         const auto vertex_bytes = std::as_bytes(upload.vertices);
         std::span<const std::byte> index_bytes;
@@ -460,6 +494,7 @@ void ChunkGpuCache::refresh_current_stats() noexcept {
     stats_.resident_bytes = 0;
     stats_.uint16_index_chunk_count = 0;
     stats_.uint32_index_chunk_count = 0;
+    stats_.resident_section_count = 0;
     for (const auto& [_, entry] : entries_) {
         if (entry.state != ChunkGpuState::resident) {
             continue;
@@ -476,6 +511,7 @@ void ChunkGpuCache::refresh_current_stats() noexcept {
         } else {
             ++stats_.uint32_index_chunk_count;
         }
+        stats_.resident_section_count += entry.mesh.sections.size();
     }
     stats_.vertex_arena = vertex_arena_ == nullptr ? GpuBufferArenaStats{} : vertex_arena_->stats();
     stats_.index_arena = index_arena_ == nullptr ? GpuBufferArenaStats{} : index_arena_->stats();

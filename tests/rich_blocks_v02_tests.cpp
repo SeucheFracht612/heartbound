@@ -2,7 +2,9 @@
 #include "engine/world/blocks/block_model.hpp"
 #include "engine/world/chunks/chunk_database.hpp"
 #include "engine/world/chunks/chunk_edit_delta_codec.hpp"
+#include "engine/world/meshing/chunk_mesh_snapshot.hpp"
 #include "engine/world/meshing/chunk_mesher.hpp"
+#include "engine/world/meshing/greedy_chunk_mesher.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 
 #include <algorithm>
@@ -42,6 +44,12 @@ namespace {
     leaf.mesh_invalidation_radius = 2;
     assert(palette.add_block_model(leaf));
 
+    BlockModelDefinition cross;
+    cross.prototype_id = id("test:block_models/cross");
+    cross.kind = BlockModelKind::cross_plane;
+    cross.render_bounds = {{0.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 1.0F}};
+    assert(palette.add_block_model(cross));
+
     VoxelDefinition stone;
     stone.type = 1;
     stone.prototype_id = id("test:voxels/stone");
@@ -64,7 +72,64 @@ namespace {
     leaves.collision_bounds.clear();
     assert(palette.add(leaves));
 
+    VoxelDefinition grass;
+    grass.type = 3;
+    grass.prototype_id = id("test:voxels/grass");
+    grass.display_name = "Grass";
+    grass.terrain_material = "foliage";
+    grass.mining_tool = "shears";
+    grass.block_model_id = cross.prototype_id;
+    grass.logical_occupancy = BlockLogicalOccupancy::decorative;
+    grass.occlusion = BlockOcclusionBehavior::none;
+    grass.occlusion_bounds.clear();
+    grass.collision_bounds.clear();
+    assert(palette.add(grass));
+
+    VoxelDefinition water;
+    water.type = 4;
+    water.prototype_id = id("test:voxels/water");
+    water.display_name = "Water";
+    water.terrain_material = "water";
+    water.mining_tool = "bucket";
+    water.block_model_id = cube.prototype_id;
+    water.logical_occupancy = BlockLogicalOccupancy::fluid;
+    water.occlusion = BlockOcclusionBehavior::none;
+    water.occlusion_bounds.clear();
+    water.collision_bounds.clear();
+    assert(palette.add(water));
+
     return palette;
+}
+
+void test_mesh_sections_separate_render_phases() {
+    auto palette = make_palette();
+    heartstead::world::ChunkDatabase chunks;
+    auto& chunk = chunks.get_or_create({7, -2, 5});
+    assert(chunk.set({0, 0, 0}, {1, 255}));
+    assert(chunk.set({2, 0, 0}, {3, 255}));
+    assert(chunk.set({4, 0, 0}, {4, 255}));
+    auto table = heartstead::world::build_block_render_table_snapshot(&palette);
+    assert(table);
+    auto snapshot = heartstead::world::build_chunk_neighborhood_snapshot(chunks, chunk.identity(),
+                                                                         table.value());
+    assert(snapshot);
+    auto mesh =
+        heartstead::world::GreedyChunkMesher::build_surface_mesh(snapshot.value(), table.value());
+    assert(mesh);
+    assert(mesh.value().sections.size() == 3);
+    assert(mesh.value().sections[0].material_index == 1);
+    assert(mesh.value().sections[0].render_phase == heartstead::world::MeshingRenderPhase::opaque);
+    assert(mesh.value().sections[1].material_index == 3);
+    assert(mesh.value().sections[1].render_phase ==
+           heartstead::world::MeshingRenderPhase::alpha_tested);
+    assert(mesh.value().sections[2].material_index == 4);
+    assert(mesh.value().sections[2].render_phase == heartstead::world::MeshingRenderPhase::fluid);
+    std::uint32_t first_index = 0;
+    for (const auto& section : mesh.value().sections) {
+        assert(section.first_index == first_index);
+        first_index += section.index_count;
+    }
+    assert(first_index == mesh.value().indices.size());
 }
 
 [[nodiscard]] bool close(float left, float right) {
@@ -79,8 +144,7 @@ void test_cross_chunk_occlusion_uses_neighbor_halo() {
     assert(center.set({31, 4, 5}, {1, 0}));
     assert(positive_x.set({0, 4, 5}, {1, 0}));
 
-    auto mesh = heartstead::world::ChunkMesher::build_surface_mesh(
-        {center, &palette, &chunks, 1});
+    auto mesh = heartstead::world::ChunkMesher::build_surface_mesh({center, &palette, &chunks, 1});
     assert(mesh);
     assert(mesh.value().required_halo_radius == 1);
     assert(mesh.value().face_count == 5);
@@ -92,13 +156,12 @@ void test_out_of_cell_geometry_requires_declared_halo() {
     auto& center = chunks.get_or_create({-4, 9, 2});
     assert(center.set({0, 0, 0}, {2, 7, 41, 99}));
 
-    auto insufficient = heartstead::world::ChunkMesher::build_surface_mesh(
-        {center, &palette, &chunks, 1});
+    auto insufficient =
+        heartstead::world::ChunkMesher::build_surface_mesh({center, &palette, &chunks, 1});
     assert(!insufficient);
     assert(insufficient.error().code == "chunk_mesh.insufficient_halo");
 
-    auto mesh = heartstead::world::ChunkMesher::build_surface_mesh(
-        {center, &palette, &chunks, 2});
+    auto mesh = heartstead::world::ChunkMesher::build_surface_mesh({center, &palette, &chunks, 2});
     assert(mesh);
     assert(mesh.value().required_halo_radius == 2);
     assert(close(mesh.value().local_bounds.min.x, -0.35F));
@@ -180,6 +243,7 @@ void test_persisted_palette_keeps_ids_and_recovers_missing_blocks() {
 } // namespace
 
 int main() {
+    test_mesh_sections_separate_render_phases();
     test_cross_chunk_occlusion_uses_neighbor_halo();
     test_out_of_cell_geometry_requires_declared_halo();
     test_rich_invalidation_reaches_non_boundary_neighbor();

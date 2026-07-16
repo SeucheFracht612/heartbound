@@ -249,7 +249,7 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
     result.draws.clear();
     visible_chunks_scratch_.clear();
     visible_chunks_scratch_.reserve(cache_->stats().entry_count);
-    result.draws.reserve(cache_->stats().resident_chunk_count);
+    result.draws.reserve(cache_->stats().resident_section_count);
     const auto frustum = RenderFrustum::from_view_projection(camera.view_projection);
     {
         profiling::ScopedCpuTimingZone culling_zone(timings_,
@@ -276,20 +276,24 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
             if (!visible.entry->has_drawable_mesh()) {
                 continue;
             }
-            rhi::RenderDrawCommand draw;
-            draw.pipeline = terrain_pipeline_;
-            draw.vertex_buffer = visible.entry->mesh.vertices.buffer;
-            draw.index_buffer = visible.entry->mesh.indices.buffer;
-            draw.index_count = visible.entry->mesh.index_count;
-            draw.first_index = static_cast<std::uint32_t>(
+            ++result.drawn_chunk_count;
+            const auto allocation_first_index = static_cast<std::uint32_t>(
                 visible.entry->mesh.indices.offset /
                 rhi::render_index_type_size(visible.entry->mesh.index_type));
-            draw.vertex_offset = static_cast<std::int32_t>(visible.entry->mesh.vertices.offset /
-                                                           sizeof(terrain::GpuChunkVertex));
-            draw.instance_count = 1;
-            draw.camera_relative_origin = visible.origin;
-            draw.index_type = visible.entry->mesh.index_type;
-            result.draws.push_back(draw);
+            for (const auto& section : visible.entry->mesh.sections) {
+                rhi::RenderDrawCommand draw;
+                draw.pipeline = terrain_pipeline_;
+                draw.vertex_buffer = visible.entry->mesh.vertices.buffer;
+                draw.index_buffer = visible.entry->mesh.indices.buffer;
+                draw.index_count = section.index_count;
+                draw.first_index = allocation_first_index + section.first_index;
+                draw.vertex_offset = static_cast<std::int32_t>(visible.entry->mesh.vertices.offset /
+                                                               sizeof(terrain::GpuChunkVertex));
+                draw.instance_count = 1;
+                draw.camera_relative_origin = visible.origin;
+                draw.index_type = visible.entry->mesh.index_type;
+                result.draws.push_back(draw);
+            }
             result.vertex_count += visible.entry->mesh.vertex_count;
             result.index_count += visible.entry->mesh.index_count;
         }
@@ -300,6 +304,7 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
     }
     stats_.visible_chunk_count = result.visible_chunk_count;
     stats_.culled_chunk_count = result.culled_chunk_count;
+    stats_.drawn_chunk_count = result.drawn_chunk_count;
     stats_.draw_count = result.draws.size();
     stats_.visible_vertex_count = result.vertex_count;
     stats_.visible_index_count = result.index_count;
@@ -515,6 +520,7 @@ core::Status ChunkRenderSystem::process_completed_meshes(world::WorldState& worl
             upload.local_bounds = built_mesh.local_bounds;
             upload.vertices = terrain::make_gpu_chunk_vertices(built_mesh.vertices);
             upload.indices = std::move(built_mesh.indices);
+            upload.sections = std::move(built_mesh.sections);
             upload.sequence = result.priority.sequence;
             pending_uploads_.push_back(std::move(upload));
         }
@@ -663,7 +669,7 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
     for (const auto& pending : selected) {
         requests.push_back({pending.identity, pending.content_revision,
                             pending.render_table_revision, pending.local_bounds, pending.vertices,
-                            pending.indices, pending.dependency_revisions});
+                            pending.indices, pending.dependency_revisions, pending.sections});
     }
     auto upload = [&]() {
         profiling::ScopedCpuTimingZone upload_zone(timings_, profiling::CpuTimingZone::upload);

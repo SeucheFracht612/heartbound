@@ -158,6 +158,7 @@ void emit_quad(ChunkMesh& mesh, ChunkMeshFaceDirection direction, std::uint16_t 
     }
 
     const auto base_index = static_cast<std::uint32_t>(mesh.vertices.size());
+    const auto first_index = static_cast<std::uint32_t>(mesh.indices.size());
     const std::array<std::pair<float, float>, 4> uvs{
         std::pair{0.0F, 0.0F}, std::pair{static_cast<float>(width), 0.0F},
         std::pair{static_cast<float>(width), static_cast<float>(height)},
@@ -170,6 +171,13 @@ void emit_quad(ChunkMesh& mesh, ChunkMeshFaceDirection direction, std::uint16_t 
     }
     mesh.indices.insert(mesh.indices.end(), {base_index, base_index + 1U, base_index + 2U,
                                              base_index, base_index + 2U, base_index + 3U});
+    if (!mesh.sections.empty() && mesh.sections.back().material_index == key.material_index &&
+        mesh.sections.back().render_phase == key.render_phase &&
+        mesh.sections.back().first_index + mesh.sections.back().index_count == first_index) {
+        mesh.sections.back().index_count += 6;
+    } else {
+        mesh.sections.push_back({key.material_index, key.render_phase, first_index, 6});
+    }
     ++mesh.face_count;
 }
 
@@ -306,6 +314,10 @@ GreedyChunkMesher::build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborh
         }
     }
 
+    status = mesh.finalize_sections();
+    if (!status) {
+        return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
+    }
     status = mesh.validate();
     if (!status) {
         return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
