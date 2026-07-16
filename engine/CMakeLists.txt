@@ -31,6 +31,7 @@ target_sources(
     items/item_prototype.cpp
     jobs/job_system.cpp
     jobs/thread_pool/thread_pool_backend.cpp
+    math/matrix.cpp
     math/vector.cpp
     modding/generic_prototype_loader.cpp
     modding/mod_fingerprint.cpp
@@ -63,9 +64,12 @@ target_sources(
     renderer/materials/material_definition.cpp
     renderer/materials/material_pipeline_layout.cpp
     renderer/materials/material_prototype_loader.cpp
+    renderer/render_camera.cpp
     renderer/rhi/render_device.cpp
     renderer/rhi/render_frame_plan.cpp
     renderer/shaders/shader_compiler.cpp
+    renderer/shaders/spirv_loader.cpp
+    renderer/terrain/gpu_chunk_vertex.cpp
     renderer/vulkan/vulkan_backend.cpp
     renderer/world_render_list.cpp
     rooms/room_descriptor_prototype.cpp
@@ -151,6 +155,7 @@ target_sources(
       items/item_prototype.hpp
       jobs/job_system.hpp
       jobs/thread_pool/thread_pool_backend.hpp
+      math/matrix.hpp
       math/vector.hpp
       modding/generic_prototype.hpp
       modding/generic_prototype_loader.hpp
@@ -186,9 +191,12 @@ target_sources(
       renderer/materials/material_definition.hpp
       renderer/materials/material_pipeline_layout.hpp
       renderer/materials/material_prototype_loader.hpp
+      renderer/render_camera.hpp
       renderer/rhi/render_device.hpp
       renderer/rhi/render_frame_plan.hpp
       renderer/shaders/shader_compiler.hpp
+      renderer/shaders/spirv_loader.hpp
+      renderer/terrain/gpu_chunk_vertex.hpp
       renderer/vulkan/vulkan_backend.hpp
       renderer/world_render_list.hpp
       rooms/room_descriptor_prototype.hpp
