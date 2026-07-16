@@ -1187,6 +1187,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     ~VulkanSmokeDevice() override {
         if (device_ != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device_);
+            destroy_staging_buffer();
             destroy_buffer_resources();
             destroy_image_resources();
             destroy_graphics_pipeline_resources();
@@ -1500,6 +1501,257 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.live_resource_count = buffer_resources_.size();
         stats.gpu_backed = true;
         return core::Result<rhi::RenderUploadStats>::success(stats);
+    }
+
+    [[nodiscard]] core::Result<rhi::RenderBufferCreateStats>
+    create_buffer(rhi::RenderBufferDesc desc) override {
+        auto status = rhi::validate_render_buffer_desc(desc);
+        if (!status) {
+            return core::Result<rhi::RenderBufferCreateStats>::failure(status.error().code,
+                                                                       status.error().message);
+        }
+
+        VulkanBufferResource resource;
+        resource.desc = desc;
+        resource.byte_size = desc.byte_size;
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = static_cast<VkDeviceSize>(desc.byte_size);
+        buffer_info.usage =
+            vulkan_buffer_usage_flags(desc.usage) | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        auto result = vkCreateBuffer(device_, &buffer_info, nullptr, &resource.buffer);
+        if (result != VK_SUCCESS) {
+            return core::Result<rhi::RenderBufferCreateStats>::failure(
+                "renderer.vulkan_buffer_failed",
+                "failed to create Vulkan buffer: " + std::string(vk_result_name(result)));
+        }
+
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device_, resource.buffer, &requirements);
+        const auto properties =
+            desc.memory == rhi::RenderBufferMemory::device_local
+                ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+                : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+        auto memory_type = find_required_memory_type(physical_device_, requirements.memoryTypeBits,
+                                                     properties, desc.debug_name);
+        if (!memory_type) {
+            destroy_buffer_resource(resource);
+            return core::Result<rhi::RenderBufferCreateStats>::failure(memory_type.error().code,
+                                                                       memory_type.error().message);
+        }
+
+        VkMemoryAllocateInfo allocation_info{};
+        allocation_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocation_info.allocationSize = requirements.size;
+        allocation_info.memoryTypeIndex = memory_type.value();
+        result = vkAllocateMemory(device_, &allocation_info, nullptr, &resource.memory);
+        if (result != VK_SUCCESS) {
+            destroy_buffer_resource(resource);
+            return core::Result<rhi::RenderBufferCreateStats>::failure(
+                "renderer.vulkan_buffer_memory_failed",
+                "failed to allocate Vulkan buffer memory: " + std::string(vk_result_name(result)));
+        }
+        result = vkBindBufferMemory(device_, resource.buffer, resource.memory, 0);
+        if (result != VK_SUCCESS) {
+            destroy_buffer_resource(resource);
+            return core::Result<rhi::RenderBufferCreateStats>::failure(
+                "renderer.vulkan_buffer_bind_failed",
+                "failed to bind Vulkan buffer memory: " + std::string(vk_result_name(result)));
+        }
+
+        const rhi::RenderResourceHandle handle{next_resource_id_++};
+        buffer_resources_.emplace(handle.value, std::move(resource));
+        rhi::RenderBufferCreateStats stats;
+        stats.backend = backend();
+        stats.handle = handle;
+        stats.usage = desc.usage;
+        stats.memory = desc.memory;
+        stats.byte_size = desc.byte_size;
+        stats.live_resource_count = live_resource_count();
+        stats.gpu_backed = true;
+        return core::Result<rhi::RenderBufferCreateStats>::success(stats);
+    }
+
+    [[nodiscard]] core::Result<rhi::RenderBufferBatchUploadStats>
+    upload_buffer_batch(std::span<const rhi::RenderBufferWrite> writes) override {
+        auto status = rhi::validate_render_buffer_writes_shape(writes);
+        if (!status) {
+            return core::Result<rhi::RenderBufferBatchUploadStats>::failure(status.error().code,
+                                                                            status.error().message);
+        }
+
+        std::size_t staging_bytes = 0;
+        for (const auto& write : writes) {
+            const auto destination = buffer_resources_.find(write.destination.value);
+            if (destination == buffer_resources_.end()) {
+                return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                    "renderer.unknown_buffer_write_destination",
+                    "buffer write references a resource not owned by this Vulkan device");
+            }
+            if (write.destination_offset > destination->second.byte_size ||
+                write.bytes.size() > destination->second.byte_size - write.destination_offset) {
+                return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                    "renderer.buffer_write_out_of_bounds",
+                    "buffer write exceeds its Vulkan destination resource");
+            }
+            if (write.destination_offset % 4U != 0 || write.bytes.size() % 4U != 0) {
+                return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                    "renderer.vulkan_buffer_write_alignment",
+                    "Vulkan transfer writes require four-byte destination and size alignment");
+            }
+            if (staging_bytes > std::numeric_limits<std::size_t>::max() - write.bytes.size()) {
+                return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                    "renderer.buffer_write_batch_too_large",
+                    "Vulkan buffer write batch byte size overflows size_t");
+            }
+            staging_bytes += write.bytes.size();
+        }
+
+        constexpr std::size_t persistent_staging_capacity = 32U * 1024U * 1024U;
+        const bool use_fallback = staging_bytes > persistent_staging_capacity;
+        VulkanBufferResource fallback;
+        VkBuffer staging_buffer = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        if (use_fallback) {
+            auto fallback_status = create_staging_buffer(staging_bytes, fallback, mapped);
+            if (!fallback_status) {
+                return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                    fallback_status.error().code, fallback_status.error().message);
+            }
+            staging_buffer = fallback.buffer;
+        } else {
+            auto staging_status = ensure_staging_buffer(persistent_staging_capacity);
+            if (!staging_status) {
+                return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                    staging_status.error().code, staging_status.error().message);
+            }
+            staging_buffer = staging_buffer_.buffer;
+            mapped = staging_mapped_;
+        }
+
+        std::vector<VkBufferCopy> copy_regions;
+        copy_regions.reserve(writes.size());
+        std::size_t source_offset = 0;
+        for (const auto& write : writes) {
+            std::memcpy(static_cast<std::byte*>(mapped) + source_offset, write.bytes.data(),
+                        write.bytes.size());
+            copy_regions.push_back(VkBufferCopy{static_cast<VkDeviceSize>(source_offset),
+                                                static_cast<VkDeviceSize>(write.destination_offset),
+                                                static_cast<VkDeviceSize>(write.bytes.size())});
+            source_offset += write.bytes.size();
+        }
+
+        const auto wait_result = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
+                                                 std::numeric_limits<std::uint64_t>::max());
+        if (wait_result != VK_SUCCESS) {
+            if (use_fallback) {
+                vkUnmapMemory(device_, fallback.memory);
+                destroy_buffer_resource(fallback);
+            }
+            return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                "renderer.vulkan_wait_fence_failed",
+                "failed to wait before Vulkan buffer upload: " +
+                    std::string(vk_result_name(wait_result)));
+        }
+        auto result = vkResetFences(device_, 1, &fence_);
+        if (result == VK_SUCCESS) {
+            result = vkResetCommandBuffer(command_buffer_, 0);
+        }
+        VkCommandBufferBeginInfo begin_info{};
+        begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (result == VK_SUCCESS) {
+            result = vkBeginCommandBuffer(command_buffer_, &begin_info);
+        }
+        if (result != VK_SUCCESS) {
+            if (use_fallback) {
+                vkUnmapMemory(device_, fallback.memory);
+                destroy_buffer_resource(fallback);
+            }
+            return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                "renderer.vulkan_buffer_upload_begin_failed",
+                "failed to begin Vulkan buffer upload commands: " +
+                    std::string(vk_result_name(result)));
+        }
+
+        begin_debug_label(command_buffer_, "Batched buffer upload", 0.92F, 0.56F, 0.16F);
+        for (std::size_t index = 0; index < writes.size(); ++index) {
+            const auto& destination = buffer_resources_.at(writes[index].destination.value);
+            vkCmdCopyBuffer(command_buffer_, staging_buffer, destination.buffer, 1,
+                            &copy_regions[index]);
+        }
+        std::vector<VkBufferMemoryBarrier> barriers;
+        barriers.reserve(writes.size());
+        VkPipelineStageFlags destination_stages = 0;
+        for (const auto& write : writes) {
+            const auto& destination = buffer_resources_.at(write.destination.value);
+            VkBufferMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            switch (destination.desc.usage) {
+            case rhi::RenderBufferUsage::vertex:
+                barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT;
+                destination_stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                break;
+            case rhi::RenderBufferUsage::index:
+                barrier.dstAccessMask = VK_ACCESS_INDEX_READ_BIT;
+                destination_stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
+                break;
+            case rhi::RenderBufferUsage::uniform:
+                barrier.dstAccessMask = VK_ACCESS_UNIFORM_READ_BIT;
+                destination_stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                break;
+            case rhi::RenderBufferUsage::storage:
+                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                destination_stages |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                      VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+                break;
+            }
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.buffer = destination.buffer;
+            barrier.offset = static_cast<VkDeviceSize>(write.destination_offset);
+            barrier.size = static_cast<VkDeviceSize>(write.bytes.size());
+            barriers.push_back(barrier);
+        }
+        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, destination_stages, 0,
+                             0, nullptr, static_cast<std::uint32_t>(barriers.size()),
+                             barriers.data(), 0, nullptr);
+        end_debug_label(command_buffer_);
+        result = vkEndCommandBuffer(command_buffer_);
+        if (result == VK_SUCCESS) {
+            VkSubmitInfo submit_info{};
+            submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submit_info.commandBufferCount = 1;
+            submit_info.pCommandBuffers = &command_buffer_;
+            result = vkQueueSubmit(queue_, 1, &submit_info, fence_);
+        }
+        if (result == VK_SUCCESS) {
+            result = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
+                                     std::numeric_limits<std::uint64_t>::max());
+        }
+        if (use_fallback) {
+            vkUnmapMemory(device_, fallback.memory);
+            destroy_buffer_resource(fallback);
+        }
+        if (result != VK_SUCCESS) {
+            return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                "renderer.vulkan_buffer_upload_failed",
+                "failed to submit Vulkan buffer upload: " + std::string(vk_result_name(result)));
+        }
+
+        rhi::RenderBufferBatchUploadStats stats;
+        stats.backend = backend();
+        stats.write_count = writes.size();
+        stats.byte_size = staging_bytes;
+        stats.used_fallback_staging = use_fallback;
+        stats.gpu_backed = true;
+        return core::Result<rhi::RenderBufferBatchUploadStats>::success(stats);
     }
 
     [[nodiscard]] core::Result<rhi::RenderImageUploadStats>
@@ -2367,14 +2619,13 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             vkCreateQueryPool(device_, &query_info, nullptr, &timestamp_query_pool_);
         if (result != VK_SUCCESS) {
             timestamp_query_pool_ = VK_NULL_HANDLE;
-            core::log(core::LogLevel::warning,
-                      "Vulkan timestamp query pool unavailable: " +
-                          std::string(vk_result_name(result)));
+            core::log(core::LogLevel::warning, "Vulkan timestamp query pool unavailable: " +
+                                                   std::string(vk_result_name(result)));
         }
     }
 
-    void begin_debug_label(VkCommandBuffer command_buffer, const char* name, float red,
-                           float green, float blue) const noexcept {
+    void begin_debug_label(VkCommandBuffer command_buffer, const char* name, float red, float green,
+                           float blue) const noexcept {
         if (begin_debug_label_ == nullptr) {
             return;
         }
@@ -2399,8 +2650,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         return slot * timestamps_per_slot;
     }
 
-    void begin_timestamp_frame(VkCommandBuffer command_buffer,
-                               std::uint64_t frame_index) noexcept {
+    void begin_timestamp_frame(VkCommandBuffer command_buffer, std::uint64_t frame_index) noexcept {
         if (timestamp_query_pool_ == VK_NULL_HANDLE) {
             return;
         }
@@ -2456,10 +2706,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             }
             std::array<std::uint64_t, timestamps_per_slot> values{};
             const auto result = vkGetQueryPoolResults(
-                device_, timestamp_query_pool_, static_cast<std::uint32_t>(slot) *
-                                                   timestamps_per_slot,
-                timestamps_per_slot, sizeof(values), values.data(), sizeof(std::uint64_t),
-                VK_QUERY_RESULT_64_BIT);
+                device_, timestamp_query_pool_,
+                static_cast<std::uint32_t>(slot) * timestamps_per_slot, timestamps_per_slot,
+                sizeof(values), values.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
             if (result != VK_SUCCESS) {
                 continue;
             }
@@ -2467,8 +2716,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             VulkanGpuTimingSample sample;
             sample.valid = true;
             sample.frame_index = timestamp_frame_indices_[slot];
-            sample.frame_ms = timestamp_milliseconds(values[frame_start_timestamp],
-                                                     values[frame_end_timestamp]);
+            sample.frame_ms =
+                timestamp_milliseconds(values[frame_start_timestamp], values[frame_end_timestamp]);
             sample.opaque_ms = timestamp_milliseconds(values[opaque_start_timestamp],
                                                       values[opaque_end_timestamp]);
             sample.transfer_ms = timestamp_milliseconds(values[transfer_start_timestamp],
@@ -2482,8 +2731,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         return newest;
     }
 
-    static void attach_gpu_timing(rhi::RenderFrameStats& stats,
-                                  const VulkanGpuTimingSample& timing,
+    static void attach_gpu_timing(rhi::RenderFrameStats& stats, const VulkanGpuTimingSample& timing,
                                   std::uint64_t current_frame) noexcept {
         if (!timing.valid) {
             return;
@@ -2493,9 +2741,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         const auto latency = current_frame >= timing.frame_index
                                  ? current_frame - timing.frame_index
                                  : std::uint64_t{0};
-        stats.gpu_timing_latency_frames = static_cast<std::uint32_t>(
-            std::min(latency, static_cast<std::uint64_t>(
-                                  std::numeric_limits<std::uint32_t>::max())));
+        stats.gpu_timing_latency_frames = static_cast<std::uint32_t>(std::min(
+            latency, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max())));
         stats.gpu_frame_ms = timing.frame_ms;
         stats.gpu_opaque_terrain_ms = timing.opaque_ms;
         stats.gpu_transfer_ms = timing.transfer_ms;
@@ -2528,6 +2775,70 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             destroy_buffer_resource(resource);
         }
         buffer_resources_.clear();
+    }
+
+    [[nodiscard]] core::Status
+    create_staging_buffer(std::size_t byte_size, VulkanBufferResource& resource, void*& mapped) {
+        resource.desc = {rhi::RenderBufferUsage::storage, byte_size, "persistent_staging",
+                         rhi::RenderBufferMemory::host_visible};
+        resource.byte_size = byte_size;
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = static_cast<VkDeviceSize>(byte_size);
+        buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        auto result = vkCreateBuffer(device_, &buffer_info, nullptr, &resource.buffer);
+        if (result != VK_SUCCESS) {
+            return core::Status::failure("renderer.vulkan_staging_buffer_failed",
+                                         "failed to create Vulkan staging buffer: " +
+                                             std::string(vk_result_name(result)));
+        }
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device_, resource.buffer, &requirements);
+        auto memory_type = find_required_memory_type(physical_device_, requirements.memoryTypeBits,
+                                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                         VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                                     "persistent staging buffer");
+        if (!memory_type) {
+            destroy_buffer_resource(resource);
+            return core::Status::failure(memory_type.error().code, memory_type.error().message);
+        }
+        VkMemoryAllocateInfo allocation{};
+        allocation.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocation.allocationSize = requirements.size;
+        allocation.memoryTypeIndex = memory_type.value();
+        result = vkAllocateMemory(device_, &allocation, nullptr, &resource.memory);
+        if (result == VK_SUCCESS) {
+            result = vkBindBufferMemory(device_, resource.buffer, resource.memory, 0);
+        }
+        if (result == VK_SUCCESS) {
+            result = vkMapMemory(device_, resource.memory, 0, static_cast<VkDeviceSize>(byte_size),
+                                 0, &mapped);
+        }
+        if (result != VK_SUCCESS) {
+            destroy_buffer_resource(resource);
+            mapped = nullptr;
+            return core::Status::failure("renderer.vulkan_staging_memory_failed",
+                                         "failed to allocate or map Vulkan staging memory: " +
+                                             std::string(vk_result_name(result)));
+        }
+        return core::Status::ok();
+    }
+
+    [[nodiscard]] core::Status ensure_staging_buffer(std::size_t byte_size) {
+        if (staging_buffer_.buffer != VK_NULL_HANDLE && staging_buffer_.byte_size >= byte_size) {
+            return core::Status::ok();
+        }
+        destroy_staging_buffer();
+        return create_staging_buffer(byte_size, staging_buffer_, staging_mapped_);
+    }
+
+    void destroy_staging_buffer() noexcept {
+        if (staging_mapped_ != nullptr && staging_buffer_.memory != VK_NULL_HANDLE) {
+            vkUnmapMemory(device_, staging_buffer_.memory);
+            staging_mapped_ = nullptr;
+        }
+        destroy_buffer_resource(staging_buffer_);
     }
 
     void destroy_image_resource(VulkanImageResource& resource) noexcept {
@@ -4438,6 +4749,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     std::vector<VkSemaphore> swapchain_render_finished_semaphores_;
     std::uint64_t next_resource_id_ = 1;
     std::unordered_map<std::uint64_t, VulkanBufferResource> buffer_resources_;
+    VulkanBufferResource staging_buffer_;
+    void* staging_mapped_ = nullptr;
     std::unordered_map<std::uint64_t, VulkanImageResource> image_resources_;
     std::unordered_map<std::uint64_t, VulkanShaderModuleResource> shader_modules_;
     std::unordered_map<std::uint64_t, VulkanComputePipelineResource> compute_pipelines_;

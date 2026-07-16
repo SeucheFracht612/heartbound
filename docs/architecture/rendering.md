@@ -19,6 +19,8 @@ Implemented foundation:
   - owns opaque renderer resource handles for uploaded buffers and sampled images
   - can upload renderer-neutral CPU data, such as chunk mesh vertices, indices, and small RGBA8
     sampled images, without exposing backend handles to world/chunk/material systems
+  - can create host-visible or device-local buffers and batch validated writes into explicit byte
+    ranges, allowing renderer-owned arenas without exposing backend allocation objects
   - can create shader modules from validated SPIR-V words without exposing backend shader handles
   - can create compute pipeline objects from shader modules and bound material pipeline layouts
     without exposing backend pipeline handles
@@ -172,6 +174,9 @@ Implemented foundation:
     depth, and swapchain targets when the output extent changes
   - can allocate host-visible Vulkan buffers and copy renderer-neutral upload bytes into them behind
     opaque RHI handles
+  - creates device-local arena buffers with transfer-destination usage and batches subrange copies
+    through a persistently mapped 32 MiB staging buffer; an oversized batch uses a temporary
+    fallback staging allocation
   - can allocate private `VkShaderModule` objects from validated SPIR-V words behind opaque RHI
     handles
   - can upload small RGBA8 sampled images through a private staging buffer, optimal-tiled image,

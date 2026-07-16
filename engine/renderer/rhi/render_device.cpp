@@ -256,6 +256,56 @@ class HeadlessRenderDevice final : public IRenderDevice {
         return core::Result<RenderUploadStats>::success(stats);
     }
 
+    [[nodiscard]] core::Result<RenderBufferCreateStats>
+    create_buffer(RenderBufferDesc desc) override {
+        auto status = validate_render_buffer_desc(desc);
+        if (!status) {
+            return core::Result<RenderBufferCreateStats>::failure(status.error().code,
+                                                                  status.error().message);
+        }
+        const RenderResourceHandle handle{next_resource_id_++};
+        resources_.emplace(handle.value, std::move(desc));
+        const auto& stored = resources_.at(handle.value);
+        RenderBufferCreateStats stats;
+        stats.backend = backend();
+        stats.handle = handle;
+        stats.usage = stored.usage;
+        stats.memory = stored.memory;
+        stats.byte_size = stored.byte_size;
+        stats.live_resource_count = live_resource_count();
+        return core::Result<RenderBufferCreateStats>::success(stats);
+    }
+
+    [[nodiscard]] core::Result<RenderBufferBatchUploadStats>
+    upload_buffer_batch(std::span<const RenderBufferWrite> writes) override {
+        auto status = validate_render_buffer_writes_shape(writes);
+        if (!status) {
+            return core::Result<RenderBufferBatchUploadStats>::failure(status.error().code,
+                                                                       status.error().message);
+        }
+        std::size_t byte_size = 0;
+        for (const auto& write : writes) {
+            const auto resource = resources_.find(write.destination.value);
+            if (resource == resources_.end()) {
+                return core::Result<RenderBufferBatchUploadStats>::failure(
+                    "renderer.unknown_buffer_write_destination",
+                    "buffer write references a resource not owned by this device");
+            }
+            if (write.destination_offset > resource->second.byte_size ||
+                write.bytes.size() > resource->second.byte_size - write.destination_offset) {
+                return core::Result<RenderBufferBatchUploadStats>::failure(
+                    "renderer.buffer_write_out_of_bounds",
+                    "buffer write exceeds its destination resource");
+            }
+            byte_size += write.bytes.size();
+        }
+        RenderBufferBatchUploadStats stats;
+        stats.backend = backend();
+        stats.write_count = writes.size();
+        stats.byte_size = byte_size;
+        return core::Result<RenderBufferBatchUploadStats>::success(stats);
+    }
+
     [[nodiscard]] core::Result<RenderImageUploadStats>
     upload_image(RenderImageDesc desc, std::span<const std::byte> bytes) override {
         auto status = validate_render_image_upload(desc, bytes);
@@ -720,11 +770,55 @@ core::Status validate_render_extent(RenderExtent extent) {
     return core::Status::ok();
 }
 
-core::Status validate_render_buffer_upload(const RenderBufferDesc& desc,
-                                           std::span<const std::byte> bytes) {
+core::Status validate_render_buffer_desc(const RenderBufferDesc& desc) {
     if (desc.byte_size == 0) {
         return core::Status::failure("renderer.invalid_buffer_size",
                                      "render buffer byte size must be non-zero");
+    }
+    switch (desc.usage) {
+    case RenderBufferUsage::vertex:
+    case RenderBufferUsage::index:
+    case RenderBufferUsage::uniform:
+    case RenderBufferUsage::storage:
+        break;
+    }
+    switch (desc.memory) {
+    case RenderBufferMemory::host_visible:
+    case RenderBufferMemory::device_local:
+        return core::Status::ok();
+    }
+    return core::Status::failure("renderer.unknown_buffer_memory",
+                                 "unknown render buffer memory class");
+}
+
+core::Status validate_render_buffer_writes_shape(std::span<const RenderBufferWrite> writes) {
+    if (writes.empty()) {
+        return core::Status::failure("renderer.empty_buffer_write_batch",
+                                     "buffer write batch must not be empty");
+    }
+    for (const auto& write : writes) {
+        if (!write.destination.is_valid()) {
+            return core::Status::failure("renderer.invalid_buffer_write_destination",
+                                         "buffer write destination handle must be valid");
+        }
+        if (write.bytes.empty()) {
+            return core::Status::failure("renderer.empty_buffer_write",
+                                         "buffer write bytes must not be empty");
+        }
+        if (write.destination_offset >
+            std::numeric_limits<std::size_t>::max() - write.bytes.size()) {
+            return core::Status::failure("renderer.buffer_write_range_overflow",
+                                         "buffer write range overflows size_t");
+        }
+    }
+    return core::Status::ok();
+}
+
+core::Status validate_render_buffer_upload(const RenderBufferDesc& desc,
+                                           std::span<const std::byte> bytes) {
+    auto status = validate_render_buffer_desc(desc);
+    if (!status) {
+        return status;
     }
     if (bytes.empty()) {
         return core::Status::failure("renderer.empty_buffer_upload",
@@ -734,14 +828,7 @@ core::Status validate_render_buffer_upload(const RenderBufferDesc& desc,
         return core::Status::failure("renderer.buffer_upload_size_mismatch",
                                      "render buffer upload byte size must match the descriptor");
     }
-    switch (desc.usage) {
-    case RenderBufferUsage::vertex:
-    case RenderBufferUsage::index:
-    case RenderBufferUsage::uniform:
-    case RenderBufferUsage::storage:
-        return core::Status::ok();
-    }
-    return core::Status::failure("renderer.unknown_buffer_usage", "unknown render buffer usage");
+    return core::Status::ok();
 }
 
 core::Status validate_render_image_upload(const RenderImageDesc& desc,
@@ -1157,6 +1244,16 @@ std::string_view render_buffer_usage_name(RenderBufferUsage usage) noexcept {
         return "uniform";
     case RenderBufferUsage::storage:
         return "storage";
+    }
+    return "unknown";
+}
+
+std::string_view render_buffer_memory_name(RenderBufferMemory memory) noexcept {
+    switch (memory) {
+    case RenderBufferMemory::host_visible:
+        return "host_visible";
+    case RenderBufferMemory::device_local:
+        return "device_local";
     }
     return "unknown";
 }

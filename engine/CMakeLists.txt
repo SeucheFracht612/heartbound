@@ -72,6 +72,7 @@ target_sources(
     renderer/chunks/chunk_mesh_scheduler.cpp
     renderer/chunks/chunk_render_system.cpp
     renderer/frame/frame_builder.cpp
+    renderer/memory/gpu_buffer_arena.cpp
     renderer/renderer.cpp
     renderer/renderer_stats.cpp
     renderer/render_camera.cpp
@@ -211,6 +212,7 @@ target_sources(
       renderer/chunks/chunk_render_system.hpp
       renderer/frame/frame_builder.hpp
       renderer/frame/render_commands.hpp
+      renderer/memory/gpu_buffer_arena.hpp
       renderer/renderer.hpp
       renderer/renderer_stats.hpp
       renderer/render_camera.hpp

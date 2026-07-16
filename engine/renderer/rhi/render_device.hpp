@@ -40,6 +40,11 @@ enum class RenderBufferUsage {
     storage,
 };
 
+enum class RenderBufferMemory {
+    host_visible,
+    device_local,
+};
+
 enum class RenderImageFormat {
     rgba8_unorm,
     d32_sfloat,
@@ -150,6 +155,31 @@ struct RenderBufferDesc {
     RenderBufferUsage usage = RenderBufferUsage::vertex;
     std::size_t byte_size = 0;
     std::string debug_name;
+    RenderBufferMemory memory = RenderBufferMemory::host_visible;
+};
+
+struct RenderBufferWrite {
+    RenderResourceHandle destination;
+    std::size_t destination_offset = 0;
+    std::span<const std::byte> bytes;
+};
+
+struct RenderBufferCreateStats {
+    RenderBackend backend = RenderBackend::headless;
+    RenderResourceHandle handle;
+    RenderBufferUsage usage = RenderBufferUsage::vertex;
+    RenderBufferMemory memory = RenderBufferMemory::host_visible;
+    std::size_t byte_size = 0;
+    std::size_t live_resource_count = 0;
+    bool gpu_backed = false;
+};
+
+struct RenderBufferBatchUploadStats {
+    RenderBackend backend = RenderBackend::headless;
+    std::size_t write_count = 0;
+    std::size_t byte_size = 0;
+    bool used_fallback_staging = false;
+    bool gpu_backed = false;
 };
 
 struct RenderImageDesc {
@@ -463,6 +493,10 @@ class IRenderDevice {
     execute_frame_plan(const RenderFramePlan& plan) = 0;
     [[nodiscard]] virtual core::Result<RenderFrameStats>
     execute_frame(const RenderFrameSubmission& frame) = 0;
+    [[nodiscard]] virtual core::Result<RenderBufferCreateStats>
+    create_buffer(RenderBufferDesc desc) = 0;
+    [[nodiscard]] virtual core::Result<RenderBufferBatchUploadStats>
+    upload_buffer_batch(std::span<const RenderBufferWrite> writes) = 0;
     [[nodiscard]] virtual core::Result<RenderUploadStats>
     upload_buffer(RenderBufferDesc desc, std::span<const std::byte> bytes) = 0;
     [[nodiscard]] virtual core::Result<RenderImageUploadStats>
@@ -489,6 +523,9 @@ create_render_device(RenderDeviceDesc desc);
 
 [[nodiscard]] core::Status validate_render_device_desc(const RenderDeviceDesc& desc);
 [[nodiscard]] core::Status validate_render_extent(RenderExtent extent);
+[[nodiscard]] core::Status validate_render_buffer_desc(const RenderBufferDesc& desc);
+[[nodiscard]] core::Status
+validate_render_buffer_writes_shape(std::span<const RenderBufferWrite> writes);
 [[nodiscard]] core::Status validate_render_buffer_upload(const RenderBufferDesc& desc,
                                                          std::span<const std::byte> bytes);
 [[nodiscard]] core::Status validate_render_image_upload(const RenderImageDesc& desc,
@@ -512,6 +549,7 @@ validate_render_mesh_bindings_shape(std::span<const RenderMeshBinding> draws);
 [[nodiscard]] std::string_view render_backend_name(RenderBackend backend) noexcept;
 [[nodiscard]] std::string_view present_mode_name(PresentMode mode) noexcept;
 [[nodiscard]] std::string_view render_buffer_usage_name(RenderBufferUsage usage) noexcept;
+[[nodiscard]] std::string_view render_buffer_memory_name(RenderBufferMemory memory) noexcept;
 [[nodiscard]] std::string_view render_image_format_name(RenderImageFormat format) noexcept;
 [[nodiscard]] std::size_t render_image_format_bytes_per_pixel(RenderImageFormat format) noexcept;
 [[nodiscard]] std::string_view render_descriptor_kind_name(RenderDescriptorKind kind) noexcept;
