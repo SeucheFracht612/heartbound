@@ -79,6 +79,21 @@ void test_benchmark_statistics() {
            std::string::npos);
 }
 
+void test_low_fps_windows_are_distinct() {
+    using namespace heartstead::renderer;
+    benchmark::BenchmarkRecorder recorder("low-window-test", 1);
+    for (std::uint64_t frame = 0; frame < 1'000; ++frame) {
+        RendererStats stats;
+        stats.frame_index = frame;
+        stats.cpu_frame_ms = frame < 990 ? 10.0 : (frame == 999 ? 200.0 : 100.0);
+        recorder.record(stats);
+    }
+    const auto summary = recorder.summarize();
+    assert(std::abs(summary.one_percent_low_fps - (1'000.0 / 110.0)) < 0.0001);
+    assert(std::abs(summary.point_one_percent_low_fps - 5.0) < 0.0001);
+    assert(summary.maximum_frame_ms == 200.0);
+}
+
 void test_all_deterministic_scenes_construct() {
     using namespace heartstead::renderer::benchmark;
     constexpr std::array kinds{
@@ -112,18 +127,27 @@ void test_scene_content_is_reproducible() {
     auto first = renderer::benchmark::BenchmarkScene::create(config);
     auto second = renderer::benchmark::BenchmarkScene::create(config);
     assert(first && second);
+    auto different_seed_config = config;
+    ++different_seed_config.seed;
+    auto different_seed = renderer::benchmark::BenchmarkScene::create(different_seed_config);
+    assert(different_seed);
     const auto* first_chunk = first.value()->world().chunks().records().front();
     const auto* second_chunk = second.value()->world().chunks().records().front();
-    for (std::uint16_t z = 0; z < world::VoxelChunk::edge_length; z += 5) {
-        for (std::uint16_t y = 0; y < world::VoxelChunk::edge_length; y += 3) {
-            for (std::uint16_t x = 0; x < world::VoxelChunk::edge_length; x += 7) {
+    const auto* different_seed_chunk = different_seed.value()->world().chunks().records().front();
+    std::size_t different_cell_count = 0;
+    for (std::uint16_t z = 0; z < world::VoxelChunk::edge_length; ++z) {
+        for (std::uint16_t y = 0; y < world::VoxelChunk::edge_length; ++y) {
+            for (std::uint16_t x = 0; x < world::VoxelChunk::edge_length; ++x) {
                 const auto first_cell = first_chunk->get({x, y, z});
                 const auto second_cell = second_chunk->get({x, y, z});
-                assert(first_cell && second_cell);
+                const auto other_cell = different_seed_chunk->get({x, y, z});
+                assert(first_cell && second_cell && other_cell);
                 assert(first_cell.value() == second_cell.value());
+                different_cell_count += first_cell.value() != other_cell.value() ? 1U : 0U;
             }
         }
     }
+    assert(different_cell_count > 0);
 }
 
 void test_dynamic_scene_schedules() {
@@ -186,6 +210,7 @@ void test_dynamic_scene_schedules() {
 
 int main() {
     test_benchmark_statistics();
+    test_low_fps_windows_are_distinct();
     test_all_deterministic_scenes_construct();
     test_scene_content_is_reproducible();
     test_dynamic_scene_schedules();
