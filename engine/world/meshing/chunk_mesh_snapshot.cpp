@@ -9,8 +9,7 @@ namespace heartstead::world {
 
 namespace {
 
-[[nodiscard]] constexpr std::int32_t floor_div(std::int32_t value,
-                                                std::int32_t divisor) noexcept {
+[[nodiscard]] constexpr std::int32_t floor_div(std::int32_t value, std::int32_t divisor) noexcept {
     auto quotient = value / divisor;
     if (value % divisor < 0) {
         --quotient;
@@ -18,8 +17,7 @@ namespace {
     return quotient;
 }
 
-[[nodiscard]] constexpr std::int32_t floor_mod(std::int32_t value,
-                                                std::int32_t divisor) noexcept {
+[[nodiscard]] constexpr std::int32_t floor_mod(std::int32_t value, std::int32_t divisor) noexcept {
     auto remainder = value % divisor;
     if (remainder < 0) {
         remainder += divisor;
@@ -31,8 +29,7 @@ namespace {
                                                       std::int32_t offset) noexcept {
     constexpr auto minimum = std::numeric_limits<std::int64_t>::min();
     constexpr auto maximum = std::numeric_limits<std::int64_t>::max();
-    if ((offset > 0 && value > maximum - offset) ||
-        (offset < 0 && value < minimum - offset)) {
+    if ((offset > 0 && value > maximum - offset) || (offset < 0 && value < minimum - offset)) {
         return std::nullopt;
     }
     return value + offset;
@@ -43,9 +40,8 @@ struct ResolvedCell {
     VoxelCoord local{};
 };
 
-[[nodiscard]] std::optional<ResolvedCell>
-resolve_cell(ChunkCoord center, std::int32_t x, std::int32_t y,
-             std::int32_t z) noexcept {
+[[nodiscard]] std::optional<ResolvedCell> resolve_cell(ChunkCoord center, std::int32_t x,
+                                                       std::int32_t y, std::int32_t z) noexcept {
     constexpr auto edge = static_cast<std::int32_t>(VoxelChunk::edge_length);
     const auto dx = floor_div(x, edge);
     const auto dy = floor_div(y, edge);
@@ -67,11 +63,13 @@ resolve_cell(ChunkCoord center, std::int32_t x, std::int32_t y,
 [[nodiscard]] std::size_t chunk_cell_index(VoxelCoord coordinate) noexcept {
     constexpr auto edge = static_cast<std::size_t>(VoxelChunk::edge_length);
     return static_cast<std::size_t>(coordinate.z) * edge * edge +
-           static_cast<std::size_t>(coordinate.y) * edge +
-           static_cast<std::size_t>(coordinate.x);
+           static_cast<std::size_t>(coordinate.y) * edge + static_cast<std::size_t>(coordinate.x);
 }
 
 [[nodiscard]] MeshingGeometryKind geometry_kind(const BlockModelDefinition& model) noexcept {
+    if (model.is_unit_cube()) {
+        return MeshingGeometryKind::full_cube;
+    }
     if (model.kind == BlockModelKind::cross_plane) {
         return MeshingGeometryKind::cross_plane;
     }
@@ -81,13 +79,37 @@ resolve_cell(ChunkCoord center, std::int32_t x, std::int32_t y,
     return MeshingGeometryKind::boxes;
 }
 
+[[nodiscard]] MeshingRenderPhase render_phase(const VoxelDefinition* definition,
+                                              const BlockModelDefinition& model) noexcept {
+    if (definition != nullptr && definition->logical_occupancy == BlockLogicalOccupancy::fluid) {
+        return MeshingRenderPhase::fluid;
+    }
+    if (model.kind == BlockModelKind::cross_plane) {
+        return MeshingRenderPhase::alpha_tested;
+    }
+    return MeshingRenderPhase::opaque;
+}
+
 [[nodiscard]] MeshingBlockInfo snapshot_model(const VoxelDefinition* definition,
-                                              const BlockModelDefinition& model) {
+                                              const BlockModelDefinition& model,
+                                              std::uint16_t material_index) {
     MeshingBlockInfo result;
     result.defined = true;
     result.geometry = geometry_kind(model);
+    result.render_phase = render_phase(definition, model);
+    result.material_index = material_index;
+    result.flags = definition != nullptr && definition->light_emission > 0
+                       ? static_cast<std::uint16_t>(MeshingBlockFlags::emissive)
+                       : 0;
+    if (model.kind == BlockModelKind::cross_plane) {
+        result.flags |= static_cast<std::uint16_t>(MeshingBlockFlags::two_sided);
+    }
+    if (model.kind == BlockModelKind::state_dependent) {
+        result.flags |= static_cast<std::uint16_t>(MeshingBlockFlags::state_dependent);
+    }
     result.full_occluder =
         definition == nullptr || definition->occlusion == BlockOcclusionBehavior::full_cube;
+    result.occlusion_mask = result.full_occluder ? 0x3FU : 0U;
     result.neighbor_dependency_radius = model.neighbor_dependency_radius;
     result.boxes = model.boxes;
     result.model_prototype_id = model.prototype_id;
@@ -107,8 +129,7 @@ const MeshingBlockInfo* BlockRenderTableSnapshot::find(std::uint16_t type) const
     if (!legacy_cube_fallback) {
         return nullptr;
     }
-    static const MeshingBlockInfo legacy =
-        snapshot_model(nullptr, legacy_cube_block_model());
+    static const MeshingBlockInfo legacy = snapshot_model(nullptr, legacy_cube_block_model(), 0);
     return &legacy;
 }
 
@@ -127,7 +148,16 @@ core::Status BlockRenderTableSnapshot::validate() const {
             return core::Status::failure("chunk_mesh.invalid_render_table_entry",
                                          "block render table contains an invalid entry");
         }
-        if (block.geometry == MeshingGeometryKind::boxes && block.boxes.empty()) {
+        if (block.material_index == 0 || block.material_index != type ||
+            block.occlusion_mask > 0x3FU ||
+            (block.full_occluder && block.occlusion_mask != 0x3FU)) {
+            return core::Status::failure(
+                "chunk_mesh.invalid_compact_render_entry",
+                "block render table compact material or occlusion metadata is invalid");
+        }
+        if ((block.geometry == MeshingGeometryKind::full_cube ||
+             block.geometry == MeshingGeometryKind::boxes) &&
+            block.boxes.empty()) {
             return core::Status::failure("chunk_mesh.missing_render_table_boxes",
                                          "box geometry requires at least one box");
         }
@@ -155,18 +185,18 @@ build_block_render_table_snapshot(const VoxelPalette* palette) {
     result.blocks.resize(static_cast<std::size_t>(maximum_type) + 1);
     for (const auto* definition : palette->definitions()) {
         const auto& model = palette->model_for(*definition);
-        result.blocks[definition->type] = snapshot_model(definition, model);
+        result.blocks[definition->type] = snapshot_model(definition, model, definition->type);
     }
     auto status = result.validate();
     if (!status) {
         return core::Result<BlockRenderTableSnapshot>::failure(status.error().code,
-                                                                status.error().message);
+                                                               status.error().message);
     }
     return core::Result<BlockRenderTableSnapshot>::success(std::move(result));
 }
 
 VoxelCell ChunkNeighborhoodSnapshot::cell(std::uint16_t x, std::uint16_t y,
-                                         std::uint16_t z) const noexcept {
+                                          std::uint16_t z) const noexcept {
     if (x >= VoxelChunk::edge_length || y >= VoxelChunk::edge_length ||
         z >= VoxelChunk::edge_length) {
         return VoxelCell::air();
@@ -185,12 +215,11 @@ VoxelCell ChunkNeighborhoodSnapshot::cell_relative(std::int32_t x, std::int32_t 
         snapshot_y >= side || snapshot_z >= side) {
         return VoxelCell::air();
     }
-    const auto index = static_cast<std::size_t>(snapshot_z) *
-                           static_cast<std::size_t>(side_length) *
-                           static_cast<std::size_t>(side_length) +
-                       static_cast<std::size_t>(snapshot_y) *
-                           static_cast<std::size_t>(side_length) +
-                       static_cast<std::size_t>(snapshot_x);
+    const auto index =
+        static_cast<std::size_t>(snapshot_z) * static_cast<std::size_t>(side_length) *
+            static_cast<std::size_t>(side_length) +
+        static_cast<std::size_t>(snapshot_y) * static_cast<std::size_t>(side_length) +
+        static_cast<std::size_t>(snapshot_x);
     return cells[index];
 }
 
@@ -222,12 +251,11 @@ core::Status ChunkNeighborhoodSnapshot::validate() const {
     return core::Status::ok();
 }
 
-core::Result<std::uint16_t>
-required_chunk_halo(std::span<const VoxelCell> center_cells,
-                    const BlockRenderTableSnapshot& render_table) {
+core::Result<std::uint16_t> required_chunk_halo(std::span<const VoxelCell> center_cells,
+                                                const BlockRenderTableSnapshot& render_table) {
     if (center_cells.size() != VoxelChunk::total_cells) {
-        return core::Result<std::uint16_t>::failure(
-            "chunk_mesh.invalid_center_snapshot", "center chunk snapshot has an invalid size");
+        return core::Result<std::uint16_t>::failure("chunk_mesh.invalid_center_snapshot",
+                                                    "center chunk snapshot has an invalid size");
     }
     std::uint16_t required = 0;
     for (const auto cell : center_cells) {
@@ -258,16 +286,16 @@ build_chunk_neighborhood_snapshot(const ChunkDatabase& chunks, ChunkIdentity cen
     const auto halo = required_chunk_halo(center_chunk->cells(), render_table);
     if (!halo) {
         return core::Result<ChunkNeighborhoodSnapshot>::failure(halo.error().code,
-                                                                 halo.error().message);
+                                                                halo.error().message);
     }
 
     ChunkNeighborhoodSnapshot result;
     result.center_identity = center;
     result.center_revision = center_chunk->content_revision();
     result.halo_radius = halo.value();
-    result.side_length = static_cast<std::uint16_t>(
-        static_cast<std::uint32_t>(VoxelChunk::edge_length) +
-        static_cast<std::uint32_t>(result.halo_radius) * 2U);
+    result.side_length =
+        static_cast<std::uint16_t>(static_cast<std::uint32_t>(VoxelChunk::edge_length) +
+                                   static_cast<std::uint32_t>(result.halo_radius) * 2U);
     const auto side = static_cast<std::size_t>(result.side_length);
     reusable_cells.clear();
     reusable_cells.resize(side * side * side, VoxelCell::air());
@@ -287,7 +315,8 @@ build_chunk_neighborhood_snapshot(const ChunkDatabase& chunks, ChunkIdentity cen
                 }
                 const auto* source_chunk = chunks.find(address->chunk);
                 if (source_chunk != nullptr) {
-                    result.cells[output_index] = source_chunk->cells()[chunk_cell_index(address->local)];
+                    result.cells[output_index] =
+                        source_chunk->cells()[chunk_cell_index(address->local)];
                 }
                 ++output_index;
             }
@@ -322,14 +351,13 @@ build_chunk_neighborhood_snapshot(const ChunkDatabase& chunks, ChunkIdentity cen
     auto status = result.validate();
     if (!status) {
         return core::Result<ChunkNeighborhoodSnapshot>::failure(status.error().code,
-                                                                 status.error().message);
+                                                                status.error().message);
     }
     return core::Result<ChunkNeighborhoodSnapshot>::success(std::move(result));
 }
 
-bool dependency_revisions_match(
-    const ChunkDatabase& chunks,
-    std::span<const ChunkDependencyRevision> dependencies) noexcept {
+bool dependency_revisions_match(const ChunkDatabase& chunks,
+                                std::span<const ChunkDependencyRevision> dependencies) noexcept {
     for (const auto& dependency : dependencies) {
         const auto* chunk = chunks.find(dependency.coordinate);
         if (!dependency.present) {

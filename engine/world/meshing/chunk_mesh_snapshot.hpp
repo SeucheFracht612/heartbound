@@ -14,14 +14,34 @@
 namespace heartstead::world {
 
 enum class MeshingGeometryKind : std::uint8_t {
+    full_cube,
     boxes,
     cross_plane,
     rich_model,
 };
 
+enum class MeshingRenderPhase : std::uint8_t {
+    opaque,
+    alpha_tested,
+    transparent,
+    fluid,
+};
+
+enum class MeshingBlockFlags : std::uint16_t {
+    none = 0,
+    emissive = 1U << 0U,
+    two_sided = 1U << 1U,
+    state_dependent = 1U << 2U,
+};
+
 struct MeshingBlockInfo {
     bool defined = false;
-    MeshingGeometryKind geometry = MeshingGeometryKind::boxes;
+    MeshingGeometryKind geometry = MeshingGeometryKind::full_cube;
+    MeshingRenderPhase render_phase = MeshingRenderPhase::opaque;
+    std::uint16_t material_index = 0;
+    std::uint16_t model_index = 0;
+    std::uint16_t flags = 0;
+    std::uint8_t occlusion_mask = 0;
     bool full_occluder = false;
     std::uint16_t neighbor_dependency_radius = 0;
     std::vector<BlockModelBox> boxes;
@@ -59,8 +79,7 @@ struct ChunkNeighborhoodSnapshot {
     std::vector<VoxelCell> cells;
     std::vector<ChunkDependencyRevision> dependencies;
 
-    [[nodiscard]] VoxelCell cell(std::uint16_t x, std::uint16_t y,
-                                 std::uint16_t z) const noexcept;
+    [[nodiscard]] VoxelCell cell(std::uint16_t x, std::uint16_t y, std::uint16_t z) const noexcept;
     [[nodiscard]] VoxelCell cell_relative(std::int32_t x, std::int32_t y,
                                           std::int32_t z) const noexcept;
     [[nodiscard]] std::size_t cell_count() const noexcept;
@@ -76,8 +95,8 @@ build_chunk_neighborhood_snapshot(const ChunkDatabase& chunks, ChunkIdentity cen
                                   const BlockRenderTableSnapshot& render_table,
                                   std::vector<VoxelCell> reusable_cells = {});
 
-[[nodiscard]] bool dependency_revisions_match(
-    const ChunkDatabase& chunks,
-    std::span<const ChunkDependencyRevision> dependencies) noexcept;
+[[nodiscard]] bool
+dependency_revisions_match(const ChunkDatabase& chunks,
+                           std::span<const ChunkDependencyRevision> dependencies) noexcept;
 
 } // namespace heartstead::world

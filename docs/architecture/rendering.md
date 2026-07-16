@@ -278,6 +278,17 @@ superseded load generations, or obsolete render tables both before upload prepar
 before upload. Rebuilds keep the prior resident mesh visible, and rapid requests are coalesced or
 cancelled before expensive work when possible.
 
+The immutable block-render snapshot now pre-resolves full-cube versus specialized geometry,
+material-table index, six-bit occlusion mask, render phase, emissive/two-sided/state flags, model
+metadata, and neighbor radius before worker execution. `GreedyChunkMesher` is a separate optimized
+full-cube path; the readable `ChunkMesher` remains the correctness reference and still handles
+boxes, cross-plane foliage, and rich-model extraction. Greedy masks merge only faces with identical
+material, voxel type, render phase, light, state, and relevant block flags. Directional surface-area
+tests cover all six faces, negative chunk coordinates, cross-chunk occlusion, incompatible merge
+keys, and checkerboard worst cases. In the deterministic flat nine-chunk benchmark this reduced a
+representative visible frame from tens of thousands of triangles to 66 without changing visible
+surface coverage.
+
 The backend currently supports one draw-producing Vulkan pass per unified submission. General
 multi-pass Vulkan execution, chunk material sections, frame-local descriptor allocation for
 textured materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to

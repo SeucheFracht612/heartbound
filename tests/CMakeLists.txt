@@ -43,6 +43,8 @@ heartstead_add_foundation_test(heartstead_gpu_buffer_arena_tests gpu_buffer_aren
 heartstead_add_foundation_test(heartstead_renderer_benchmark_tests renderer_benchmark_tests.cpp)
 heartstead_add_foundation_test(heartstead_render_runtime_asset_tests
                                render_runtime_asset_tests.cpp)
+heartstead_add_foundation_test(heartstead_greedy_chunk_mesher_tests
+                               greedy_chunk_mesher_tests.cpp)
 
 function(heartstead_add_smoke_test test_name target_name)
   if(TARGET ${target_name})

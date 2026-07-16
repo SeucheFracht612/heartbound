@@ -1,5 +1,7 @@
 #include "engine/renderer/chunks/chunk_mesh_scheduler.hpp"
 
+#include "engine/world/meshing/greedy_chunk_mesher.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <deque>
@@ -204,8 +206,8 @@ core::Status ChunkMeshScheduler::submit(ChunkMeshRequest request) {
 
         const auto started = std::chrono::steady_clock::now();
         try {
-            auto mesh =
-                world::ChunkMesher::build_surface_mesh(request.neighborhood, *request.render_table);
+            auto mesh = world::GreedyChunkMesher::build_surface_mesh(request.neighborhood,
+                                                                     *request.render_table);
             result.meshing_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - started)
                                     .count();
