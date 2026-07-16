@@ -1,6 +1,8 @@
 #include "engine/renderer/rhi/render_frame_plan.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -81,14 +83,17 @@ struct ResourceAccessState {
     return RenderResourceState::undefined;
 }
 
-[[nodiscard]] RenderResourceState resource_state_for_access(RenderResourceAccess access) noexcept {
+[[nodiscard]] RenderResourceState resource_state_for_access(
+    RenderResourceAccess access, const RenderResourceDesc& resource) noexcept {
     switch (access) {
     case RenderResourceAccess::read:
         return RenderResourceState::shader_read;
     case RenderResourceAccess::write:
-        return RenderResourceState::color_attachment_write;
+        return is_depth_format(resource.format) ? RenderResourceState::depth_attachment_write
+                                                : RenderResourceState::color_attachment_write;
     case RenderResourceAccess::read_write:
-        return RenderResourceState::color_attachment_read_write;
+        return is_depth_format(resource.format) ? RenderResourceState::depth_attachment_write
+                                                : RenderResourceState::color_attachment_read_write;
     case RenderResourceAccess::present:
         return RenderResourceState::present;
     }
@@ -321,7 +326,7 @@ core::Result<RenderFrameExecutionPlan> RenderFramePlan::build_execution_plan() c
                 {},
             });
             execution_plan.resource_uses.back().required_state =
-                resource_state_for_access(execution_plan.resource_uses.back().access);
+                resource_state_for_access(execution_plan.resource_uses.back().access, *resource);
 
             const auto& current_use = execution_plan.resource_uses.back();
             auto& resource_state = resource_states.at(resource_name);
@@ -377,7 +382,12 @@ bool RenderFramePlan::has_present_pass() const noexcept {
 ClearColor RenderFramePlan::first_clear_color() const noexcept {
     const auto found = std::ranges::find_if(
         passes, [](const RenderPassDesc& pass) { return pass.kind == RenderPassKind::clear; });
-    return found == passes.end() ? ClearColor{} : found->clear_color;
+    if (found != passes.end()) {
+        return found->clear_color;
+    }
+    const auto writer = std::ranges::find_if(
+        passes, [](const RenderPassDesc& pass) { return !pass.writes.empty(); });
+    return writer == passes.end() ? ClearColor{} : writer->clear_color;
 }
 
 RenderFramePlanBuilder::RenderFramePlanBuilder(RenderExtent extent) {
@@ -448,6 +458,71 @@ RenderFramePlan make_clear_present_frame_plan(RenderExtent extent, ClearColor cl
     return plan;
 }
 
+core::Status validate_render_frame_submission_shape(const RenderFrameSubmission& frame) {
+    auto status = frame.plan.validate();
+    if (!status) {
+        return status;
+    }
+    if (!frame.camera.view_projection.is_finite()) {
+        return core::Status::failure(
+            "renderer.invalid_frame_camera",
+            "render frame camera view-projection matrix must contain finite values");
+    }
+
+    std::unordered_set<std::size_t> commanded_passes;
+    for (const auto& pass_commands : frame.pass_commands) {
+        if (pass_commands.pass_index >= frame.plan.passes.size()) {
+            return core::Status::failure("renderer.invalid_draw_pass_index",
+                                         "render pass command index is outside the frame plan");
+        }
+        if (!commanded_passes.insert(pass_commands.pass_index).second) {
+            return core::Status::failure("renderer.duplicate_draw_pass_commands",
+                                         "render frame contains duplicate commands for a pass");
+        }
+        if (pass_commands.draws.empty()) {
+            return core::Status::failure("renderer.empty_pass_draw_list",
+                                         "render pass command draw list must not be empty");
+        }
+        if (frame.plan.passes[pass_commands.pass_index].kind == RenderPassKind::present) {
+            return core::Status::failure("renderer.draws_in_present_pass",
+                                         "present passes cannot contain graphics draws");
+        }
+
+        for (const auto& draw : pass_commands.draws) {
+            if (!draw.pipeline.is_valid()) {
+                return core::Status::failure("renderer.invalid_draw_pipeline",
+                                             "render draw must reference a graphics pipeline");
+            }
+            if (!draw.vertex_buffer.is_valid()) {
+                return core::Status::failure("renderer.invalid_vertex_buffer",
+                                             "render draw must reference a vertex buffer");
+            }
+            if (!draw.index_buffer.is_valid()) {
+                return core::Status::failure("renderer.invalid_index_buffer",
+                                             "render draw must reference an index buffer");
+            }
+            if (draw.index_count == 0) {
+                return core::Status::failure("renderer.invalid_index_count",
+                                             "indexed render draw count must be non-zero");
+            }
+            if (draw.first_index > std::numeric_limits<std::uint32_t>::max() - draw.index_count) {
+                return core::Status::failure("renderer.draw_index_range_overflow",
+                                             "render draw index range overflows uint32");
+            }
+            if (draw.instance_count == 0) {
+                return core::Status::failure("renderer.invalid_instance_count",
+                                             "render draw instance count must be non-zero");
+            }
+            if (!draw.camera_relative_origin.is_finite()) {
+                return core::Status::failure(
+                    "renderer.invalid_camera_relative_translation",
+                    "render draw camera-relative origin must contain finite values");
+            }
+        }
+    }
+    return core::Status::ok();
+}
+
 std::string_view render_resource_lifetime_name(RenderResourceLifetime lifetime) noexcept {
     switch (lifetime) {
     case RenderResourceLifetime::transient:
@@ -502,6 +577,12 @@ std::string_view render_resource_state_name(RenderResourceState state) noexcept 
         return "color_attachment_write";
     case RenderResourceState::color_attachment_read_write:
         return "color_attachment_read_write";
+    case RenderResourceState::depth_attachment_write:
+        return "depth_attachment_write";
+    case RenderResourceState::transfer_source:
+        return "transfer_source";
+    case RenderResourceState::transfer_destination:
+        return "transfer_destination";
     case RenderResourceState::present:
         return "present";
     }

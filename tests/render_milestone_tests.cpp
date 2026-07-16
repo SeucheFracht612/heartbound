@@ -1,13 +1,16 @@
 #include "engine/math/matrix.hpp"
 #include "engine/renderer/render_camera.hpp"
+#include "engine/renderer/rhi/render_frame_plan.hpp"
 #include "engine/renderer/shaders/spirv_loader.hpp"
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
 
 #include <cassert>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <numbers>
+#include <span>
 
 namespace {
 
@@ -101,6 +104,99 @@ void test_spirv_validation() {
     assert(invalid.error().code == "renderer.invalid_spirv_magic");
 }
 
+void test_unified_headless_frame_submission() {
+    using namespace heartstead;
+    using namespace renderer::rhi;
+
+    auto device = create_render_device(RenderDeviceDesc{});
+    assert(device);
+    const auto material = core::PrototypeId::parse("base:materials/terrain_test");
+    assert(material);
+
+    RenderPipelineLayoutDesc layout;
+    layout.material_id = material.value();
+    layout.shader_template = {"base", "shaders/terrain_test.glsl"};
+    layout.push_constant_ranges.push_back(
+        {RenderShaderStageFlags::vertex, 0, sizeof(ChunkPushConstants)});
+    assert(device.value()->bind_pipeline_layout(layout));
+
+    constexpr std::array<std::uint32_t, 5> spirv_header{
+        0x07230203, 0x00010000, 0, 1, 0,
+    };
+    auto vertex_shader = device.value()->create_shader_module(
+        {RenderShaderStage::vertex, "headless_terrain_vertex"}, spirv_header);
+    auto fragment_shader = device.value()->create_shader_module(
+        {RenderShaderStage::fragment, "headless_terrain_fragment"}, spirv_header);
+    assert(vertex_shader);
+    assert(fragment_shader);
+
+    RenderGraphicsPipelineDesc pipeline_desc;
+    pipeline_desc.vertex_shader = vertex_shader.value().handle;
+    pipeline_desc.fragment_shader = fragment_shader.value().handle;
+    pipeline_desc.material_id = material.value();
+    pipeline_desc.vertex_stride = sizeof(renderer::terrain::GpuChunkVertex);
+    pipeline_desc.vertex_attributes.assign(renderer::terrain::gpu_chunk_vertex_attributes.begin(),
+                                           renderer::terrain::gpu_chunk_vertex_attributes.end());
+    auto pipeline = device.value()->create_graphics_pipeline(pipeline_desc);
+    assert(pipeline);
+
+    constexpr std::array<renderer::terrain::GpuChunkVertex, 3> vertices{};
+    constexpr std::array<std::uint32_t, 3> indices{0, 1, 2};
+    auto vertex_upload = device.value()->upload_buffer(
+        {RenderBufferUsage::vertex, sizeof(vertices), "headless_terrain_vertices"},
+        std::as_bytes(std::span(vertices)));
+    auto index_upload = device.value()->upload_buffer(
+        {RenderBufferUsage::index, sizeof(indices), "headless_terrain_indices"},
+        std::as_bytes(std::span(indices)));
+    assert(vertex_upload);
+    assert(index_upload);
+
+    RenderFramePlanBuilder builder({640, 360});
+    assert(builder.add_resource(
+        {"output", {640, 360}, RenderResourceLifetime::external,
+         RenderImageFormat::rgba8_unorm}));
+    assert(builder.add_resource(
+        {"depth", {640, 360}, RenderResourceLifetime::transient,
+         RenderImageFormat::d32_sfloat}));
+    assert(builder.add_pass({"world",
+                             RenderPassKind::world,
+                             {},
+                             {"output", "depth"},
+                             {0.05F, 0.1F, 0.2F, 1.0F},
+                             false}));
+    assert(builder.add_pass(
+        {"present", RenderPassKind::present, {"output"}, {}, {}, true}));
+    auto plan = builder.build();
+    assert(plan);
+
+    RenderFrameSubmission frame;
+    frame.plan = plan.value();
+    frame.camera.view_projection = math::Mat4f::identity();
+    frame.pass_commands.push_back(
+        {0,
+         {RenderDrawCommand{pipeline.value().handle,
+                            vertex_upload.value().handle,
+                            index_upload.value().handle,
+                            3,
+                            0,
+                            0,
+                            1,
+                            0,
+                            {32.0F, 0.0F, -32.0F}}}});
+
+    auto stats = device.value()->execute_frame(frame);
+    assert(stats);
+    assert(stats.value().draw_count == 1);
+    assert(stats.value().indexed_draw_count == 1);
+    assert(stats.value().total_indices == 3);
+    assert(stats.value().presented);
+
+    frame.pass_commands.front().draws.front().first_index = 1;
+    auto out_of_bounds = device.value()->execute_frame(frame);
+    assert(!out_of_bounds);
+    assert(out_of_bounds.error().code == "renderer.draw_index_range_out_of_bounds");
+}
+
 } // namespace
 
 int main() {
@@ -109,5 +205,6 @@ int main() {
     test_view_and_camera_resize();
     test_gpu_chunk_vertex_contract();
     test_spirv_validation();
+    test_unified_headless_frame_submission();
     return 0;
 }

@@ -76,6 +76,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
         result.supports_buffer_upload = true;
         result.supports_image_upload = true;
         result.supports_draw_binding = true;
+        result.supports_frame_submission = true;
+        result.supports_depth = true;
         result.headless = true;
         return result;
     }
@@ -112,7 +114,17 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
     [[nodiscard]] core::Result<RenderFrameStats>
     execute_frame_plan(const RenderFramePlan& plan) override {
-        auto execution_plan = plan.build_execution_plan();
+        return execute_frame(RenderFrameSubmission{plan, {}, {}});
+    }
+
+    [[nodiscard]] core::Result<RenderFrameStats>
+    execute_frame(const RenderFrameSubmission& frame) override {
+        auto shape_status = validate_render_frame_submission_shape(frame);
+        if (!shape_status) {
+            return core::Result<RenderFrameStats>::failure(shape_status.error().code,
+                                                           shape_status.error().message);
+        }
+        auto execution_plan = frame.plan.build_execution_plan();
         if (!execution_plan) {
             return core::Result<RenderFrameStats>::failure(execution_plan.error().code,
                                                            execution_plan.error().message);
@@ -122,8 +134,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.backend = backend();
         stats.frame_index = completed_frame_count_;
         stats.extent = execution_plan.value().extent;
-        stats.clear_color = plan.first_clear_color();
-        stats.presented = plan.has_present_pass();
+        stats.clear_color = frame.plan.first_clear_color();
+        stats.presented = frame.plan.has_present_pass();
         stats.render_pass_count = execution_plan.value().ordered_passes.size();
         stats.present_pass_count = execution_plan.value().present_pass_count;
         stats.resource_use_count = execution_plan.value().resource_uses.size();
@@ -131,6 +143,88 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.transition_count = execution_plan.value().transitions.size();
         stats.synchronization_barrier_count = execution_plan.value().transitions.size();
         stats.submitted_synchronization_barrier_count = execution_plan.value().transitions.size();
+
+        for (const auto& pass_commands : frame.pass_commands) {
+            const auto& pass = frame.plan.passes[pass_commands.pass_index];
+            for (const auto& draw : pass_commands.draws) {
+                const auto pipeline = graphics_pipelines_.find(draw.pipeline.value);
+                if (pipeline == graphics_pipelines_.end()) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.unknown_graphics_pipeline",
+                        "render draw references a graphics pipeline not owned by this device");
+                }
+                const auto vertex = resources_.find(draw.vertex_buffer.value);
+                if (vertex == resources_.end()) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.unknown_vertex_buffer",
+                        "render draw references a vertex buffer not owned by this device");
+                }
+                if (vertex->second.usage != RenderBufferUsage::vertex) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.invalid_vertex_buffer_usage",
+                        "render draw vertex buffer has non-vertex usage");
+                }
+                const auto index = resources_.find(draw.index_buffer.value);
+                if (index == resources_.end()) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.unknown_index_buffer",
+                        "render draw references an index buffer not owned by this device");
+                }
+                if (index->second.usage != RenderBufferUsage::index) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.invalid_index_buffer_usage",
+                        "render draw index buffer has non-index usage");
+                }
+                const auto available_indices = index->second.byte_size / sizeof(std::uint32_t);
+                const auto end_index = static_cast<std::size_t>(draw.first_index) +
+                                       static_cast<std::size_t>(draw.index_count);
+                if (end_index > available_indices) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.draw_index_range_out_of_bounds",
+                        "render draw index range exceeds its index buffer");
+                }
+
+                const auto layout = pipeline_layouts_.find(pipeline->second.material_id.value());
+                if (layout == pipeline_layouts_.end()) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.unbound_graphics_pipeline_layout",
+                        "render draw graphics pipeline layout is no longer bound");
+                }
+                const auto has_chunk_constants = std::ranges::any_of(
+                    layout->second.push_constant_ranges, [](const RenderPushConstantRange& range) {
+                        return any(range.stages & RenderShaderStageFlags::vertex) &&
+                               range.byte_offset == 0 &&
+                               range.byte_size >= sizeof(ChunkPushConstants);
+                    });
+                if (!has_chunk_constants) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.missing_chunk_push_constants",
+                        "render draw pipeline layout must expose 80 vertex push-constant bytes");
+                }
+
+                const auto has_color_target = std::ranges::any_of(
+                    pass.writes, [&frame, &pipeline](const std::string& resource_name) {
+                        const auto* resource = frame.plan.find_resource(resource_name);
+                        return resource != nullptr && !is_depth_format(resource->format) &&
+                               resource->format == pipeline->second.color_target_format;
+                    });
+                const auto has_depth_target = std::ranges::any_of(
+                    pass.writes, [&frame, &pipeline](const std::string& resource_name) {
+                        const auto* resource = frame.plan.find_resource(resource_name);
+                        return resource != nullptr && is_depth_format(resource->format) &&
+                               is_depth_format(pipeline->second.depth_target_format);
+                    });
+                if (!has_color_target || (pipeline->second.depth_test_enable && !has_depth_target)) {
+                    return core::Result<RenderFrameStats>::failure(
+                        "renderer.incompatible_draw_targets",
+                        "render draw pass targets do not match its graphics pipeline");
+                }
+
+                ++stats.draw_count;
+                ++stats.indexed_draw_count;
+                stats.total_indices += draw.index_count;
+            }
+        }
         ++completed_frame_count_;
         return core::Result<RenderFrameStats>::success(stats);
     }
@@ -219,7 +313,16 @@ class HeadlessRenderDevice final : public IRenderDevice {
                 return binding.kind == RenderDescriptorKind::sampled_texture;
             }));
         stats.uniform_count = desc.descriptors.size() - stats.sampled_texture_count;
+        stats.push_constant_range_count = desc.push_constant_ranges.size();
         stats.gpu_backed = false;
+
+        for (const auto& range : desc.push_constant_ranges) {
+            if (range.byte_offset > 128U || range.byte_size > 128U - range.byte_offset) {
+                return core::Result<RenderPipelineLayoutStats>::failure(
+                    "renderer.push_constants_exceed_device_limit",
+                    "headless device guarantees 128 push-constant bytes");
+            }
+        }
 
         destroy_compute_pipelines_for_material(desc.material_id);
         destroy_graphics_pipelines_for_material(desc.material_id);
@@ -730,6 +833,37 @@ core::Status validate_render_pipeline_layout_shape(const RenderPipelineLayoutDes
             break;
         }
     }
+
+    constexpr auto valid_stage_bits =
+        static_cast<std::uint32_t>(RenderShaderStageFlags::vertex) |
+        static_cast<std::uint32_t>(RenderShaderStageFlags::fragment) |
+        static_cast<std::uint32_t>(RenderShaderStageFlags::compute);
+    for (std::size_t range_index = 0; range_index < desc.push_constant_ranges.size();
+         ++range_index) {
+        const auto& range = desc.push_constant_ranges[range_index];
+        const auto stage_bits = static_cast<std::uint32_t>(range.stages);
+        if (stage_bits == 0 || (stage_bits & ~valid_stage_bits) != 0) {
+            return core::Status::failure("renderer.invalid_push_constant_stages",
+                                         "push-constant range shader stages are invalid");
+        }
+        if (range.byte_size == 0 || range.byte_offset % 4U != 0 || range.byte_size % 4U != 0 ||
+            range.byte_offset > std::numeric_limits<std::uint32_t>::max() - range.byte_size) {
+            return core::Status::failure(
+                "renderer.invalid_push_constant_range",
+                "push-constant range must be non-empty, aligned, and not overflow");
+        }
+        const auto range_end = range.byte_offset + range.byte_size;
+        for (std::size_t previous_index = 0; previous_index < range_index; ++previous_index) {
+            const auto& previous = desc.push_constant_ranges[previous_index];
+            const auto previous_end = previous.byte_offset + previous.byte_size;
+            const auto overlaps = range.byte_offset < previous_end && previous.byte_offset < range_end;
+            if (overlaps && any(range.stages & previous.stages)) {
+                return core::Status::failure(
+                    "renderer.overlapping_push_constant_stages",
+                    "overlapping push-constant ranges cannot share shader stages");
+            }
+        }
+    }
     return core::Status::ok();
 }
 
@@ -806,6 +940,48 @@ core::Status validate_render_graphics_pipeline_shape(const RenderGraphicsPipelin
                 "renderer.invalid_vertex_attribute",
                 "graphics vertex attributes require unique locations within the stride");
         }
+    }
+    switch (desc.topology) {
+    case RenderPrimitiveTopology::triangle_list:
+        break;
+    }
+    switch (desc.polygon_mode) {
+    case RenderPolygonMode::fill:
+    case RenderPolygonMode::line:
+        break;
+    }
+    switch (desc.cull_mode) {
+    case RenderCullMode::none:
+    case RenderCullMode::front:
+    case RenderCullMode::back:
+        break;
+    }
+    switch (desc.front_face) {
+    case RenderFrontFace::clockwise:
+    case RenderFrontFace::counter_clockwise:
+        break;
+    }
+    switch (desc.depth_compare) {
+    case RenderCompareOperation::never:
+    case RenderCompareOperation::less:
+    case RenderCompareOperation::less_or_equal:
+    case RenderCompareOperation::equal:
+    case RenderCompareOperation::greater:
+    case RenderCompareOperation::always:
+        break;
+    }
+    switch (desc.blend_mode) {
+    case RenderBlendMode::disabled:
+    case RenderBlendMode::alpha:
+        break;
+    }
+    if (is_depth_format(desc.color_target_format)) {
+        return core::Status::failure("renderer.invalid_color_target_format",
+                                     "graphics pipeline color target must use a color format");
+    }
+    if (!is_depth_format(desc.depth_target_format)) {
+        return core::Status::failure("renderer.invalid_depth_target_format",
+                                     "graphics pipeline depth target must use a depth format");
     }
     return core::Status::ok();
 }
@@ -906,6 +1082,8 @@ RenderBackendCapabilities render_backend_capabilities(RenderBackend backend) noe
         capabilities.supports_buffer_upload = true;
         capabilities.supports_image_upload = true;
         capabilities.supports_draw_binding = true;
+        capabilities.supports_frame_submission = true;
+        capabilities.supports_depth = true;
         capabilities.supports_headless = true;
         capabilities.recommended_frames_in_flight = 1;
         capabilities.graphics_api = "headless";
@@ -926,6 +1104,8 @@ RenderBackendCapabilities render_backend_capabilities(RenderBackend backend) noe
         capabilities.supports_buffer_upload = true;
         capabilities.supports_image_upload = true;
         capabilities.supports_draw_binding = true;
+        capabilities.supports_frame_submission = true;
+        capabilities.supports_depth = true;
         capabilities.requires_window_surface = true;
         capabilities.requires_gpu_device = true;
         capabilities.recommended_frames_in_flight = 2;
@@ -979,6 +1159,12 @@ std::string_view render_image_format_name(RenderImageFormat format) noexcept {
     switch (format) {
     case RenderImageFormat::rgba8_unorm:
         return "rgba8_unorm";
+    case RenderImageFormat::d32_sfloat:
+        return "d32_sfloat";
+    case RenderImageFormat::d32_sfloat_s8_uint:
+        return "d32_sfloat_s8_uint";
+    case RenderImageFormat::d24_unorm_s8_uint:
+        return "d24_unorm_s8_uint";
     }
     return "unknown";
 }
@@ -986,6 +1172,12 @@ std::string_view render_image_format_name(RenderImageFormat format) noexcept {
 std::size_t render_image_format_bytes_per_pixel(RenderImageFormat format) noexcept {
     switch (format) {
     case RenderImageFormat::rgba8_unorm:
+        return 4;
+    case RenderImageFormat::d32_sfloat:
+        return 4;
+    case RenderImageFormat::d32_sfloat_s8_uint:
+        return 8;
+    case RenderImageFormat::d24_unorm_s8_uint:
         return 4;
     }
     return 0;
@@ -1013,6 +1205,86 @@ std::string_view render_shader_stage_name(RenderShaderStage stage) noexcept {
         return "compute";
     }
     return "unknown";
+}
+
+std::string_view render_primitive_topology_name(RenderPrimitiveTopology value) noexcept {
+    switch (value) {
+    case RenderPrimitiveTopology::triangle_list:
+        return "triangle_list";
+    }
+    return "unknown";
+}
+
+std::string_view render_polygon_mode_name(RenderPolygonMode value) noexcept {
+    switch (value) {
+    case RenderPolygonMode::fill:
+        return "fill";
+    case RenderPolygonMode::line:
+        return "line";
+    }
+    return "unknown";
+}
+
+std::string_view render_cull_mode_name(RenderCullMode value) noexcept {
+    switch (value) {
+    case RenderCullMode::none:
+        return "none";
+    case RenderCullMode::front:
+        return "front";
+    case RenderCullMode::back:
+        return "back";
+    }
+    return "unknown";
+}
+
+std::string_view render_front_face_name(RenderFrontFace value) noexcept {
+    switch (value) {
+    case RenderFrontFace::clockwise:
+        return "clockwise";
+    case RenderFrontFace::counter_clockwise:
+        return "counter_clockwise";
+    }
+    return "unknown";
+}
+
+std::string_view render_compare_operation_name(RenderCompareOperation value) noexcept {
+    switch (value) {
+    case RenderCompareOperation::never:
+        return "never";
+    case RenderCompareOperation::less:
+        return "less";
+    case RenderCompareOperation::less_or_equal:
+        return "less_or_equal";
+    case RenderCompareOperation::equal:
+        return "equal";
+    case RenderCompareOperation::greater:
+        return "greater";
+    case RenderCompareOperation::always:
+        return "always";
+    }
+    return "unknown";
+}
+
+std::string_view render_blend_mode_name(RenderBlendMode value) noexcept {
+    switch (value) {
+    case RenderBlendMode::disabled:
+        return "disabled";
+    case RenderBlendMode::alpha:
+        return "alpha";
+    }
+    return "unknown";
+}
+
+bool is_depth_format(RenderImageFormat format) noexcept {
+    switch (format) {
+    case RenderImageFormat::rgba8_unorm:
+        return false;
+    case RenderImageFormat::d32_sfloat:
+    case RenderImageFormat::d32_sfloat_s8_uint:
+    case RenderImageFormat::d24_unorm_s8_uint:
+        return true;
+    }
+    return false;
 }
 
 } // namespace heartstead::renderer::rhi

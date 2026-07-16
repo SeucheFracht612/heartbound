@@ -576,6 +576,12 @@ find_required_memory_type(VkPhysicalDevice physical_device, std::uint32_t type_b
     switch (format) {
     case rhi::RenderImageFormat::rgba8_unorm:
         return VK_FORMAT_R8G8B8A8_UNORM;
+    case rhi::RenderImageFormat::d32_sfloat:
+        return VK_FORMAT_D32_SFLOAT;
+    case rhi::RenderImageFormat::d32_sfloat_s8_uint:
+        return VK_FORMAT_D32_SFLOAT_S8_UINT;
+    case rhi::RenderImageFormat::d24_unorm_s8_uint:
+        return VK_FORMAT_D24_UNORM_S8_UINT;
     }
     return VK_FORMAT_UNDEFINED;
 }
@@ -698,6 +704,26 @@ vulkan_sync_for_resource_state(rhi::RenderResourceState state) noexcept {
             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        };
+    case rhi::RenderResourceState::depth_attachment_write:
+        return VulkanResourceStateSync{
+            VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+        };
+    case rhi::RenderResourceState::transfer_source:
+        return VulkanResourceStateSync{
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+        };
+    case rhi::RenderResourceState::transfer_destination:
+        return VulkanResourceStateSync{
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
         };
     case rhi::RenderResourceState::present:
         return VulkanResourceStateSync{
@@ -1096,6 +1122,21 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.submitted_synchronization_barrier_count = submitted_barriers.value();
         ++completed_frame_count_;
         return core::Result<rhi::RenderFrameStats>::success(stats);
+    }
+
+    [[nodiscard]] core::Result<rhi::RenderFrameStats>
+    execute_frame(const rhi::RenderFrameSubmission& frame) override {
+        auto status = rhi::validate_render_frame_submission_shape(frame);
+        if (!status) {
+            return core::Result<rhi::RenderFrameStats>::failure(status.error().code,
+                                                                status.error().message);
+        }
+        if (!frame.pass_commands.empty()) {
+            return core::Result<rhi::RenderFrameStats>::failure(
+                "renderer.vulkan_frame_submission_pending",
+                "Vulkan unified draw submission is not initialized");
+        }
+        return execute_frame_plan(frame.plan);
     }
 
     [[nodiscard]] core::Result<rhi::RenderUploadStats>

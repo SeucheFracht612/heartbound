@@ -37,6 +37,9 @@ enum class RenderResourceState {
     shader_read,
     color_attachment_write,
     color_attachment_read_write,
+    depth_attachment_write,
+    transfer_source,
+    transfer_destination,
     present,
 };
 
@@ -44,6 +47,7 @@ struct RenderResourceDesc {
     std::string name;
     RenderExtent extent{};
     RenderResourceLifetime lifetime = RenderResourceLifetime::transient;
+    RenderImageFormat format = RenderImageFormat::rgba8_unorm;
 };
 
 struct RenderPassDesc {
@@ -108,6 +112,31 @@ struct RenderFramePlan {
     [[nodiscard]] ClearColor first_clear_color() const noexcept;
 };
 
+struct RenderDrawCommand {
+    RenderResourceHandle pipeline;
+    RenderResourceHandle vertex_buffer;
+    RenderResourceHandle index_buffer;
+
+    std::uint32_t index_count = 0;
+    std::uint32_t first_index = 0;
+    std::int32_t vertex_offset = 0;
+    std::uint32_t instance_count = 1;
+    std::uint32_t first_instance = 0;
+
+    math::Vec3f camera_relative_origin{};
+};
+
+struct RenderPassCommands {
+    std::size_t pass_index = 0;
+    std::vector<RenderDrawCommand> draws;
+};
+
+struct RenderFrameSubmission {
+    RenderFramePlan plan;
+    RenderCameraData camera;
+    std::vector<RenderPassCommands> pass_commands;
+};
+
 class RenderFramePlanBuilder {
   public:
     explicit RenderFramePlanBuilder(RenderExtent extent);
@@ -122,6 +151,8 @@ class RenderFramePlanBuilder {
 
 [[nodiscard]] RenderFramePlan make_clear_present_frame_plan(RenderExtent extent,
                                                             ClearColor clear_color, bool present);
+[[nodiscard]] core::Status validate_render_frame_submission_shape(
+    const RenderFrameSubmission& frame);
 
 [[nodiscard]] std::string_view
 render_resource_lifetime_name(RenderResourceLifetime lifetime) noexcept;
