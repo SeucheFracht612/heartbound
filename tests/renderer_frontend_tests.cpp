@@ -259,6 +259,11 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     assert(device.value()->live_resource_count() == baseline_resources + 2);
     assert(chunks.stats().pending_mesh_count == 0);
     assert(chunks.stats().pending_upload_count == 0);
+    assert(chunks.stats().pooled_cpu_mesh_buffers > 0);
+    assert(chunks.stats().pooled_cpu_mesh_vertex_capacity > 0);
+    assert(chunks.stats().pooled_cpu_mesh_index_capacity > 0);
+    assert(chunks.stats().pooled_gpu_vertex_buffers > 0);
+    assert(chunks.stats().pooled_gpu_vertex_capacity > 0);
 
     auto draws = chunks.build_draw_list(camera);
     assert(draws.visible_chunk_count == 2);

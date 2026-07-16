@@ -13,6 +13,9 @@ class GreedyChunkMesher {
     [[nodiscard]] static core::Result<ChunkMesh>
     build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborhood,
                        const BlockRenderTableSnapshot& render_table);
+    [[nodiscard]] static core::Result<ChunkMesh>
+    build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborhood,
+                       const BlockRenderTableSnapshot& render_table, ChunkMesh reusable_mesh);
 };
 
 } // namespace heartstead::world

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace heartstead::renderer::terrain {
 
@@ -44,7 +45,14 @@ GpuTerrainVertex to_gpu_chunk_vertex(const world::ChunkMeshVertex& vertex,
 
 std::vector<GpuTerrainVertex>
 make_gpu_chunk_vertices(const std::vector<world::ChunkMeshVertex>& vertices) {
-    std::vector<GpuTerrainVertex> result;
+    return make_gpu_chunk_vertices(vertices, {});
+}
+
+std::vector<GpuTerrainVertex>
+make_gpu_chunk_vertices(const std::vector<world::ChunkMeshVertex>& vertices,
+                        std::vector<GpuTerrainVertex> reusable_vertices) {
+    auto result = std::move(reusable_vertices);
+    result.clear();
     result.reserve(vertices.size());
     for (std::size_t index = 0; index < vertices.size(); ++index) {
         result.push_back(

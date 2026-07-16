@@ -417,14 +417,17 @@ core::Status ChunkMesh::finalize_sections() {
                                      "chunk mesh sections do not cover the complete index buffer");
     }
 
-    std::ranges::stable_sort(sections,
-                             [](const ChunkMeshSection& left, const ChunkMeshSection& right) {
-                                 if (left.render_phase != right.render_phase) {
-                                     return static_cast<std::uint8_t>(left.render_phase) <
-                                            static_cast<std::uint8_t>(right.render_phase);
-                                 }
-                                 return left.material_index < right.material_index;
-                             });
+    const auto section_less = [](const ChunkMeshSection& left, const ChunkMeshSection& right) {
+        if (left.render_phase != right.render_phase) {
+            return static_cast<std::uint8_t>(left.render_phase) <
+                   static_cast<std::uint8_t>(right.render_phase);
+        }
+        return left.material_index < right.material_index;
+    };
+    if (std::ranges::is_sorted(sections, section_less)) {
+        return core::Status::ok();
+    }
+    std::ranges::stable_sort(sections, section_less);
     std::vector<std::uint32_t> grouped_indices;
     grouped_indices.reserve(indices.size());
     std::vector<ChunkMeshSection> grouped_sections;

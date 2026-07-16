@@ -213,6 +213,13 @@ validate_and_count_cube_cells(const ChunkNeighborhoodSnapshot& neighborhood,
 core::Result<ChunkMesh>
 GreedyChunkMesher::build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborhood,
                                       const BlockRenderTableSnapshot& render_table) {
+    return build_surface_mesh(neighborhood, render_table, {});
+}
+
+core::Result<ChunkMesh>
+GreedyChunkMesher::build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborhood,
+                                      const BlockRenderTableSnapshot& render_table,
+                                      ChunkMesh reusable_mesh) {
     auto status = neighborhood.validate();
     if (!status) {
         return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
@@ -232,7 +239,13 @@ GreedyChunkMesher::build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborh
         return ChunkMesher::build_surface_mesh(neighborhood, render_table);
     }
 
-    ChunkMesh mesh;
+    ChunkMesh mesh = std::move(reusable_mesh);
+    mesh.vertices.clear();
+    mesh.indices.clear();
+    mesh.sections.clear();
+    mesh.rich_instances.clear();
+    mesh.local_bounds = {};
+    mesh.face_count = 0;
     mesh.chunk_coord = neighborhood.center_identity.coordinate;
     mesh.provided_halo_radius = neighborhood.halo_radius;
     mesh.required_halo_radius = neighborhood.halo_radius;

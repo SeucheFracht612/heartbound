@@ -48,32 +48,30 @@ struct Options {
 }
 
 void print_usage() {
-    std::cout
-        << "Usage: heartstead_render_benchmark [options]\n"
-           "  --scene NAME       flat, mountains, caves, checkerboard, forest, rapid-edits,\n"
-           "                     flythrough, churn, large-coordinates, resize-minimize\n"
-           "  --vulkan           Use a native Vulkan window (headless is the default)\n"
-           "  --headless         Use the deterministic validation backend\n"
-           "  --frames N         Measured frames (default 300)\n"
-           "  --warmup N         Unrecorded warm-up frames (default 60)\n"
-           "  --radius N         Horizontal chunk radius, 0..8 (default 1)\n"
-           "  --seed N           Deterministic unsigned 64-bit scene seed\n"
-           "  --frame-cap N      Sleep to cap at N FPS; 0 is uncapped (default)\n"
-           "  --output PATH      Result path (default benchmark-SCENE.json)\n"
-           "  --format json|csv  Result serialization format\n"
-           "  --no-validation    Do not request Vulkan validation\n"
-           "  --list-scenes      Print scene names\n"
-           "  --help             Print this help\n";
+    std::cout << "Usage: heartstead_render_benchmark [options]\n"
+                 "  --scene NAME       flat, mountains, caves, checkerboard, forest, rapid-edits,\n"
+                 "                     flythrough, churn, large-coordinates, resize-minimize\n"
+                 "  --vulkan           Use a native Vulkan window (headless is the default)\n"
+                 "  --headless         Use the deterministic validation backend\n"
+                 "  --frames N         Measured frames (default 300)\n"
+                 "  --warmup N         Unrecorded warm-up frames (default 60)\n"
+                 "  --radius N         Horizontal chunk radius, 0..8 (default 1)\n"
+                 "  --seed N           Deterministic unsigned 64-bit scene seed\n"
+                 "  --frame-cap N      Sleep to cap at N FPS; 0 is uncapped (default)\n"
+                 "  --output PATH      Result path (default benchmark-SCENE.json)\n"
+                 "  --format json|csv  Result serialization format\n"
+                 "  --no-validation    Do not request Vulkan validation\n"
+                 "  --list-scenes      Print scene names\n"
+                 "  --help             Print this help\n";
 }
 
 void print_scenes() {
     using Kind = renderer::benchmark::BenchmarkSceneKind;
     constexpr Kind kinds[]{
-        Kind::flat_terrain,          Kind::mountainous_terrain,
-        Kind::dense_caves,           Kind::checkerboard_geometry,
-        Kind::forest_cross_planes,   Kind::rapid_voxel_edits,
-        Kind::high_speed_flythrough, Kind::chunk_load_unload_churn,
-        Kind::large_coordinates,     Kind::resize_minimize_stress,
+        Kind::flat_terrain,           Kind::mountainous_terrain,     Kind::dense_caves,
+        Kind::checkerboard_geometry,  Kind::forest_cross_planes,     Kind::rapid_voxel_edits,
+        Kind::high_speed_flythrough,  Kind::chunk_load_unload_churn, Kind::large_coordinates,
+        Kind::resize_minimize_stress,
     };
     for (const auto kind : kinds) {
         std::cout << renderer::benchmark::benchmark_scene_name(kind) << '\n';
@@ -124,9 +122,9 @@ template <typename Integer>
             }
             const auto scene = renderer::benchmark::parse_benchmark_scene(value.value());
             if (!scene) {
-                return core::Result<Options>::failure(
-                    "renderer.benchmark_unknown_scene",
-                    "unknown benchmark scene: " + std::string(value.value()));
+                return core::Result<Options>::failure("renderer.benchmark_unknown_scene",
+                                                      "unknown benchmark scene: " +
+                                                          std::string(value.value()));
             }
             options.scene = *scene;
         } else if (argument == "--frames" || argument == "--warmup" || argument == "--seed" ||
@@ -138,29 +136,29 @@ template <typename Integer>
             if (argument == "--frames") {
                 const auto parsed = parse_unsigned<std::uint64_t>(value.value());
                 if (!parsed || *parsed == 0) {
-                    return core::Result<Options>::failure(
-                        "renderer.benchmark_invalid_frames", "--frames must be greater than zero");
+                    return core::Result<Options>::failure("renderer.benchmark_invalid_frames",
+                                                          "--frames must be greater than zero");
                 }
                 options.measured_frames = *parsed;
             } else if (argument == "--warmup") {
                 const auto parsed = parse_unsigned<std::uint64_t>(value.value());
                 if (!parsed) {
-                    return core::Result<Options>::failure(
-                        "renderer.benchmark_invalid_warmup", "--warmup must be an unsigned integer");
+                    return core::Result<Options>::failure("renderer.benchmark_invalid_warmup",
+                                                          "--warmup must be an unsigned integer");
                 }
                 options.warmup_frames = *parsed;
             } else if (argument == "--seed") {
                 const auto parsed = parse_unsigned<std::uint64_t>(value.value());
                 if (!parsed) {
-                    return core::Result<Options>::failure(
-                        "renderer.benchmark_invalid_seed", "--seed must be an unsigned integer");
+                    return core::Result<Options>::failure("renderer.benchmark_invalid_seed",
+                                                          "--seed must be an unsigned integer");
                 }
                 options.seed = *parsed;
             } else if (argument == "--radius") {
                 const auto parsed = parse_unsigned<std::uint32_t>(value.value());
                 if (!parsed || *parsed > 8) {
-                    return core::Result<Options>::failure(
-                        "renderer.benchmark_invalid_radius", "--radius must be in the range 0..8");
+                    return core::Result<Options>::failure("renderer.benchmark_invalid_radius",
+                                                          "--radius must be in the range 0..8");
                 }
                 options.chunk_radius = *parsed;
             } else {
@@ -188,12 +186,12 @@ template <typename Integer>
             } else if (value.value() == "csv") {
                 options.format = OutputFormat::csv;
             } else {
-                return core::Result<Options>::failure(
-                    "renderer.benchmark_invalid_format", "--format must be json or csv");
+                return core::Result<Options>::failure("renderer.benchmark_invalid_format",
+                                                      "--format must be json or csv");
             }
         } else {
-            return core::Result<Options>::failure(
-                "renderer.benchmark_unknown_option", "unknown option: " + std::string(argument));
+            return core::Result<Options>::failure("renderer.benchmark_unknown_option",
+                                                  "unknown option: " + std::string(argument));
         }
     }
     if (options.output.empty()) {
@@ -209,8 +207,7 @@ struct NativeWindow {
     platform::WindowId id;
 };
 
-[[nodiscard]] core::Result<NativeWindow>
-create_native_window(renderer::rhi::RenderExtent extent) {
+[[nodiscard]] core::Result<NativeWindow> create_native_window(renderer::rhi::RenderExtent extent) {
     auto active_platform = platform::create_platform({platform::PlatformBackend::native});
     if (!active_platform) {
         return core::Result<NativeWindow>::failure(active_platform.error().code,
@@ -225,8 +222,7 @@ create_native_window(renderer::rhi::RenderExtent extent) {
         NativeWindow{std::move(active_platform).value(), window.value()});
 }
 
-[[nodiscard]] bool pump_native_events(NativeWindow& window,
-                                      renderer::Renderer& active_renderer,
+[[nodiscard]] bool pump_native_events(NativeWindow& window, renderer::Renderer& active_renderer,
                                       renderer::RenderCamera& camera) {
     window.platform->begin_frame();
     while (auto event = window.platform->poll_event()) {
@@ -324,16 +320,45 @@ int main(int argc, char** argv) {
         return fail(status.error().message);
     }
 
-    const auto scene_name =
-        std::string(renderer::benchmark::benchmark_scene_name(options.scene));
+    const auto initial_chunk_count = scene.value()->world().chunks().identities().size();
+    std::size_t settlement_frames = 0;
+    constexpr std::size_t maximum_settlement_frames = 10'000;
+    for (; settlement_frames < maximum_settlement_frames; ++settlement_frames) {
+        if (native_window &&
+            !pump_native_events(*native_window, active_renderer, scene.value()->camera())) {
+            return fail("benchmark window closed during initial renderer settlement");
+        }
+        status =
+            active_renderer.synchronize_chunks(scene.value()->world(), scene.value()->camera());
+        if (!status) {
+            return fail(status.error().message);
+        }
+        auto frame = active_renderer.render(scene.value()->camera());
+        if (!frame) {
+            return fail(frame.error().message);
+        }
+        const auto& chunks = active_renderer.chunk_stats();
+        if (chunks.cache.resident_chunk_count == initial_chunk_count &&
+            chunks.pending_mesh_count == 0 && chunks.pending_upload_count == 0) {
+            ++settlement_frames;
+            break;
+        }
+        std::this_thread::yield();
+    }
+    if (settlement_frames == maximum_settlement_frames) {
+        return fail(
+            "initial benchmark chunks did not become resident within the settlement budget");
+    }
+
+    const auto scene_name = std::string(renderer::benchmark::benchmark_scene_name(options.scene));
     renderer::benchmark::BenchmarkRecorder recorder(scene_name, options.seed);
-    core::log(core::LogLevel::info,
-              "Benchmark " + scene_name + " starting: " +
-                  std::to_string(options.warmup_frames) + " warm-up, " +
-                  std::to_string(options.measured_frames) + " measured, " +
-                  (options.frame_cap == 0 ? "uncapped" : std::to_string(options.frame_cap) + " FPS") +
-                  ", backend=" +
-                  std::string(renderer::rhi::render_backend_name(options.backend)));
+    core::log(
+        core::LogLevel::info,
+        "Benchmark " + scene_name + " starting: " + std::to_string(options.warmup_frames) +
+            " warm-up, " + std::to_string(options.measured_frames) + " measured, " +
+            (options.frame_cap == 0 ? "uncapped" : std::to_string(options.frame_cap) + " FPS") +
+            ", backend=" + std::string(renderer::rhi::render_backend_name(options.backend)) +
+            ", settled=" + std::to_string(settlement_frames) + " frames");
 
     std::uint64_t simulation_frame = 0;
     std::uint64_t rendered_frames = 0;
@@ -355,15 +380,15 @@ int main(int argc, char** argv) {
             if (!status) {
                 return fail(status.error().message);
             }
-            status = scene.value()->camera().set_aspect_ratio(
-                static_cast<float>(extent.width) / static_cast<float>(extent.height));
+            status = scene.value()->camera().set_aspect_ratio(static_cast<float>(extent.width) /
+                                                              static_cast<float>(extent.height));
             if (!status) {
                 return fail(status.error().message);
             }
         }
         if (!step.value().skip_render) {
-            status = active_renderer.synchronize_chunks(scene.value()->world(),
-                                                        scene.value()->camera());
+            status =
+                active_renderer.synchronize_chunks(scene.value()->world(), scene.value()->camera());
             if (!status) {
                 return fail(status.error().message);
             }
@@ -384,9 +409,9 @@ int main(int argc, char** argv) {
         if (options.frame_cap != 0) {
             const auto frame_duration =
                 std::chrono::duration<double>(1.0 / static_cast<double>(options.frame_cap));
-            std::this_thread::sleep_until(frame_started +
-                                          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                                              frame_duration));
+            std::this_thread::sleep_until(
+                frame_started +
+                std::chrono::duration_cast<std::chrono::steady_clock::duration>(frame_duration));
         }
     }
 
@@ -402,7 +427,7 @@ int main(int argc, char** argv) {
     }
 
     status = options.format == OutputFormat::json ? recorder.write_json(options.output)
-                                                   : recorder.write_csv(options.output);
+                                                  : recorder.write_csv(options.output);
     if (!status) {
         return fail(status.error().message);
     }

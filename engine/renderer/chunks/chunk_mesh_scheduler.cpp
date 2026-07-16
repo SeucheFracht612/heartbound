@@ -14,8 +14,9 @@
 namespace heartstead::renderer {
 
 struct ChunkMeshScheduler::SharedState {
-    explicit SharedState(std::size_t maximum_cached_buffers)
-        : max_cached_buffers(maximum_cached_buffers) {}
+    SharedState(std::size_t maximum_cached_cell_buffers, std::size_t maximum_cached_mesh_buffers)
+        : max_cached_cell_buffers(maximum_cached_cell_buffers),
+          max_cached_mesh_buffers(maximum_cached_mesh_buffers) {}
 
     [[nodiscard]] std::vector<world::VoxelCell> acquire_cells(std::size_t minimum_capacity) {
         std::lock_guard lock(pool_mutex);
@@ -39,8 +40,29 @@ struct ChunkMeshScheduler::SharedState {
     void release_cells(std::vector<world::VoxelCell> cells) {
         cells.clear();
         std::lock_guard lock(pool_mutex);
-        if (cell_pool.size() < max_cached_buffers) {
+        if (cell_pool.size() < max_cached_cell_buffers) {
             cell_pool.push_back(std::move(cells));
+        }
+    }
+
+    [[nodiscard]] world::ChunkMesh acquire_mesh() {
+        std::lock_guard lock(pool_mutex);
+        if (mesh_pool.empty()) {
+            return {};
+        }
+        auto result = std::move(mesh_pool.back());
+        mesh_pool.pop_back();
+        return result;
+    }
+
+    void release_mesh(world::ChunkMesh mesh) {
+        mesh.vertices.clear();
+        mesh.indices.clear();
+        mesh.sections.clear();
+        mesh.rich_instances.clear();
+        std::lock_guard lock(pool_mutex);
+        if (mesh_pool.size() < max_cached_mesh_buffers) {
+            mesh_pool.push_back(std::move(mesh));
         }
     }
 
@@ -66,18 +88,36 @@ struct ChunkMeshScheduler::SharedState {
         return mailbox.size();
     }
 
-    [[nodiscard]] std::pair<std::size_t, std::size_t> pool_stats() const noexcept {
+    struct PoolStats {
+        std::size_t cell_buffers = 0;
+        std::size_t cell_capacity = 0;
+        std::size_t mesh_buffers = 0;
+        std::size_t mesh_vertex_capacity = 0;
+        std::size_t mesh_index_capacity = 0;
+        std::size_t mesh_section_capacity = 0;
+    };
+
+    [[nodiscard]] PoolStats pool_stats() const noexcept {
         std::lock_guard lock(pool_mutex);
-        std::size_t capacity = 0;
+        PoolStats result;
+        result.cell_buffers = cell_pool.size();
         for (const auto& cells : cell_pool) {
-            capacity += cells.capacity();
+            result.cell_capacity += cells.capacity();
         }
-        return {cell_pool.size(), capacity};
+        result.mesh_buffers = mesh_pool.size();
+        for (const auto& mesh : mesh_pool) {
+            result.mesh_vertex_capacity += mesh.vertices.capacity();
+            result.mesh_index_capacity += mesh.indices.capacity();
+            result.mesh_section_capacity += mesh.sections.capacity();
+        }
+        return result;
     }
 
-    std::size_t max_cached_buffers = 0;
+    std::size_t max_cached_cell_buffers = 0;
+    std::size_t max_cached_mesh_buffers = 0;
     mutable std::mutex pool_mutex;
     std::vector<std::vector<world::VoxelCell>> cell_pool;
+    std::vector<world::ChunkMesh> mesh_pool;
     mutable std::mutex mailbox_mutex;
     std::deque<ChunkMeshResult> mailbox;
 };
@@ -98,7 +138,7 @@ namespace {
 
 core::Status ChunkMeshSchedulerConfig::validate() const {
     if (worker_count == 0 || max_concurrent_jobs == 0 || max_completed_results == 0 ||
-        max_cached_snapshot_buffers == 0) {
+        max_cached_snapshot_buffers == 0 || max_cached_mesh_buffers == 0) {
         return core::Status::failure(
             "renderer.invalid_chunk_mesh_scheduler_config",
             "chunk mesh scheduler limits and worker count must be nonzero");
@@ -129,7 +169,8 @@ ChunkMeshScheduler::create(ChunkMeshSchedulerConfig config) {
         return core::Result<std::unique_ptr<ChunkMeshScheduler>>::failure(
             job_system.error().code, job_system.error().message);
     }
-    auto shared_state = std::make_shared<SharedState>(config.max_cached_snapshot_buffers);
+    auto shared_state = std::make_shared<SharedState>(config.max_cached_snapshot_buffers,
+                                                      config.max_cached_mesh_buffers);
     return core::Result<std::unique_ptr<ChunkMeshScheduler>>::success(
         std::unique_ptr<ChunkMeshScheduler>(new ChunkMeshScheduler(
             config, std::move(job_system).value(), std::move(shared_state))));
@@ -206,8 +247,9 @@ core::Status ChunkMeshScheduler::submit(ChunkMeshRequest request) {
 
         const auto started = std::chrono::steady_clock::now();
         try {
-            auto mesh = world::GreedyChunkMesher::build_surface_mesh(request.neighborhood,
-                                                                     *request.render_table);
+            auto reusable_mesh = shared_state->acquire_mesh();
+            auto mesh = world::GreedyChunkMesher::build_surface_mesh(
+                request.neighborhood, *request.render_table, std::move(reusable_mesh));
             result.meshing_ms = std::chrono::duration<double, std::milli>(
                                     std::chrono::steady_clock::now() - started)
                                     .count();
@@ -270,6 +312,11 @@ std::vector<ChunkMeshResult> ChunkMeshScheduler::drain_completed(std::size_t max
     return results;
 }
 
+void ChunkMeshScheduler::recycle_mesh(world::ChunkMesh mesh) noexcept {
+    shared_state_->release_mesh(std::move(mesh));
+    refresh_stats();
+}
+
 void ChunkMeshScheduler::cancel(world::ChunkIdentity identity) noexcept {
     const auto active = active_jobs_.find(identity);
     if (active != active_jobs_.end()) {
@@ -319,9 +366,13 @@ const ChunkMeshSchedulerStats& ChunkMeshScheduler::stats() noexcept {
 void ChunkMeshScheduler::refresh_stats() noexcept {
     stats_.in_flight_jobs = active_jobs_.size();
     stats_.completed_mailbox_count = shared_state_->mailbox_size();
-    const auto [buffers, cells] = shared_state_->pool_stats();
-    stats_.pooled_snapshot_buffers = buffers;
-    stats_.pooled_snapshot_capacity_cells = cells;
+    const auto pool = shared_state_->pool_stats();
+    stats_.pooled_snapshot_buffers = pool.cell_buffers;
+    stats_.pooled_snapshot_capacity_cells = pool.cell_capacity;
+    stats_.pooled_mesh_buffers = pool.mesh_buffers;
+    stats_.pooled_mesh_vertex_capacity = pool.mesh_vertex_capacity;
+    stats_.pooled_mesh_index_capacity = pool.mesh_index_capacity;
+    stats_.pooled_mesh_section_capacity = pool.mesh_section_capacity;
 }
 
 } // namespace heartstead::renderer

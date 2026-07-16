@@ -57,6 +57,7 @@ struct ChunkMeshSchedulerConfig {
     std::size_t max_concurrent_jobs = 4;
     std::size_t max_completed_results = 256;
     std::size_t max_cached_snapshot_buffers = 8;
+    std::size_t max_cached_mesh_buffers = 8;
 
     [[nodiscard]] core::Status validate() const;
 };
@@ -66,6 +67,10 @@ struct ChunkMeshSchedulerStats {
     std::size_t completed_mailbox_count = 0;
     std::size_t pooled_snapshot_buffers = 0;
     std::size_t pooled_snapshot_capacity_cells = 0;
+    std::size_t pooled_mesh_buffers = 0;
+    std::size_t pooled_mesh_vertex_capacity = 0;
+    std::size_t pooled_mesh_index_capacity = 0;
+    std::size_t pooled_mesh_section_capacity = 0;
     std::uint64_t submitted_jobs = 0;
     std::uint64_t completed_jobs = 0;
     std::uint64_t cancelled_jobs = 0;
@@ -87,6 +92,7 @@ class ChunkMeshScheduler {
     [[nodiscard]] core::Status submit(ChunkMeshRequest request);
     [[nodiscard]] std::vector<ChunkMeshResult>
     drain_completed(std::size_t maximum_results = static_cast<std::size_t>(-1));
+    void recycle_mesh(world::ChunkMesh mesh) noexcept;
 
     void cancel(world::ChunkIdentity identity) noexcept;
     void cancel_all() noexcept;

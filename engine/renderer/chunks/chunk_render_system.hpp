@@ -27,6 +27,7 @@ struct ChunkRenderConfig {
     std::uint32_t mesh_worker_count = 2;
     std::size_t max_concurrent_mesh_jobs = 4;
     std::size_t max_cached_snapshot_buffers = 8;
+    std::size_t max_cached_mesh_buffers = 8;
 
     [[nodiscard]] core::Status validate() const;
 };
@@ -47,6 +48,11 @@ struct ChunkRenderStats {
     std::size_t stale_mesh_result_count = 0;
     std::size_t in_flight_mesh_count = 0;
     std::size_t snapshot_cells_copied = 0;
+    std::size_t pooled_cpu_mesh_buffers = 0;
+    std::size_t pooled_cpu_mesh_vertex_capacity = 0;
+    std::size_t pooled_cpu_mesh_index_capacity = 0;
+    std::size_t pooled_gpu_vertex_buffers = 0;
+    std::size_t pooled_gpu_vertex_capacity = 0;
 
     std::size_t visible_chunk_count = 0;
     std::size_t culled_chunk_count = 0;
@@ -115,10 +121,8 @@ class ChunkRenderSystem {
         std::uint64_t content_revision = 0;
         std::uint64_t render_table_revision = 0;
         std::vector<world::ChunkDependencyRevision> dependency_revisions;
-        math::Bounds3f local_bounds{};
         std::vector<terrain::GpuChunkVertex> vertices;
-        std::vector<std::uint32_t> indices;
-        std::vector<world::ChunkMeshSection> sections;
+        world::ChunkMesh mesh;
         bool forced = false;
         std::uint64_t sequence = 0;
 
@@ -141,6 +145,9 @@ class ChunkRenderSystem {
                                                  const world::WorldState& world) const;
     void prioritize_mesh_queue(const world::WorldState& world, const RenderCamera& camera);
     void prioritize_upload_queue(const RenderCamera& camera);
+    [[nodiscard]] std::vector<terrain::GpuChunkVertex>
+    acquire_gpu_vertices(std::size_t minimum_capacity);
+    void recycle_upload_storage(PendingUpload& upload) noexcept;
     [[nodiscard]] bool is_visible(world::ChunkCoord coord, math::Bounds3f local_bounds,
                                   const RenderCamera& camera) const;
     [[nodiscard]] float distance_squared(world::ChunkCoord coord, math::Bounds3f local_bounds,
@@ -156,6 +163,7 @@ class ChunkRenderSystem {
     ChunkRenderConfig config_{};
     std::vector<PendingMesh> pending_meshes_;
     std::vector<PendingUpload> pending_uploads_;
+    std::vector<std::vector<terrain::GpuChunkVertex>> gpu_vertex_pool_;
     std::vector<VisibleChunk> visible_chunks_scratch_;
     std::unique_ptr<ChunkMeshScheduler> mesh_scheduler_;
     std::shared_ptr<const world::BlockRenderTableSnapshot> render_table_;

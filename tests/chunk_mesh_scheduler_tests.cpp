@@ -113,6 +113,25 @@ void test_scheduler_coalesces_and_cancels_queued_work() {
     assert(scheduler->stats().cancelled_jobs == 1);
     assert(scheduler->stats().pooled_snapshot_buffers > 0);
     assert(!scheduler->has_in_flight(cancelled.identity()));
+
+    const auto completed_mesh =
+        std::ranges::find(results, expensive.identity(), &ChunkMeshResult::identity);
+    assert(completed_mesh != results.end());
+    assert(completed_mesh->mesh.has_value());
+    const auto* recycled_vertices = completed_mesh->mesh->vertices.data();
+    const auto* recycled_indices = completed_mesh->mesh->indices.data();
+    scheduler->recycle_mesh(std::move(*completed_mesh->mesh));
+    assert(scheduler->stats().pooled_mesh_buffers == 1);
+    assert(scheduler->stats().pooled_mesh_vertex_capacity > 0);
+    assert(scheduler->stats().pooled_mesh_index_capacity > 0);
+
+    auto reuse = make_request(*scheduler, world.chunks(), expensive.identity(), table, 4);
+    assert(scheduler->submit(std::move(reuse)));
+    auto reused_results = wait_for_results(*scheduler, 1);
+    assert(reused_results.front().mesh.has_value());
+    assert(reused_results.front().mesh->vertices.data() == recycled_vertices);
+    assert(reused_results.front().mesh->indices.data() == recycled_indices);
+    scheduler->recycle_mesh(std::move(*reused_results.front().mesh));
 }
 
 void test_results_carry_stale_center_neighbor_table_and_generation_metadata() {

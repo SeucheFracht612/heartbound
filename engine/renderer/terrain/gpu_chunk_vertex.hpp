@@ -55,6 +55,9 @@ inline constexpr std::array<rhi::RenderVertexAttributeDesc, 6> gpu_chunk_vertex_
                                                    std::uint8_t corner = 0) noexcept;
 [[nodiscard]] std::vector<GpuTerrainVertex>
 make_gpu_chunk_vertices(const std::vector<world::ChunkMeshVertex>& vertices);
+[[nodiscard]] std::vector<GpuTerrainVertex>
+make_gpu_chunk_vertices(const std::vector<world::ChunkMeshVertex>& vertices,
+                        std::vector<GpuTerrainVertex> reusable_vertices);
 [[nodiscard]] math::Vec3f decode_terrain_vertex_position(const GpuTerrainVertex& vertex) noexcept;
 [[nodiscard]] math::Vec3f decode_terrain_vertex_normal(const GpuTerrainVertex& vertex) noexcept;
 [[nodiscard]] std::array<float, 2>

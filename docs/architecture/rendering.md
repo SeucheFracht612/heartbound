@@ -269,7 +269,10 @@ resize/minimize scenes. Integer/hash-based generation and frame-indexed stress s
 workloads reproducible. The recorder excludes warm-up frames, retains complete per-frame renderer
 statistics, computes median/p95/p99/max frame time and 1%/0.1% low FPS, and exports JSON or CSV.
 Rendering is uncapped unless a frame cap is explicitly requested. Headless is the automation
-default; Vulkan mode opens a native window and adds GPU pass timings.
+default; Vulkan mode opens a native window and adds GPU pass timings. Before warm-up and measured
+simulation begin, the benchmark settles all initially loaded chunks to resident meshes. Streaming
+and rapid-edit scenes therefore measure replacement/churn while retaining a valid baseline world,
+rather than accidentally benchmarking an initial-mesh starvation loop.
 
 Production asynchronous chunk meshing is owned by `ChunkRenderSystem`. The renderer-owner thread
 copies a bounded center-plus-halo neighborhood and compact block render table before submitting a
@@ -292,6 +295,9 @@ representative visible frame from tens of thousands of triangles to 66 without c
 surface coverage. CPU meshes also group their complete index range into validated, nonoverlapping
 material/render-phase sections. The retained GPU cache preserves those ranges, and visibility
 extraction emits one indexed draw per section while counting drawn chunks separately from draws.
+Completed uploads return CPU vertex/index/section storage to a bounded scheduler pool and compact
+GPU-vertex conversion storage to an owner-thread pool. Warm remeshes reuse those capacities; pool
+counts and retained capacities are exposed in chunk renderer statistics.
 
 The backend currently supports one draw-producing Vulkan pass per unified submission. General
 multi-pass Vulkan execution, phase-specific terrain pipelines, frame-local descriptor allocation
