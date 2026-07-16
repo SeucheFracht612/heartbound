@@ -169,9 +169,9 @@ Implemented in this repository:
 - game-side structured inspection data for script host command routes, dispatch reports, and
   dispatch batches
 - platform, renderer, physics, network, scripting, jobs, math, and mod sandbox samples
-- native Milestone 1 Vulkan application that generates, meshes, and renders a camera-relative
-  terrain chunk with indexed depth-tested drawing, camera controls, resize/minimize handling,
-  validation callbacks, and clean shutdown
+- native Milestone 2 Vulkan application backed by a retained renderer, budgeted chunk mesh/upload
+  queues, revision/generation-safe GPU cache, frustum culling, camera-relative multi-chunk indexed
+  drawing, resize/minimize handling, validation callbacks, and clean shutdown
 - CTest coverage for unit tests plus headless-safe sample and tool smoke tests
 
 Gameplay system rules, general multi-pass production rendering, production physics/networking/

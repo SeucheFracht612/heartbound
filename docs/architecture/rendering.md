@@ -83,6 +83,27 @@ Implemented foundation:
   - each terrain draw carries a camera-relative chunk origin while the exact world anchor remains in
     `FloatingOrigin`
 
+- Retained renderer front end
+  - `Renderer` owns the `IRenderDevice`, shared terrain pipeline, `ChunkGpuCache`,
+    `ChunkRenderSystem`, and `FrameBuilder`; `WorldState` remains owned by its caller
+  - initial synchronization discovers chunks that predate renderer startup, while explicit
+    `ChunkStreamer` load and generation-aware eviction reports can be forwarded without an event bus
+  - each `ChunkGpuEntry` records its exact `ChunkIdentity`, resident content revision, buffers,
+    counts, local render bounds, state, and resident bytes
+  - synchronous meshing and upload queues retain work across frames, prioritize visible/nearby
+    chunks, and enforce per-frame mesh and byte budgets
+  - replacement buffers become resident only after both uploads succeed; the prior mesh remains
+    drawable while a rebuild is queued or an upload fails
+  - empty chunks become valid resident entries without allocating vertex or index buffers
+  - mesh dirty regions have one renderer consumer; mesh dirtiness clears only after the requested
+    identity and content revision are still current following a successful upload
+  - six Vulkan-depth frustum planes cull camera-relative chunk AABBs, including rich-model bounds,
+    before opaque terrain commands are built
+  - debug statistics expose resident/empty counts and bytes, pending mesh/upload work, per-frame
+    mesh/upload work, visible/culled chunks, draws, vertices, and indices
+  - the current one-frame fence makes immediate post-frame buffer retirement safe; multiple frame
+    contexts and submission-serial retirement remain a later scheduling improvement
+
 - Camera and shader constants
   - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention
   - `RenderCamera` owns the local position, yaw/pitch perspective, resize-dependent aspect ratio,
@@ -185,16 +206,18 @@ backend-specific allocation details. Future render features should enter through
 engine-owned abstractions such as material definitions, asset handles, render passes,
 debug draw, and validated shader-pack extension points.
 
-The Milestone 1 visible path is `apps/render_smoke`. It opens a native X11 window, generates and
-synchronously meshes a real far-world voxel chunk, loads checked-in validated SPIR-V, uploads the
-stable GPU vertex/index representation, and renders it with camera-relative positioning, depth
-testing, camera controls, resize/minimize handling, swapchain recreation, and clean shutdown. It
-uses only `execute_frame()`; no separate `bind_mesh_draws()` submission is required.
+The `apps/render_smoke` visible path now exercises the Milestone 2 front end. It opens a native X11
+window, populates nine real far-world chunks, loads checked-in validated SPIR-V, and lets `Renderer`
+budget meshing/uploads, retain GPU meshes, frustum-cull entries, and build the unified indexed world
+pass. Camera-relative positioning, depth testing, camera controls, resize/minimize handling,
+swapchain recreation, and clean shutdown all use `execute_frame()`; no separate
+`bind_mesh_draws()` submission is required.
 
 The backend intentionally remains a one-frame-in-flight MVP and currently supports one
 draw-producing Vulkan pass per unified submission. General multi-pass Vulkan execution, staged
-device-local mesh uploads, descriptor lifetime policy for textured materials, compressed
-texture/KTX2 handling, and RenderDoc capture workflow belong to later integration slices.
+device-local mesh uploads, asynchronous immutable meshing snapshots, chunk material sections,
+descriptor lifetime policy for textured materials, compressed texture/KTX2 handling, and RenderDoc
+capture workflow belong to later integration slices.
 
 The current shader compiler has development validators plus a production SPIR-V passthrough
 profile. Development preserves source bytes behind explicit compiled-shader metadata and rejects

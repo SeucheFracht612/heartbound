@@ -66,6 +66,12 @@ void test_chunk_gpu_cache_lifecycle() {
     const auto first_vertex_handle = first_entry->vertex_buffer.value;
     const auto first_index_handle = first_entry->index_buffer.value;
 
+    auto rejected_replacement = cache.replace_mesh(identity, 6, bounds, vertices, {});
+    assert(!rejected_replacement);
+    assert(cache.find(identity)->vertex_buffer.value == first_vertex_handle);
+    assert(cache.find(identity)->index_buffer.value == first_index_handle);
+    assert(cache.find(identity)->resident_content_revision == 5);
+
     auto replacement = cache.replace_mesh(identity, 6, bounds, vertices, indices);
     assert(replacement);
     assert(replacement.value().replaced_resident_mesh);
@@ -166,6 +172,9 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     const auto neighbor_revision = world.chunks().find(neighbor_coord)->content_revision();
     assert(world.chunks().set(origin_coord, {31, 8, 31}, world::VoxelCell{2, 220},
                               world.dirty_regions()));
+    assert(chunks.synchronize(world, camera));
+    assert(chunks.stats().pending_upload_count == 1);
+    assert(chunks.build_draw_list(camera).draws.size() == 2);
     for (std::size_t frame = 0;
          frame < 6 &&
          (world.chunks().find(origin_coord)->dirty().contains(world::ChunkDirtyFlag::mesh) ||

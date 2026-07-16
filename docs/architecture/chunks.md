@@ -11,6 +11,10 @@ Implemented foundation:
   - cubic chunk coordinates use signed 64-bit `x/y/z` components for near-unbounded world height
     and distance
   - dirty flags for mesh, collision, lighting, save, and replication
+  - monotonic content revision starting at one, advanced only when stored cells actually change
+    (plus generated-cell replacement), so renderer work can prove which content it represents
+  - a process-unique, never-reused load generation assigned only while resident in a
+    `ChunkDatabase`; coordinate plus generation forms `ChunkIdentity`
 
 - `VoxelPalette`
   - maps stable voxel prototype ids to compact content voxel type ids
@@ -25,6 +29,7 @@ Implemented foundation:
   - append explicit voxel edit records
   - auto-create edited chunks
   - erase chunk records when the streaming layer unloads them
+  - expose sorted loaded identities for initial renderer synchronization without scanning voxels
   - mark edited chunks dirty for mesh, collision, lighting, save, and replication
   - apply saved chunk edit deltas without re-marking loaded chunks dirty for save or replication
     while preserving those deltas for later snapshot export
@@ -47,6 +52,8 @@ Implemented foundation:
     without exposing save-directory layout to world streaming callers
   - reports whether a request found an already-loaded chunk, generated a fresh baseline chunk, or
     generated a baseline chunk with saved edits applied
+  - returns the resident `ChunkIdentity` in every successful load report and the exact evicted
+    identities in eviction reports, preventing stale work from removing a reloaded generation
   - applies saved deltas through the load-specific chunk path so streamed loads do not create false
     save or replication dirtiness
   - stages generated data plus saved edits transactionally, leaving no loaded chunk when validation
