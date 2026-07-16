@@ -8,6 +8,7 @@ namespace heartstead::renderer {
 std::string format_renderer_stats(const RendererStats& stats) {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(3) << "frame=" << stats.frame_index
+           << " submit=" << stats.submission_serial << '/' << stats.completed_submission_serial
            << " cpu=" << stats.cpu_frame_ms << "ms";
     if (stats.gpu_timing_valid) {
         stream << " gpu=" << stats.gpu_frame_ms << "ms"

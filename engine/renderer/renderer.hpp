@@ -71,6 +71,7 @@ class Renderer {
     std::unique_ptr<ChunkRenderSystem> chunk_system_;
     std::unique_ptr<FrameBuilder> frame_builder_;
     profiling::CpuTimingRecorder cpu_timings_{};
+    std::vector<rhi::RenderDrawCommand> draw_command_scratch_;
     RendererStats stats_{};
     std::chrono::steady_clock::time_point frame_started_at_{};
     bool frame_timing_active_ = false;

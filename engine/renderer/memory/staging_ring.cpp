@@ -62,6 +62,15 @@ StagingRingAllocator::allocate(std::size_t size, std::size_t alignment,
     return core::Result<StagingRingRange>::success(range);
 }
 
+bool StagingRingAllocator::cancel(StagingRingRange range) noexcept {
+    const auto found = std::ranges::find(active_, range);
+    if (found == active_.end()) {
+        return false;
+    }
+    active_.erase(found);
+    return true;
+}
+
 void StagingRingAllocator::release_completed(std::uint64_t completed_submission_serial) noexcept {
     std::erase_if(active_, [completed_submission_serial](const StagingRingRange& range) {
         return range.submission_serial <= completed_submission_serial;

@@ -67,6 +67,7 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
 
 core::Status Renderer::shutdown() {
     core::Status first_failure = core::Status::ok();
+    draw_command_scratch_.clear();
     frame_builder_.reset();
     chunk_system_.reset();
     if (chunk_cache_ != nullptr) {
@@ -152,10 +153,13 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
     {
         profiling::ScopedCpuTimingZone extraction_zone(cpu_timings_,
                                                        profiling::CpuTimingZone::render_extraction);
-        draws = chunk_system_->build_draw_list(camera);
+        draws = chunk_system_->build_draw_list(camera, std::move(draw_command_scratch_));
     }
     RenderCommandLists command_lists;
     command_lists.world_draws = std::move(draws.draws);
+    if (command_lists.world_draws.empty()) {
+        draw_command_scratch_ = std::move(command_lists.world_draws);
+    }
     auto frame = [&]() {
         profiling::ScopedCpuTimingZone command_zone(cpu_timings_,
                                                     profiling::CpuTimingZone::command_build);
@@ -166,6 +170,9 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
                                                             frame.error().message);
     }
     auto executed = device_->execute_frame(frame.value());
+    if (!frame.value().pass_commands.empty()) {
+        draw_command_scratch_ = std::move(frame.value().pass_commands.front().draws);
+    }
     if (!executed) {
         frame_timing_active_ = false;
         return executed;
@@ -258,6 +265,8 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
 
 void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept {
     stats_.frame_index = frame.frame_index;
+    stats_.submission_serial = frame.submission_serial;
+    stats_.completed_submission_serial = frame.completed_submission_serial;
     stats_.draw_calls = static_cast<std::uint32_t>(std::min(
         frame.draw_count, static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
     stats_.command_recording_ms = frame.cpu_command_recording_ms;

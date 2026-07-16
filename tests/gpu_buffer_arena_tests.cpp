@@ -46,6 +46,9 @@ void test_generation_safe_allocation_retirement_and_merging() {
     assert(uploaded);
     assert(uploaded.value().write_count == 1);
     assert(uploaded.value().byte_size == upload.size());
+    assert(uploaded.value().submission_serial == 1);
+    assert(device->last_submission_serial() == 1);
+    assert(device->completed_submission_serial() == 1);
 
     const std::array<rhi::RenderBufferWrite, 1> invalid_writes{
         rhi::RenderBufferWrite{first.value().buffer, 240, upload},
@@ -143,6 +146,11 @@ void test_staging_ring_tracks_serials_and_wraps() {
     ring.release_completed(4);
     assert(ring.stats().used_bytes == 0);
     assert(ring.stats().free_bytes == 64);
+    auto cancelled = ring.allocate(32, 4, 6, 4);
+    assert(cancelled);
+    assert(ring.cancel(cancelled.value()));
+    assert(!ring.cancel(cancelled.value()));
+    assert(ring.stats().used_bytes == 0);
 }
 
 } // namespace

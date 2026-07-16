@@ -88,10 +88,18 @@ class ChunkRenderSystem {
 
     [[nodiscard]] core::Status synchronize(world::WorldState& world, const RenderCamera& camera);
     [[nodiscard]] ChunkDrawList build_draw_list(const RenderCamera& camera);
+    [[nodiscard]] ChunkDrawList
+    build_draw_list(const RenderCamera& camera,
+                    std::vector<rhi::RenderDrawCommand> reusable_draw_storage);
 
     [[nodiscard]] const ChunkRenderStats& stats() const noexcept;
 
   private:
+    struct VisibleChunk {
+        const ChunkGpuEntry* entry = nullptr;
+        math::Vec3f origin{};
+    };
+
     struct PendingMesh {
         world::ChunkIdentity identity;
         bool forced = false;
@@ -143,6 +151,7 @@ class ChunkRenderSystem {
     ChunkRenderConfig config_{};
     std::vector<PendingMesh> pending_meshes_;
     std::vector<PendingUpload> pending_uploads_;
+    std::vector<VisibleChunk> visible_chunks_scratch_;
     std::unique_ptr<ChunkMeshScheduler> mesh_scheduler_;
     std::shared_ptr<const world::BlockRenderTableSnapshot> render_table_;
     std::uint64_t next_sequence_ = 1;

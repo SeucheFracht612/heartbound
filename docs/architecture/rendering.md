@@ -11,7 +11,8 @@ Implemented foundation:
 - `IRenderDevice`
   - owns backend-specific frame execution
   - exposes `RenderDeviceCapabilities`
-  - exposes current output extent and completed frame count
+  - exposes current output extent, completed frame count, latest submission serial, and completed
+    submission serial
   - validates resize and frame output extents
   - returns per-frame stats for smoke tests and debug tooling
   - executes `RenderFrameSubmission` records that combine a validated `RenderFramePlan`, camera
@@ -105,9 +106,9 @@ Implemented foundation:
     following a successful upload
   - six Vulkan-depth frustum planes cull camera-relative chunk AABBs, including rich-model bounds,
     before opaque terrain commands are built
-  - evictions and replacements return ranges through serial-tagged retirement; the current
-    one-frame fence completes them immediately, while the allocator contract is ready for delayed
-    collection with multiple frame contexts
+  - evictions and replacements return ranges through serial-tagged retirement and collect them
+    only after the RHI's completed submission serial reaches the last submission that could have
+    referenced the old range
   - debug statistics expose resident/empty counts and bytes, arena capacity/usage/free space and
     fragmentation, pending mesh/upload work, batched writes, visible/culled chunks, draws, vertices,
     and indices
@@ -180,6 +181,14 @@ Implemented foundation:
   - creates device-local arena buffers with transfer-destination usage and batches subrange copies
     through a persistently mapped 32 MiB staging ring whose ranges carry submission serials; an
     oversized or temporarily full batch uses a dedicated fallback staging allocation
+  - owns two configurable frame contexts by default, each with a command pool, command buffer,
+    fence, acquire semaphore, framebuffer, and private offscreen color/depth target; normal frame
+    submission waits only when reusing a still-busy context
+  - owns matching asynchronous upload contexts, so a staged buffer batch returns after queue
+    submission and staging ranges or fallback buffers remain alive until their serial completes
+  - tracks a monotonically increasing queue-submission serial across frame and upload submissions,
+    exposes both the latest and completed serial through the RHI, and defers released Vulkan
+    buffers, images, shaders, and pipelines until completion
   - can allocate private `VkShaderModule` objects from validated SPIR-V words behind opaque RHI
     handles
   - can upload small RGBA8 sampled images through a private staging buffer, optimal-tiled image,
@@ -253,11 +262,12 @@ superseded load generations, or obsolete render tables both before upload prepar
 before upload. Rebuilds keep the prior resident mesh visible, and rapid requests are coalesced or
 cancelled before expensive work when possible.
 
-The backend intentionally remains a one-frame-in-flight MVP and currently supports one
-draw-producing Vulkan pass per unified submission. General multi-pass Vulkan execution,
-nonblocking staging-ring reuse across frames, chunk material sections, descriptor lifetime policy
-for textured materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to
-later integration slices.
+The backend currently supports one draw-producing Vulkan pass per unified submission. General
+multi-pass Vulkan execution, chunk material sections, frame-local descriptor allocation for
+textured materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to
+later integration slices. Draw-command and visibility vectors retain their capacity between frames;
+the remaining frame-plan metadata is small and will move into the broader frame allocator as more
+passes are introduced.
 
 The current shader compiler has development validators plus a production SPIR-V passthrough
 profile. Development preserves source bytes behind explicit compiled-shader metadata and rejects

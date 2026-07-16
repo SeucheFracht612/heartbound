@@ -7,6 +7,8 @@ namespace heartstead::renderer {
 
 struct RendererStats {
     std::uint64_t frame_index = 0;
+    std::uint64_t submission_serial = 0;
+    std::uint64_t completed_submission_serial = 0;
     std::uint64_t gpu_timing_frame_index = 0;
     bool gpu_timing_valid = false;
     std::uint32_t gpu_timing_latency_frames = 0;

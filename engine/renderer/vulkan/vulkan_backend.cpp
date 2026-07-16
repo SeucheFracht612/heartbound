@@ -22,6 +22,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <span>
@@ -1165,6 +1166,44 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         double final_copy_ms = 0.0;
     };
 
+    struct VulkanFrameTarget {
+        VkImage color_image = VK_NULL_HANDLE;
+        VkImageView color_view = VK_NULL_HANDLE;
+        VkDeviceMemory color_memory = VK_NULL_HANDLE;
+        VkImageLayout color_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImage depth_image = VK_NULL_HANDLE;
+        VkImageView depth_view = VK_NULL_HANDLE;
+        VkDeviceMemory depth_memory = VK_NULL_HANDLE;
+        VkImageLayout depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        rhi::RenderExtent extent{};
+    };
+
+    struct VulkanFrameContext {
+        VkCommandPool command_pool = VK_NULL_HANDLE;
+        VkCommandBuffer graphics_commands = VK_NULL_HANDLE;
+        VkFence completion_fence = VK_NULL_HANDLE;
+        VkSemaphore image_available = VK_NULL_HANDLE;
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        VulkanFrameTarget target;
+        std::uint64_t submission_serial = 0;
+        bool in_flight = false;
+    };
+
+    struct VulkanUploadContext {
+        VkCommandPool command_pool = VK_NULL_HANDLE;
+        VkCommandBuffer transfer_commands = VK_NULL_HANDLE;
+        VkFence completion_fence = VK_NULL_HANDLE;
+        VulkanBufferResource fallback_staging;
+        void* fallback_mapped = nullptr;
+        std::uint64_t submission_serial = 0;
+        bool in_flight = false;
+    };
+
+    template <typename Resource> struct RetiredVulkanResource {
+        Resource resource;
+        std::uint64_t retire_after_submission = 0;
+    };
+
   public:
     VulkanSmokeDevice(rhi::RenderDeviceDesc desc, VulkanInstanceResource instance,
                       SelectedPhysicalDevice selected, VkDevice device, VkQueue queue,
@@ -1188,6 +1227,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     ~VulkanSmokeDevice() override {
         if (device_ != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device_);
+            complete_all_submissions();
+            destroy_frame_contexts();
             destroy_staging_buffer();
             destroy_buffer_resources();
             destroy_image_resources();
@@ -1237,6 +1278,25 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     VulkanSmokeDevice(VulkanSmokeDevice&&) = delete;
     VulkanSmokeDevice& operator=(VulkanSmokeDevice&&) = delete;
 
+    [[nodiscard]] core::Status initialize_frame_contexts() {
+        frame_contexts_.reserve(desc_.frames_in_flight);
+        upload_contexts_.reserve(desc_.frames_in_flight);
+        for (std::uint32_t index = 0; index < desc_.frames_in_flight; ++index) {
+            auto frame = create_frame_context();
+            if (!frame) {
+                return core::Status::failure(frame.error().code, frame.error().message);
+            }
+            frame_contexts_.push_back(std::move(frame).value());
+
+            auto upload = create_upload_context();
+            if (!upload) {
+                return core::Status::failure(upload.error().code, upload.error().message);
+            }
+            upload_contexts_.push_back(std::move(upload).value());
+        }
+        return core::Status::ok();
+    }
+
     [[nodiscard]] rhi::RenderBackend backend() const noexcept override {
         return rhi::RenderBackend::vulkan;
     }
@@ -1279,9 +1339,19 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         return completed_frame_count_;
     }
 
+    [[nodiscard]] std::uint64_t last_submission_serial() const noexcept override {
+        return last_submission_serial_;
+    }
+
+    [[nodiscard]] std::uint64_t completed_submission_serial() const noexcept override {
+        return completed_submission_serial_;
+    }
+
     [[nodiscard]] std::size_t live_resource_count() const noexcept override {
         return buffer_resources_.size() + image_resources_.size() + shader_modules_.size() +
-               compute_pipelines_.size() + graphics_pipelines_.size();
+               compute_pipelines_.size() + graphics_pipelines_.size() + retired_buffers_.size() +
+               retired_images_.size() + retired_shader_modules_.size() +
+               retired_compute_pipelines_.size() + retired_graphics_pipelines_.size();
     }
 
     [[nodiscard]] core::Status resize(rhi::RenderExtent extent) override {
@@ -1296,10 +1366,18 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                                          "failed to idle Vulkan device before resize: " +
                                              std::string(vk_result_name(idle_result)));
         }
+        complete_all_submissions();
         if (swapchain_ != VK_NULL_HANDLE) {
             destroy_swapchain();
         }
         destroy_offscreen_target();
+        for (auto& context : frame_contexts_) {
+            if (context.framebuffer != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device_, context.framebuffer, nullptr);
+                context.framebuffer = VK_NULL_HANDLE;
+            }
+            destroy_frame_target(context.target);
+        }
         return core::Status::ok();
     }
 
@@ -1391,7 +1469,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
         rhi::RenderFrameStats stats;
         stats.backend = backend();
-        stats.frame_index = completed_frame_count_;
+        stats.frame_index = next_frame_index_++;
+        stats.submission_serial = ++last_submission_serial_;
+        complete_all_submissions();
+        advance_completed_submission(stats.submission_serial);
+        stats.completed_submission_serial = completed_submission_serial_;
         stats.extent = execution_plan.value().extent;
         stats.clear_color = clear_color;
         stats.presented = false;
@@ -1412,9 +1494,6 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         if (!status) {
             return core::Result<rhi::RenderFrameStats>::failure(status.error().code,
                                                                 status.error().message);
-        }
-        if (frame.pass_commands.empty()) {
-            return execute_frame_plan(frame.plan);
         }
         return execute_submitted_frame(frame);
     }
@@ -1610,25 +1689,39 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             staging_bytes += write.bytes.size();
         }
 
+        if (upload_contexts_.empty()) {
+            return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
+                "renderer.vulkan_upload_context_unavailable",
+                "Vulkan upload contexts were not initialized");
+        }
+        auto& upload_context = upload_contexts_[next_upload_context_];
+        status = wait_for_upload_context(upload_context);
+        if (!status) {
+            return core::Result<rhi::RenderBufferBatchUploadStats>::failure(status.error().code,
+                                                                            status.error().message);
+        }
+
         constexpr std::size_t persistent_staging_capacity = 32U * 1024U * 1024U;
-        const auto upload_serial = ++next_upload_submission_serial_;
-        auto ring_range = staging_ring_.allocate(staging_bytes, 4, upload_serial,
-                                                 completed_upload_submission_serial_);
+        const auto upload_serial = last_submission_serial_ + 1;
+        auto ring_range =
+            staging_ring_.allocate(staging_bytes, 4, upload_serial, completed_submission_serial_);
         const bool use_fallback = !ring_range;
-        VulkanBufferResource fallback;
         VkBuffer staging_buffer = VK_NULL_HANDLE;
         void* mapped = nullptr;
         std::size_t staging_base_offset = 0;
         if (use_fallback) {
-            auto fallback_status = create_staging_buffer(staging_bytes, fallback, mapped);
+            auto fallback_status = create_staging_buffer(
+                staging_bytes, upload_context.fallback_staging, upload_context.fallback_mapped);
             if (!fallback_status) {
                 return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
                     fallback_status.error().code, fallback_status.error().message);
             }
-            staging_buffer = fallback.buffer;
+            staging_buffer = upload_context.fallback_staging.buffer;
+            mapped = upload_context.fallback_mapped;
         } else {
             auto staging_status = ensure_staging_buffer(persistent_staging_capacity);
             if (!staging_status) {
+                (void)staging_ring_.cancel(ring_range.value());
                 return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
                     staging_status.error().code, staging_status.error().message);
             }
@@ -1650,36 +1743,17 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             source_offset += write.bytes.size();
         }
 
-        const auto wait_result = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
-                                                 std::numeric_limits<std::uint64_t>::max());
-        if (wait_result != VK_SUCCESS) {
-            if (use_fallback) {
-                vkUnmapMemory(device_, fallback.memory);
-                destroy_buffer_resource(fallback);
-            } else {
-                staging_ring_.release_completed(upload_serial);
-            }
-            return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
-                "renderer.vulkan_wait_fence_failed",
-                "failed to wait before Vulkan buffer upload: " +
-                    std::string(vk_result_name(wait_result)));
-        }
-        auto result = vkResetFences(device_, 1, &fence_);
-        if (result == VK_SUCCESS) {
-            result = vkResetCommandBuffer(command_buffer_, 0);
-        }
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (result == VK_SUCCESS) {
-            result = vkBeginCommandBuffer(command_buffer_, &begin_info);
-        }
+        auto result = vkBeginCommandBuffer(upload_context.transfer_commands, &begin_info);
         if (result != VK_SUCCESS) {
             if (use_fallback) {
-                vkUnmapMemory(device_, fallback.memory);
-                destroy_buffer_resource(fallback);
+                vkUnmapMemory(device_, upload_context.fallback_staging.memory);
+                upload_context.fallback_mapped = nullptr;
+                destroy_buffer_resource(upload_context.fallback_staging);
             } else {
-                staging_ring_.release_completed(upload_serial);
+                (void)staging_ring_.cancel(ring_range.value());
             }
             return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
                 "renderer.vulkan_buffer_upload_begin_failed",
@@ -1687,10 +1761,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     std::string(vk_result_name(result)));
         }
 
-        begin_debug_label(command_buffer_, "Batched buffer upload", 0.92F, 0.56F, 0.16F);
+        begin_debug_label(upload_context.transfer_commands, "Batched buffer upload", 0.92F, 0.56F,
+                          0.16F);
         for (std::size_t index = 0; index < writes.size(); ++index) {
             const auto& destination = buffer_resources_.at(writes[index].destination.value);
-            vkCmdCopyBuffer(command_buffer_, staging_buffer, destination.buffer, 1,
+            vkCmdCopyBuffer(upload_context.transfer_commands, staging_buffer, destination.buffer, 1,
                             &copy_regions[index]);
         }
         std::vector<VkBufferMemoryBarrier> barriers;
@@ -1730,41 +1805,41 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             barrier.size = static_cast<VkDeviceSize>(write.bytes.size());
             barriers.push_back(barrier);
         }
-        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT, destination_stages, 0,
-                             0, nullptr, static_cast<std::uint32_t>(barriers.size()),
-                             barriers.data(), 0, nullptr);
-        end_debug_label(command_buffer_);
-        result = vkEndCommandBuffer(command_buffer_);
+        vkCmdPipelineBarrier(
+            upload_context.transfer_commands, VK_PIPELINE_STAGE_TRANSFER_BIT, destination_stages, 0,
+            0, nullptr, static_cast<std::uint32_t>(barriers.size()), barriers.data(), 0, nullptr);
+        end_debug_label(upload_context.transfer_commands);
+        result = vkEndCommandBuffer(upload_context.transfer_commands);
         if (result == VK_SUCCESS) {
             VkSubmitInfo submit_info{};
             submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             submit_info.commandBufferCount = 1;
-            submit_info.pCommandBuffers = &command_buffer_;
-            result = vkQueueSubmit(queue_, 1, &submit_info, fence_);
-        }
-        if (result == VK_SUCCESS) {
-            result = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
-                                     std::numeric_limits<std::uint64_t>::max());
-        }
-        if (use_fallback) {
-            vkUnmapMemory(device_, fallback.memory);
-            destroy_buffer_resource(fallback);
-        } else if (result == VK_SUCCESS) {
-            completed_upload_submission_serial_ = upload_serial;
-            staging_ring_.release_completed(completed_upload_submission_serial_);
-        } else {
-            staging_ring_.release_completed(upload_serial);
+            submit_info.pCommandBuffers = &upload_context.transfer_commands;
+            result = vkQueueSubmit(queue_, 1, &submit_info, upload_context.completion_fence);
         }
         if (result != VK_SUCCESS) {
+            if (use_fallback) {
+                vkUnmapMemory(device_, upload_context.fallback_staging.memory);
+                upload_context.fallback_mapped = nullptr;
+                destroy_buffer_resource(upload_context.fallback_staging);
+            } else {
+                (void)staging_ring_.cancel(ring_range.value());
+            }
             return core::Result<rhi::RenderBufferBatchUploadStats>::failure(
                 "renderer.vulkan_buffer_upload_failed",
                 "failed to submit Vulkan buffer upload: " + std::string(vk_result_name(result)));
         }
 
+        last_submission_serial_ = upload_serial;
+        upload_context.submission_serial = upload_serial;
+        upload_context.in_flight = true;
+        next_upload_context_ = (next_upload_context_ + 1) % upload_contexts_.size();
+
         rhi::RenderBufferBatchUploadStats stats;
         stats.backend = backend();
         stats.write_count = writes.size();
         stats.byte_size = staging_bytes;
+        stats.submission_serial = upload_serial;
         stats.used_fallback_staging = use_fallback;
         stats.gpu_backed = true;
         return core::Result<rhi::RenderBufferBatchUploadStats>::success(stats);
@@ -2578,35 +2653,43 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         auto found = buffer_resources_.find(handle.value);
         if (found != buffer_resources_.end()) {
             destroy_descriptor_writes_for_resource(handle);
-            destroy_buffer_resource(found->second);
+            retired_buffers_.push_back({std::move(found->second), last_submission_serial_});
             buffer_resources_.erase(found);
+            collect_retired_resources();
             return core::Status::ok();
         }
         auto image = image_resources_.find(handle.value);
         if (image != image_resources_.end()) {
             destroy_descriptor_writes_for_resource(handle);
-            destroy_image_resource(image->second);
+            retired_images_.push_back({std::move(image->second), last_submission_serial_});
             image_resources_.erase(image);
+            collect_retired_resources();
             return core::Status::ok();
         }
         auto shader_module = shader_modules_.find(handle.value);
         if (shader_module != shader_modules_.end()) {
-            destroy_compute_pipelines_for_shader(handle);
-            destroy_graphics_pipelines_for_shader(handle);
-            destroy_shader_module_resource(shader_module->second);
+            retire_compute_pipelines_for_shader(handle);
+            retire_graphics_pipelines_for_shader(handle);
+            retired_shader_modules_.push_back(
+                {std::move(shader_module->second), last_submission_serial_});
             shader_modules_.erase(shader_module);
+            collect_retired_resources();
             return core::Status::ok();
         }
         auto compute_pipeline = compute_pipelines_.find(handle.value);
         if (compute_pipeline != compute_pipelines_.end()) {
-            destroy_compute_pipeline_resource(compute_pipeline->second);
+            retired_compute_pipelines_.push_back(
+                {std::move(compute_pipeline->second), last_submission_serial_});
             compute_pipelines_.erase(compute_pipeline);
+            collect_retired_resources();
             return core::Status::ok();
         }
         auto graphics_pipeline = graphics_pipelines_.find(handle.value);
         if (graphics_pipeline != graphics_pipelines_.end()) {
-            destroy_graphics_pipeline_resource(graphics_pipeline->second);
+            retired_graphics_pipelines_.push_back(
+                {std::move(graphics_pipeline->second), last_submission_serial_});
             graphics_pipelines_.erase(graphics_pipeline);
+            collect_retired_resources();
             return core::Status::ok();
         }
         return core::Status::failure("renderer.unknown_resource",
@@ -2614,6 +2697,264 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     }
 
   private:
+    [[nodiscard]] core::Result<VulkanFrameContext> create_frame_context() {
+        VulkanFrameContext context;
+        auto pool = create_command_pool(device_, graphics_queue_family_);
+        if (!pool) {
+            return core::Result<VulkanFrameContext>::failure(pool.error().code,
+                                                             pool.error().message);
+        }
+        context.command_pool = pool.value();
+        auto commands = allocate_command_buffer(device_, context.command_pool);
+        if (!commands) {
+            destroy_frame_context(context);
+            return core::Result<VulkanFrameContext>::failure(commands.error().code,
+                                                             commands.error().message);
+        }
+        context.graphics_commands = commands.value();
+        auto fence = create_fence(device_);
+        if (!fence) {
+            destroy_frame_context(context);
+            return core::Result<VulkanFrameContext>::failure(fence.error().code,
+                                                             fence.error().message);
+        }
+        context.completion_fence = fence.value();
+        auto semaphore = create_semaphore(device_);
+        if (!semaphore) {
+            destroy_frame_context(context);
+            return core::Result<VulkanFrameContext>::failure(semaphore.error().code,
+                                                             semaphore.error().message);
+        }
+        context.image_available = semaphore.value();
+        return core::Result<VulkanFrameContext>::success(std::move(context));
+    }
+
+    [[nodiscard]] core::Result<VulkanUploadContext> create_upload_context() {
+        VulkanUploadContext context;
+        auto pool = create_command_pool(device_, graphics_queue_family_);
+        if (!pool) {
+            return core::Result<VulkanUploadContext>::failure(pool.error().code,
+                                                              pool.error().message);
+        }
+        context.command_pool = pool.value();
+        auto commands = allocate_command_buffer(device_, context.command_pool);
+        if (!commands) {
+            destroy_upload_context(context);
+            return core::Result<VulkanUploadContext>::failure(commands.error().code,
+                                                              commands.error().message);
+        }
+        context.transfer_commands = commands.value();
+        auto fence = create_fence(device_);
+        if (!fence) {
+            destroy_upload_context(context);
+            return core::Result<VulkanUploadContext>::failure(fence.error().code,
+                                                              fence.error().message);
+        }
+        context.completion_fence = fence.value();
+        return core::Result<VulkanUploadContext>::success(std::move(context));
+    }
+
+    void destroy_frame_target(VulkanFrameTarget& target) noexcept {
+        if (target.depth_view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, target.depth_view, nullptr);
+        }
+        if (target.depth_image != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, target.depth_image, nullptr);
+        }
+        if (target.depth_memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, target.depth_memory, nullptr);
+        }
+        if (target.color_view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, target.color_view, nullptr);
+        }
+        if (target.color_image != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, target.color_image, nullptr);
+        }
+        if (target.color_memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, target.color_memory, nullptr);
+        }
+        target = {};
+    }
+
+    void destroy_frame_context(VulkanFrameContext& context) noexcept {
+        if (context.framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_, context.framebuffer, nullptr);
+        }
+        destroy_frame_target(context.target);
+        if (context.image_available != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device_, context.image_available, nullptr);
+        }
+        if (context.completion_fence != VK_NULL_HANDLE) {
+            vkDestroyFence(device_, context.completion_fence, nullptr);
+        }
+        if (context.command_pool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device_, context.command_pool, nullptr);
+        }
+        context = {};
+    }
+
+    void destroy_upload_context(VulkanUploadContext& context) noexcept {
+        if (context.fallback_mapped != nullptr &&
+            context.fallback_staging.memory != VK_NULL_HANDLE) {
+            vkUnmapMemory(device_, context.fallback_staging.memory);
+        }
+        destroy_buffer_resource(context.fallback_staging);
+        if (context.completion_fence != VK_NULL_HANDLE) {
+            vkDestroyFence(device_, context.completion_fence, nullptr);
+        }
+        if (context.command_pool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device_, context.command_pool, nullptr);
+        }
+        context = {};
+    }
+
+    void destroy_frame_contexts() noexcept {
+        for (auto& context : frame_contexts_) {
+            destroy_frame_context(context);
+        }
+        frame_contexts_.clear();
+        for (auto& context : upload_contexts_) {
+            destroy_upload_context(context);
+        }
+        upload_contexts_.clear();
+    }
+
+    void advance_completed_submission(std::uint64_t submission_serial) noexcept {
+        completed_submission_serial_ = std::max(completed_submission_serial_, submission_serial);
+        while (!pending_frame_submissions_.empty() &&
+               pending_frame_submissions_.front() <= completed_submission_serial_) {
+            pending_frame_submissions_.pop_front();
+            ++completed_frame_count_;
+        }
+        staging_ring_.release_completed(completed_submission_serial_);
+        for (auto& context : frame_contexts_) {
+            if (context.framebuffer != VK_NULL_HANDLE &&
+                context.submission_serial <= completed_submission_serial_) {
+                vkDestroyFramebuffer(device_, context.framebuffer, nullptr);
+                context.framebuffer = VK_NULL_HANDLE;
+            }
+        }
+        collect_retired_resources();
+    }
+
+    void collect_retired_resources() noexcept {
+        const auto completed = completed_submission_serial_;
+        std::erase_if(retired_graphics_pipelines_, [this, completed](auto& retired) {
+            if (retired.retire_after_submission > completed) {
+                return false;
+            }
+            destroy_graphics_pipeline_resource(retired.resource);
+            return true;
+        });
+        std::erase_if(retired_compute_pipelines_, [this, completed](auto& retired) {
+            if (retired.retire_after_submission > completed) {
+                return false;
+            }
+            destroy_compute_pipeline_resource(retired.resource);
+            return true;
+        });
+        std::erase_if(retired_shader_modules_, [this, completed](auto& retired) {
+            if (retired.retire_after_submission > completed) {
+                return false;
+            }
+            destroy_shader_module_resource(retired.resource);
+            return true;
+        });
+        std::erase_if(retired_images_, [this, completed](auto& retired) {
+            if (retired.retire_after_submission > completed) {
+                return false;
+            }
+            destroy_image_resource(retired.resource);
+            return true;
+        });
+        std::erase_if(retired_buffers_, [this, completed](auto& retired) {
+            if (retired.retire_after_submission > completed) {
+                return false;
+            }
+            destroy_buffer_resource(retired.resource);
+            return true;
+        });
+    }
+
+    void complete_all_submissions() noexcept {
+        std::uint64_t newest = completed_submission_serial_;
+        for (auto& context : frame_contexts_) {
+            if (context.in_flight) {
+                newest = std::max(newest, context.submission_serial);
+                context.in_flight = false;
+            }
+        }
+        for (auto& context : upload_contexts_) {
+            if (context.in_flight) {
+                newest = std::max(newest, context.submission_serial);
+                context.in_flight = false;
+            }
+        }
+        advance_completed_submission(newest);
+    }
+
+    [[nodiscard]] core::Status wait_for_frame_context(VulkanFrameContext& context,
+                                                      double& wait_ms) {
+        using Clock = std::chrono::steady_clock;
+        if (context.in_flight) {
+            const auto started = Clock::now();
+            const auto result = vkWaitForFences(device_, 1, &context.completion_fence, VK_TRUE,
+                                                std::numeric_limits<std::uint64_t>::max());
+            wait_ms += std::chrono::duration<double, std::milli>(Clock::now() - started).count();
+            if (result != VK_SUCCESS) {
+                return core::Status::failure("renderer.vulkan_wait_frame_context_failed",
+                                             "failed to wait for a reusable Vulkan frame: " +
+                                                 std::string(vk_result_name(result)));
+            }
+            advance_completed_submission(context.submission_serial);
+            context.in_flight = false;
+        }
+        if (context.framebuffer != VK_NULL_HANDLE) {
+            vkDestroyFramebuffer(device_, context.framebuffer, nullptr);
+            context.framebuffer = VK_NULL_HANDLE;
+        }
+        auto result = vkResetFences(device_, 1, &context.completion_fence);
+        if (result == VK_SUCCESS) {
+            result = vkResetCommandPool(device_, context.command_pool, 0);
+        }
+        if (result != VK_SUCCESS) {
+            return core::Status::failure("renderer.vulkan_reset_frame_context_failed",
+                                         "failed to reset a reusable Vulkan frame: " +
+                                             std::string(vk_result_name(result)));
+        }
+        return core::Status::ok();
+    }
+
+    [[nodiscard]] core::Status wait_for_upload_context(VulkanUploadContext& context) {
+        if (context.in_flight) {
+            const auto result = vkWaitForFences(device_, 1, &context.completion_fence, VK_TRUE,
+                                                std::numeric_limits<std::uint64_t>::max());
+            if (result != VK_SUCCESS) {
+                return core::Status::failure("renderer.vulkan_wait_upload_context_failed",
+                                             "failed to wait for a reusable Vulkan upload: " +
+                                                 std::string(vk_result_name(result)));
+            }
+            advance_completed_submission(context.submission_serial);
+            context.in_flight = false;
+        }
+        if (context.fallback_mapped != nullptr &&
+            context.fallback_staging.memory != VK_NULL_HANDLE) {
+            vkUnmapMemory(device_, context.fallback_staging.memory);
+            context.fallback_mapped = nullptr;
+        }
+        destroy_buffer_resource(context.fallback_staging);
+        auto result = vkResetFences(device_, 1, &context.completion_fence);
+        if (result == VK_SUCCESS) {
+            result = vkResetCommandPool(device_, context.command_pool, 0);
+        }
+        if (result != VK_SUCCESS) {
+            return core::Status::failure("renderer.vulkan_reset_upload_context_failed",
+                                         "failed to reset a reusable Vulkan upload: " +
+                                             std::string(vk_result_name(result)));
+        }
+        return core::Status::ok();
+    }
+
     void initialize_instrumentation() noexcept {
         if (debug_utils_enabled_) {
             begin_debug_label_ = reinterpret_cast<PFN_vkCmdBeginDebugUtilsLabelEXT>(
@@ -3009,6 +3350,31 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             destroy_graphics_pipeline_resource(resource);
         }
         graphics_pipelines_.clear();
+    }
+
+    void retire_compute_pipelines_for_shader(rhi::RenderResourceHandle shader) {
+        for (auto pipeline = compute_pipelines_.begin(); pipeline != compute_pipelines_.end();) {
+            if (pipeline->second.desc.compute_shader.value == shader.value) {
+                retired_compute_pipelines_.push_back(
+                    {std::move(pipeline->second), last_submission_serial_});
+                pipeline = compute_pipelines_.erase(pipeline);
+            } else {
+                ++pipeline;
+            }
+        }
+    }
+
+    void retire_graphics_pipelines_for_shader(rhi::RenderResourceHandle shader) {
+        for (auto pipeline = graphics_pipelines_.begin(); pipeline != graphics_pipelines_.end();) {
+            if (pipeline->second.desc.vertex_shader.value == shader.value ||
+                pipeline->second.desc.fragment_shader.value == shader.value) {
+                retired_graphics_pipelines_.push_back(
+                    {std::move(pipeline->second), last_submission_serial_});
+                pipeline = graphics_pipelines_.erase(pipeline);
+            } else {
+                ++pipeline;
+            }
+        }
     }
 
     void destroy_compute_pipelines_for_shader(rhi::RenderResourceHandle shader) noexcept {
@@ -3623,6 +3989,30 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         return core::Status::ok();
     }
 
+    [[nodiscard]] core::Status ensure_frame_target(VulkanFrameContext& context,
+                                                   rhi::RenderExtent extent) {
+        auto& target = context.target;
+        if (target.color_image != VK_NULL_HANDLE && target.depth_image != VK_NULL_HANDLE &&
+            target.extent.width == extent.width && target.extent.height == extent.height) {
+            return core::Status::ok();
+        }
+        destroy_frame_target(target);
+        auto status = ensure_offscreen_target(extent);
+        if (!status) {
+            return status;
+        }
+        target.color_image = std::exchange(offscreen_image_, VK_NULL_HANDLE);
+        target.color_view = std::exchange(offscreen_image_view_, VK_NULL_HANDLE);
+        target.color_memory = std::exchange(offscreen_memory_, VK_NULL_HANDLE);
+        target.color_layout = std::exchange(offscreen_layout_, VK_IMAGE_LAYOUT_UNDEFINED);
+        target.depth_image = std::exchange(depth_image_, VK_NULL_HANDLE);
+        target.depth_view = std::exchange(depth_image_view_, VK_NULL_HANDLE);
+        target.depth_memory = std::exchange(depth_memory_, VK_NULL_HANDLE);
+        target.depth_layout = std::exchange(depth_layout_, VK_IMAGE_LAYOUT_UNDEFINED);
+        target.extent = std::exchange(offscreen_extent_, rhi::RenderExtent{});
+        return core::Status::ok();
+    }
+
     [[nodiscard]] core::Result<rhi::RenderFrameStats>
     render_present_frame(rhi::RenderFrameDesc desc,
                          std::span<const VulkanFrameTransition> frame_transitions) {
@@ -3695,7 +4085,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         swapchain_image_layouts_[image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
         rhi::RenderFrameStats stats;
         stats.backend = backend();
-        stats.frame_index = completed_frame_count_;
+        stats.frame_index = next_frame_index_++;
+        stats.submission_serial = ++last_submission_serial_;
+        complete_all_submissions();
+        advance_completed_submission(stats.submission_serial);
+        stats.completed_submission_serial = completed_submission_serial_;
         stats.extent = swapchain_extent_;
         stats.clear_color = desc.clear_color;
         stats.presented = true;
@@ -3709,6 +4103,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
     [[nodiscard]] core::Status
     validate_submitted_frame_resources(const rhi::RenderFrameSubmission& frame) const {
+        if (frame.pass_commands.empty()) {
+            return core::Status::ok();
+        }
         if (frame.pass_commands.size() != 1) {
             return core::Status::failure(
                 "renderer.vulkan_multiple_graphics_passes_unsupported",
@@ -3810,7 +4207,6 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     [[nodiscard]] core::Result<rhi::RenderFrameStats>
     execute_submitted_frame(const rhi::RenderFrameSubmission& frame) {
         using Clock = std::chrono::steady_clock;
-        const auto gpu_timing = collect_latest_gpu_timing();
         double gpu_wait_ms = 0.0;
         const auto accumulate_wait = [&gpu_wait_ms](Clock::time_point started) noexcept {
             gpu_wait_ms +=
@@ -3845,10 +4241,32 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     "failed to idle Vulkan device before frame resize: " +
                         std::string(vk_result_name(idle_result)));
             }
+            complete_all_submissions();
             desc_.initial_extent = frame.plan.extent;
             destroy_swapchain();
             destroy_offscreen_target();
+            for (auto& context : frame_contexts_) {
+                if (context.framebuffer != VK_NULL_HANDLE) {
+                    vkDestroyFramebuffer(device_, context.framebuffer, nullptr);
+                    context.framebuffer = VK_NULL_HANDLE;
+                }
+                destroy_frame_target(context.target);
+            }
         }
+
+        if (frame_contexts_.empty()) {
+            return core::Result<rhi::RenderFrameStats>::failure(
+                "renderer.vulkan_frame_context_unavailable",
+                "Vulkan frame contexts were not initialized");
+        }
+        auto& frame_context = frame_contexts_[next_frame_context_];
+        auto context_status = wait_for_frame_context(frame_context, gpu_wait_ms);
+        if (!context_status) {
+            return core::Result<rhi::RenderFrameStats>::failure(context_status.error().code,
+                                                                context_status.error().message);
+        }
+        const auto gpu_timing = collect_latest_gpu_timing();
+        const auto frame_index = next_frame_index_;
 
         std::uint32_t image_index = 0;
         bool acquired_suboptimal = false;
@@ -3864,7 +4282,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             auto wait_started = Clock::now();
             auto acquire_result =
                 vkAcquireNextImageKHR(device_, swapchain_, acquire_timeout_nanoseconds,
-                                      image_available_semaphore_, VK_NULL_HANDLE, &image_index);
+                                      frame_context.image_available, VK_NULL_HANDLE, &image_index);
             accumulate_wait(wait_started);
             if (acquire_result == VK_ERROR_OUT_OF_DATE_KHR) {
                 wait_started = Clock::now();
@@ -3876,6 +4294,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                         "failed to idle Vulkan device for swapchain recreation: " +
                             std::string(vk_result_name(idle_result)));
                 }
+                complete_all_submissions();
                 destroy_swapchain();
                 status = ensure_swapchain();
                 if (!status) {
@@ -3883,15 +4302,17 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                                                                         status.error().message);
                 }
                 wait_started = Clock::now();
-                acquire_result =
-                    vkAcquireNextImageKHR(device_, swapchain_, acquire_timeout_nanoseconds,
-                                          image_available_semaphore_, VK_NULL_HANDLE, &image_index);
+                acquire_result = vkAcquireNextImageKHR(
+                    device_, swapchain_, acquire_timeout_nanoseconds, frame_context.image_available,
+                    VK_NULL_HANDLE, &image_index);
                 accumulate_wait(wait_started);
             }
             if (acquire_result == VK_TIMEOUT || acquire_result == VK_NOT_READY) {
                 rhi::RenderFrameStats stats;
                 stats.backend = backend();
-                stats.frame_index = completed_frame_count_;
+                stats.frame_index = frame_index;
+                stats.submission_serial = last_submission_serial_;
+                stats.completed_submission_serial = completed_submission_serial_;
                 stats.extent = swapchain_extent_;
                 stats.clear_color = frame.plan.first_clear_color();
                 stats.presented = false;
@@ -3901,7 +4322,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 stats.dependency_count = execution_plan.value().dependencies.size();
                 stats.transition_count = execution_plan.value().transitions.size();
                 stats.cpu_gpu_wait_ms = gpu_wait_ms;
-                attach_gpu_timing(stats, gpu_timing, completed_frame_count_);
+                attach_gpu_timing(stats, gpu_timing, frame_index);
                 return core::Result<rhi::RenderFrameStats>::success(stats);
             }
             acquired_suboptimal = acquire_result == VK_SUBOPTIMAL_KHR;
@@ -3919,34 +4340,51 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         }
 
         const auto target_extent = present ? swapchain_extent_ : frame.plan.extent;
-        auto status = ensure_offscreen_target(target_extent);
+        auto status = ensure_frame_target(frame_context, target_extent);
         if (!status) {
             return core::Result<rhi::RenderFrameStats>::failure(status.error().code,
                                                                 status.error().message);
         }
 
-        const auto& pass_commands = frame.pass_commands.front();
-        const auto first_pipeline_it =
-            graphics_pipelines_.find(pass_commands.draws.front().pipeline.value);
-        auto& first_pipeline = first_pipeline_it->second;
+        const auto has_draws = !frame.pass_commands.empty();
+        const rhi::RenderPassCommands* pass_commands =
+            has_draws ? &frame.pass_commands.front() : nullptr;
+        VulkanGraphicsPipelineResource* first_pipeline = nullptr;
+        if (has_draws) {
+            const auto first_pipeline_it =
+                graphics_pipelines_.find(pass_commands->draws.front().pipeline.value);
+            first_pipeline = &first_pipeline_it->second;
+        }
 
-        std::array<VkImageView, 2> framebuffer_attachments{offscreen_image_view_,
-                                                           depth_image_view_};
-        VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        VkFramebufferCreateInfo framebuffer_info{};
-        framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebuffer_info.renderPass = first_pipeline.render_pass;
-        framebuffer_info.attachmentCount = first_pipeline.uses_depth ? 2U : 1U;
-        framebuffer_info.pAttachments = framebuffer_attachments.data();
-        framebuffer_info.width = target_extent.width;
-        framebuffer_info.height = target_extent.height;
-        framebuffer_info.layers = 1;
-        auto result = vkCreateFramebuffer(device_, &framebuffer_info, nullptr, &framebuffer);
-        if (result != VK_SUCCESS) {
-            return core::Result<rhi::RenderFrameStats>::failure(
-                "renderer.vulkan_framebuffer_failed",
-                "failed to create Vulkan terrain framebuffer: " +
-                    std::string(vk_result_name(result)));
+        const auto frame_commands = frame_context.graphics_commands;
+        const auto frame_fence = frame_context.completion_fence;
+        const auto frame_image_available = frame_context.image_available;
+        auto& frame_color_image = frame_context.target.color_image;
+        auto& frame_color_view = frame_context.target.color_view;
+        auto& frame_color_layout = frame_context.target.color_layout;
+        auto& frame_depth_image = frame_context.target.depth_image;
+        auto& frame_depth_view = frame_context.target.depth_view;
+        auto& frame_depth_layout = frame_context.target.depth_layout;
+
+        std::array<VkImageView, 2> framebuffer_attachments{frame_color_view, frame_depth_view};
+        auto& framebuffer = frame_context.framebuffer;
+        auto result = VK_SUCCESS;
+        if (has_draws) {
+            VkFramebufferCreateInfo framebuffer_info{};
+            framebuffer_info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+            framebuffer_info.renderPass = first_pipeline->render_pass;
+            framebuffer_info.attachmentCount = first_pipeline->uses_depth ? 2U : 1U;
+            framebuffer_info.pAttachments = framebuffer_attachments.data();
+            framebuffer_info.width = target_extent.width;
+            framebuffer_info.height = target_extent.height;
+            framebuffer_info.layers = 1;
+            result = vkCreateFramebuffer(device_, &framebuffer_info, nullptr, &framebuffer);
+            if (result != VK_SUCCESS) {
+                return core::Result<rhi::RenderFrameStats>::failure(
+                    "renderer.vulkan_framebuffer_failed",
+                    "failed to create Vulkan terrain framebuffer: " +
+                        std::string(vk_result_name(result)));
+            }
         }
         const auto destroy_framebuffer = [&]() noexcept {
             if (framebuffer != VK_NULL_HANDLE) {
@@ -3955,26 +4393,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             }
         };
 
-        result = vkResetFences(device_, 1, &fence_);
-        if (result != VK_SUCCESS) {
-            destroy_framebuffer();
-            return core::Result<rhi::RenderFrameStats>::failure(
-                "renderer.vulkan_reset_fence_failed",
-                "failed to reset Vulkan terrain fence: " + std::string(vk_result_name(result)));
-        }
         const auto command_recording_started = Clock::now();
-        result = vkResetCommandBuffer(command_buffer_, 0);
-        if (result != VK_SUCCESS) {
-            destroy_framebuffer();
-            return core::Result<rhi::RenderFrameStats>::failure(
-                "renderer.vulkan_reset_command_buffer_failed",
-                "failed to reset Vulkan terrain command buffer: " +
-                    std::string(vk_result_name(result)));
-        }
         VkCommandBufferBeginInfo begin_info{};
         begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        result = vkBeginCommandBuffer(command_buffer_, &begin_info);
+        result = vkBeginCommandBuffer(frame_commands, &begin_info);
         if (result != VK_SUCCESS) {
             destroy_framebuffer();
             return core::Result<rhi::RenderFrameStats>::failure(
@@ -3982,137 +4405,171 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "failed to begin Vulkan terrain command buffer: " +
                     std::string(vk_result_name(result)));
         }
-        begin_timestamp_frame(command_buffer_, completed_frame_count_);
+        begin_timestamp_frame(frame_commands, frame_index);
 
         const VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        VkImageMemoryBarrier color_to_attachment{};
-        color_to_attachment.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        color_to_attachment.srcAccessMask =
-            offscreen_layout_ == VK_IMAGE_LAYOUT_UNDEFINED
-                ? 0
-                : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
-        color_to_attachment.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        color_to_attachment.oldLayout = offscreen_layout_;
-        color_to_attachment.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        color_to_attachment.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        color_to_attachment.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        color_to_attachment.image = offscreen_image_;
-        color_to_attachment.subresourceRange = color_range;
-        vkCmdPipelineBarrier(command_buffer_,
-                             offscreen_layout_ == VK_IMAGE_LAYOUT_UNDEFINED
-                                 ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                                 : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
-                             nullptr, 1, &color_to_attachment);
-
         std::size_t submitted_barrier_count = 1;
-        if (first_pipeline.uses_depth) {
-            VkImageSubresourceRange depth_range{};
-            depth_range.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-            if (vulkan_format_has_stencil(depth_format_)) {
-                depth_range.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
-            }
-            depth_range.levelCount = 1;
-            depth_range.layerCount = 1;
-            VkImageMemoryBarrier depth_to_attachment{};
-            depth_to_attachment.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            depth_to_attachment.srcAccessMask = depth_layout_ == VK_IMAGE_LAYOUT_UNDEFINED
-                                                    ? 0
-                                                    : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            depth_to_attachment.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-            depth_to_attachment.oldLayout = depth_layout_;
-            depth_to_attachment.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            depth_to_attachment.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            depth_to_attachment.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            depth_to_attachment.image = depth_image_;
-            depth_to_attachment.subresourceRange = depth_range;
-            vkCmdPipelineBarrier(command_buffer_,
-                                 depth_layout_ == VK_IMAGE_LAYOUT_UNDEFINED
-                                     ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
-                                     : VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
-                                 VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, nullptr, 0,
-                                 nullptr, 1, &depth_to_attachment);
-            ++submitted_barrier_count;
-        }
-
-        std::array<VkClearValue, 2> clear_values{};
         const auto clear_color = frame.plan.first_clear_color();
-        clear_values[0].color = VkClearColorValue{
-            {clear_color.red, clear_color.green, clear_color.blue, clear_color.alpha}};
-        clear_values[1].depthStencil = VkClearDepthStencilValue{1.0F, 0};
-        VkRenderPassBeginInfo render_pass_begin{};
-        render_pass_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        render_pass_begin.renderPass = first_pipeline.render_pass;
-        render_pass_begin.framebuffer = framebuffer;
-        render_pass_begin.renderArea.extent = VkExtent2D{target_extent.width, target_extent.height};
-        render_pass_begin.clearValueCount = first_pipeline.uses_depth ? 2U : 1U;
-        render_pass_begin.pClearValues = clear_values.data();
-        begin_debug_label(command_buffer_, "Opaque terrain pass", 0.20F, 0.72F, 0.28F);
-        write_timestamp(command_buffer_, completed_frame_count_, opaque_start_timestamp,
+        begin_debug_label(frame_commands, "Opaque terrain pass", 0.20F, 0.72F, 0.28F);
+        write_timestamp(frame_commands, frame_index, opaque_start_timestamp,
                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
-        vkCmdBeginRenderPass(command_buffer_, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+        if (has_draws) {
+            VkImageMemoryBarrier color_to_attachment{};
+            color_to_attachment.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            color_to_attachment.srcAccessMask =
+                frame_color_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                    ? 0
+                    : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            color_to_attachment.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            color_to_attachment.oldLayout = frame_color_layout;
+            color_to_attachment.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            color_to_attachment.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            color_to_attachment.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            color_to_attachment.image = frame_color_image;
+            color_to_attachment.subresourceRange = color_range;
+            vkCmdPipelineBarrier(frame_commands,
+                                 frame_color_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                     ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                     : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, nullptr, 0,
+                                 nullptr, 1, &color_to_attachment);
 
-        VkViewport viewport{};
-        viewport.width = static_cast<float>(target_extent.width);
-        viewport.height = static_cast<float>(target_extent.height);
-        viewport.minDepth = 0.0F;
-        viewport.maxDepth = 1.0F;
-        vkCmdSetViewport(command_buffer_, 0, 1, &viewport);
-        VkRect2D scissor{};
-        scissor.extent = VkExtent2D{target_extent.width, target_extent.height};
-        vkCmdSetScissor(command_buffer_, 0, 1, &scissor);
-
-        for (const auto& draw : pass_commands.draws) {
-            auto& pipeline = graphics_pipelines_.at(draw.pipeline.value);
-            auto& vertex = buffer_resources_.at(draw.vertex_buffer.value);
-            auto& index = buffer_resources_.at(draw.index_buffer.value);
-            auto& layout = pipeline_layouts_.at(pipeline.desc.material_id.value());
-            vkCmdBindPipeline(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.pipeline);
-            const VkDeviceSize vertex_buffer_offset = 0;
-            vkCmdBindVertexBuffers(command_buffer_, 0, 1, &vertex.buffer, &vertex_buffer_offset);
-            vkCmdBindIndexBuffer(command_buffer_, index.buffer, 0, VK_INDEX_TYPE_UINT32);
-            if (layout.descriptor_set != VK_NULL_HANDLE) {
-                vkCmdBindDescriptorSets(command_buffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        layout.pipeline_layout, 0, 1, &layout.descriptor_set, 0,
-                                        nullptr);
+            if (first_pipeline->uses_depth) {
+                VkImageSubresourceRange depth_range{};
+                depth_range.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                if (vulkan_format_has_stencil(depth_format_)) {
+                    depth_range.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+                }
+                depth_range.levelCount = 1;
+                depth_range.layerCount = 1;
+                VkImageMemoryBarrier depth_to_attachment{};
+                depth_to_attachment.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                depth_to_attachment.srcAccessMask =
+                    frame_depth_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                        ? 0
+                        : VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                depth_to_attachment.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                                    VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+                depth_to_attachment.oldLayout = frame_depth_layout;
+                depth_to_attachment.newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depth_to_attachment.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depth_to_attachment.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                depth_to_attachment.image = frame_depth_image;
+                depth_to_attachment.subresourceRange = depth_range;
+                vkCmdPipelineBarrier(frame_commands,
+                                     frame_depth_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                         ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                         : VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                                     VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, nullptr, 0,
+                                     nullptr, 1, &depth_to_attachment);
+                ++submitted_barrier_count;
             }
-            const rhi::ChunkPushConstants constants{
-                frame.camera.view_projection,
-                {draw.camera_relative_origin.x, draw.camera_relative_origin.y,
-                 draw.camera_relative_origin.z, 0.0F},
-            };
-            vkCmdPushConstants(command_buffer_, layout.pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
-                               0, sizeof(constants), &constants);
-            vkCmdDrawIndexed(command_buffer_, draw.index_count, draw.instance_count,
-                             draw.first_index, draw.vertex_offset, draw.first_instance);
-        }
-        vkCmdEndRenderPass(command_buffer_);
-        write_timestamp(command_buffer_, completed_frame_count_, opaque_end_timestamp,
-                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        end_debug_label(command_buffer_);
 
-        begin_debug_label(command_buffer_, "Frame transfer", 0.30F, 0.48F, 0.92F);
-        write_timestamp(command_buffer_, completed_frame_count_, transfer_start_timestamp,
+            std::array<VkClearValue, 2> clear_values{};
+            clear_values[0].color = VkClearColorValue{
+                {clear_color.red, clear_color.green, clear_color.blue, clear_color.alpha}};
+            clear_values[1].depthStencil = VkClearDepthStencilValue{1.0F, 0};
+            VkRenderPassBeginInfo render_pass_begin{};
+            render_pass_begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            render_pass_begin.renderPass = first_pipeline->render_pass;
+            render_pass_begin.framebuffer = framebuffer;
+            render_pass_begin.renderArea.extent =
+                VkExtent2D{target_extent.width, target_extent.height};
+            render_pass_begin.clearValueCount = first_pipeline->uses_depth ? 2U : 1U;
+            render_pass_begin.pClearValues = clear_values.data();
+            vkCmdBeginRenderPass(frame_commands, &render_pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+
+            VkViewport viewport{};
+            viewport.width = static_cast<float>(target_extent.width);
+            viewport.height = static_cast<float>(target_extent.height);
+            viewport.minDepth = 0.0F;
+            viewport.maxDepth = 1.0F;
+            vkCmdSetViewport(frame_commands, 0, 1, &viewport);
+            VkRect2D scissor{};
+            scissor.extent = VkExtent2D{target_extent.width, target_extent.height};
+            vkCmdSetScissor(frame_commands, 0, 1, &scissor);
+
+            for (const auto& draw : pass_commands->draws) {
+                auto& pipeline = graphics_pipelines_.at(draw.pipeline.value);
+                auto& vertex = buffer_resources_.at(draw.vertex_buffer.value);
+                auto& index = buffer_resources_.at(draw.index_buffer.value);
+                auto& layout = pipeline_layouts_.at(pipeline.desc.material_id.value());
+                vkCmdBindPipeline(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                  pipeline.pipeline);
+                const VkDeviceSize vertex_buffer_offset = 0;
+                vkCmdBindVertexBuffers(frame_commands, 0, 1, &vertex.buffer, &vertex_buffer_offset);
+                vkCmdBindIndexBuffer(frame_commands, index.buffer, 0, VK_INDEX_TYPE_UINT32);
+                if (layout.descriptor_set != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            layout.pipeline_layout, 0, 1, &layout.descriptor_set, 0,
+                                            nullptr);
+                }
+                const rhi::ChunkPushConstants constants{
+                    frame.camera.view_projection,
+                    {draw.camera_relative_origin.x, draw.camera_relative_origin.y,
+                     draw.camera_relative_origin.z, 0.0F},
+                };
+                vkCmdPushConstants(frame_commands, layout.pipeline_layout,
+                                   VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(constants), &constants);
+                vkCmdDrawIndexed(frame_commands, draw.index_count, draw.instance_count,
+                                 draw.first_index, draw.vertex_offset, draw.first_instance);
+            }
+            vkCmdEndRenderPass(frame_commands);
+        } else {
+            VkImageMemoryBarrier color_to_clear{};
+            color_to_clear.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            color_to_clear.srcAccessMask =
+                frame_color_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                    ? 0
+                    : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            color_to_clear.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            color_to_clear.oldLayout = frame_color_layout;
+            color_to_clear.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            color_to_clear.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            color_to_clear.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            color_to_clear.image = frame_color_image;
+            color_to_clear.subresourceRange = color_range;
+            vkCmdPipelineBarrier(frame_commands,
+                                 frame_color_layout == VK_IMAGE_LAYOUT_UNDEFINED
+                                     ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
+                                     : VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                                 &color_to_clear);
+            const VkClearColorValue clear_value{
+                {clear_color.red, clear_color.green, clear_color.blue, clear_color.alpha}};
+            vkCmdClearColorImage(frame_commands, frame_color_image,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear_value, 1,
+                                 &color_range);
+        }
+        write_timestamp(frame_commands, frame_index, opaque_end_timestamp,
+                        VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        end_debug_label(frame_commands);
+
+        begin_debug_label(frame_commands, "Frame transfer", 0.30F, 0.48F, 0.92F);
+        write_timestamp(frame_commands, frame_index, transfer_start_timestamp,
                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
 
         VkImageMemoryBarrier color_to_transfer_source{};
         color_to_transfer_source.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        color_to_transfer_source.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        color_to_transfer_source.srcAccessMask =
+            has_draws ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT;
         color_to_transfer_source.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        color_to_transfer_source.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color_to_transfer_source.oldLayout = has_draws ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                                                       : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         color_to_transfer_source.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         color_to_transfer_source.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         color_to_transfer_source.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        color_to_transfer_source.image = offscreen_image_;
+        color_to_transfer_source.image = frame_color_image;
         color_to_transfer_source.subresourceRange = color_range;
-        vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        vkCmdPipelineBarrier(frame_commands,
+                             has_draws ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                                       : VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
                              &color_to_transfer_source);
         ++submitted_barrier_count;
 
-        begin_debug_label(command_buffer_, "Final copy", 0.72F, 0.34F, 0.90F);
-        write_timestamp(command_buffer_, completed_frame_count_, final_copy_start_timestamp,
+        begin_debug_label(frame_commands, "Final copy", 0.72F, 0.34F, 0.90F);
+        write_timestamp(frame_commands, frame_index, final_copy_start_timestamp,
                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT);
         if (present) {
             VkImageMemoryBarrier swapchain_to_transfer{};
@@ -4125,7 +4582,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             swapchain_to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             swapchain_to_transfer.image = swapchain_images_[image_index];
             swapchain_to_transfer.subresourceRange = color_range;
-            vkCmdPipelineBarrier(command_buffer_,
+            vkCmdPipelineBarrier(frame_commands,
                                  swapchain_image_layouts_[image_index] == VK_IMAGE_LAYOUT_UNDEFINED
                                      ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT
                                      : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
@@ -4141,7 +4598,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             blit.dstSubresource.layerCount = 1;
             blit.dstOffsets[1] = VkOffset3D{static_cast<std::int32_t>(swapchain_extent_.width),
                                             static_cast<std::int32_t>(swapchain_extent_.height), 1};
-            vkCmdBlitImage(command_buffer_, offscreen_image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            vkCmdBlitImage(frame_commands, frame_color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            swapchain_images_[image_index], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &blit, VK_FILTER_NEAREST);
 
@@ -4155,21 +4612,21 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             swapchain_to_present.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             swapchain_to_present.image = swapchain_images_[image_index];
             swapchain_to_present.subresourceRange = color_range;
-            vkCmdPipelineBarrier(command_buffer_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+            vkCmdPipelineBarrier(frame_commands, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr, 1,
                                  &swapchain_to_present);
             submitted_barrier_count += 2;
         }
-        write_timestamp(command_buffer_, completed_frame_count_, final_copy_end_timestamp,
+        write_timestamp(frame_commands, frame_index, final_copy_end_timestamp,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        end_debug_label(command_buffer_);
-        write_timestamp(command_buffer_, completed_frame_count_, transfer_end_timestamp,
+        end_debug_label(frame_commands);
+        write_timestamp(frame_commands, frame_index, transfer_end_timestamp,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
-        end_debug_label(command_buffer_);
-        write_timestamp(command_buffer_, completed_frame_count_, frame_end_timestamp,
+        end_debug_label(frame_commands);
+        write_timestamp(frame_commands, frame_index, frame_end_timestamp,
                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
 
-        result = vkEndCommandBuffer(command_buffer_);
+        result = vkEndCommandBuffer(frame_commands);
         if (result != VK_SUCCESS) {
             destroy_framebuffer();
             return core::Result<rhi::RenderFrameStats>::failure(
@@ -4186,14 +4643,15 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         if (present) {
             submit_info.waitSemaphoreCount = 1;
-            submit_info.pWaitSemaphores = &image_available_semaphore_;
+            submit_info.pWaitSemaphores = &frame_image_available;
             submit_info.pWaitDstStageMask = &wait_stage;
             submit_info.signalSemaphoreCount = 1;
             submit_info.pSignalSemaphores = &swapchain_render_finished_semaphores_[image_index];
         }
         submit_info.commandBufferCount = 1;
-        submit_info.pCommandBuffers = &command_buffer_;
-        result = vkQueueSubmit(queue_, 1, &submit_info, fence_);
+        submit_info.pCommandBuffers = &frame_commands;
+        const auto submission_serial = last_submission_serial_ + 1;
+        result = vkQueueSubmit(queue_, 1, &submit_info, frame_fence);
         if (result != VK_SUCCESS) {
             destroy_framebuffer();
             return core::Result<rhi::RenderFrameStats>::failure(
@@ -4201,24 +4659,16 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 "failed to submit unified Vulkan terrain frame: " +
                     std::string(vk_result_name(result)));
         }
+        last_submission_serial_ = submission_serial;
+        frame_context.submission_serial = submission_serial;
+        frame_context.in_flight = true;
+        pending_frame_submissions_.push_back(submission_serial);
+        ++next_frame_index_;
+        next_frame_context_ = (next_frame_context_ + 1) % frame_contexts_.size();
+        mark_timestamp_frame_pending(frame_index);
 
-        const auto fence_wait_started = Clock::now();
-        const auto wait_result = vkWaitForFences(device_, 1, &fence_, VK_TRUE,
-                                                 std::numeric_limits<std::uint64_t>::max());
-        accumulate_wait(fence_wait_started);
-        destroy_framebuffer();
-        if (wait_result != VK_SUCCESS) {
-            return core::Result<rhi::RenderFrameStats>::failure(
-                "renderer.vulkan_wait_fence_failed",
-                "failed to wait for unified Vulkan terrain frame: " +
-                    std::string(vk_result_name(wait_result)));
-        }
-        mark_timestamp_frame_pending(completed_frame_count_);
-
-        // This MVP deliberately has one frame in flight. The fence makes command-buffer and
-        // acquire-semaphore reuse safe. Presentation still waits on a semaphore owned by the
-        // acquired swapchain image; reacquiring that image guarantees its previous present wait
-        // has consumed the semaphore before it is signaled again.
+        // Render-finished semaphores are owned by swapchain images. Reacquiring an image proves
+        // that presentation consumed its prior wait before that semaphore is signaled again.
         VkResult present_result = VK_SUCCESS;
         if (present) {
             VkPresentInfoKHR present_info{};
@@ -4231,9 +4681,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             present_result = vkQueuePresentKHR(queue_, &present_info);
         }
 
-        offscreen_layout_ = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-        if (first_pipeline.uses_depth) {
-            depth_layout_ = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        frame_color_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        if (has_draws && first_pipeline->uses_depth) {
+            frame_depth_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         }
         bool presented = present;
         if (present && present_result != VK_SUCCESS && present_result != VK_SUBOPTIMAL_KHR &&
@@ -4258,6 +4708,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     "failed to idle Vulkan present queue for swapchain recreation: " +
                         std::string(vk_result_name(queue_idle_result)));
             }
+            complete_all_submissions();
             destroy_swapchain();
             const auto recreate_status = ensure_swapchain();
             if (!recreate_status) {
@@ -4268,7 +4719,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
         rhi::RenderFrameStats stats;
         stats.backend = backend();
-        stats.frame_index = completed_frame_count_;
+        stats.frame_index = frame_index;
+        stats.submission_serial = submission_serial;
+        stats.completed_submission_serial = completed_submission_serial_;
         stats.extent = target_extent;
         stats.clear_color = clear_color;
         stats.presented = presented;
@@ -4281,7 +4734,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.submitted_synchronization_barrier_count = submitted_barrier_count;
         stats.cpu_command_recording_ms = command_recording_ms;
         stats.cpu_gpu_wait_ms = gpu_wait_ms;
-        attach_gpu_timing(stats, gpu_timing, completed_frame_count_);
+        attach_gpu_timing(stats, gpu_timing, frame_index);
         for (const auto& commands : frame.pass_commands) {
             stats.draw_count += commands.draws.size();
             stats.indexed_draw_count += commands.draws.size();
@@ -4289,7 +4742,6 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 stats.total_indices += draw.index_count;
             }
         }
-        ++completed_frame_count_;
         return core::Result<rhi::RenderFrameStats>::success(stats);
     }
 
@@ -4757,6 +5209,10 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     VkFence fence_ = VK_NULL_HANDLE;
     VkSemaphore image_available_semaphore_ = VK_NULL_HANDLE;
     VkSemaphore render_finished_semaphore_ = VK_NULL_HANDLE;
+    std::vector<VulkanFrameContext> frame_contexts_;
+    std::vector<VulkanUploadContext> upload_contexts_;
+    std::size_t next_frame_context_ = 0;
+    std::size_t next_upload_context_ = 0;
     VkSwapchainKHR swapchain_ = VK_NULL_HANDLE;
     VkFormat swapchain_format_ = VK_FORMAT_UNDEFINED;
     rhi::RenderExtent swapchain_extent_{};
@@ -4768,12 +5224,15 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     VulkanBufferResource staging_buffer_;
     void* staging_mapped_ = nullptr;
     StagingRingAllocator staging_ring_{32U * 1024U * 1024U};
-    std::uint64_t next_upload_submission_serial_ = 0;
-    std::uint64_t completed_upload_submission_serial_ = 0;
     std::unordered_map<std::uint64_t, VulkanImageResource> image_resources_;
     std::unordered_map<std::uint64_t, VulkanShaderModuleResource> shader_modules_;
     std::unordered_map<std::uint64_t, VulkanComputePipelineResource> compute_pipelines_;
     std::unordered_map<std::uint64_t, VulkanGraphicsPipelineResource> graphics_pipelines_;
+    std::vector<RetiredVulkanResource<VulkanBufferResource>> retired_buffers_;
+    std::vector<RetiredVulkanResource<VulkanImageResource>> retired_images_;
+    std::vector<RetiredVulkanResource<VulkanShaderModuleResource>> retired_shader_modules_;
+    std::vector<RetiredVulkanResource<VulkanComputePipelineResource>> retired_compute_pipelines_;
+    std::vector<RetiredVulkanResource<VulkanGraphicsPipelineResource>> retired_graphics_pipelines_;
     std::unordered_map<std::string, rhi::RenderDescriptorWrite> descriptor_write_records_;
     std::unordered_map<std::string, VulkanPipelineLayoutResource> pipeline_layouts_;
     VkImage offscreen_image_ = VK_NULL_HANDLE;
@@ -4786,6 +5245,10 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     VkDeviceMemory depth_memory_ = VK_NULL_HANDLE;
     VkImageLayout depth_layout_ = VK_IMAGE_LAYOUT_UNDEFINED;
     std::uint64_t completed_frame_count_ = 0;
+    std::uint64_t next_frame_index_ = 0;
+    std::uint64_t last_submission_serial_ = 0;
+    std::uint64_t completed_submission_serial_ = 0;
+    std::deque<std::uint64_t> pending_frame_submissions_;
 };
 
 } // namespace
@@ -4922,11 +5385,16 @@ core::Result<std::unique_ptr<rhi::IRenderDevice>> create_device(rhi::RenderDevic
             render_finished_semaphore.error().code, render_finished_semaphore.error().message);
     }
 
-    return core::Result<std::unique_ptr<rhi::IRenderDevice>>::success(
-        std::make_unique<VulkanSmokeDevice>(
-            std::move(desc), std::move(instance).value(), std::move(selected).value(),
-            device.value(), queue, surface, command_pool.value(), command_buffer.value(),
-            fence.value(), image_available_semaphore.value(), render_finished_semaphore.value()));
+    auto backend = std::make_unique<VulkanSmokeDevice>(
+        std::move(desc), std::move(instance).value(), std::move(selected).value(), device.value(),
+        queue, surface, command_pool.value(), command_buffer.value(), fence.value(),
+        image_available_semaphore.value(), render_finished_semaphore.value());
+    auto frame_status = backend->initialize_frame_contexts();
+    if (!frame_status) {
+        return core::Result<std::unique_ptr<rhi::IRenderDevice>>::failure(
+            frame_status.error().code, frame_status.error().message);
+    }
+    return core::Result<std::unique_ptr<rhi::IRenderDevice>>::success(std::move(backend));
 }
 
 #else

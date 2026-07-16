@@ -14,6 +14,7 @@ struct StagingRingRange {
     std::uint64_t submission_serial = 0;
 
     [[nodiscard]] bool is_valid() const noexcept;
+    friend bool operator==(const StagingRingRange&, const StagingRingRange&) = default;
 };
 
 struct StagingRingStats {
@@ -31,6 +32,7 @@ class StagingRingAllocator {
     [[nodiscard]] core::Result<StagingRingRange>
     allocate(std::size_t size, std::size_t alignment, std::uint64_t submission_serial,
              std::uint64_t completed_submission_serial);
+    [[nodiscard]] bool cancel(StagingRingRange range) noexcept;
     void release_completed(std::uint64_t completed_submission_serial) noexcept;
     void reset() noexcept;
 

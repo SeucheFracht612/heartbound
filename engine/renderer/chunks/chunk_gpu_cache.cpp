@@ -150,7 +150,7 @@ core::Status ChunkGpuCache::erase(world::ChunkIdentity identity) {
                                         : "chunk GPU eviction references a stale load generation");
     }
 
-    auto retirement = retire_entry_allocations(found->second, device_->completed_frame_count());
+    auto retirement = retire_entry_allocations(found->second, device_->last_submission_serial());
     entries_.erase(found);
     collect_retired();
     refresh_current_stats();
@@ -160,7 +160,7 @@ core::Status ChunkGpuCache::erase(world::ChunkIdentity identity) {
 core::Status ChunkGpuCache::clear() {
     core::Status first_failure = core::Status::ok();
     for (const auto& [_, entry] : entries_) {
-        auto status = retire_entry_allocations(entry, device_->completed_frame_count());
+        auto status = retire_entry_allocations(entry, device_->last_submission_serial());
         if (!status && first_failure) {
             first_failure = status;
         }
@@ -365,7 +365,7 @@ ChunkGpuCache::replace_meshes(std::span<const ChunkGpuMeshUpload> uploads) {
         entry->local_bounds = upload.local_bounds;
         entry->state = ChunkGpuState::resident;
 
-        auto status = retire_entry_allocations(old_entry, device_->completed_frame_count());
+        auto status = retire_entry_allocations(old_entry, device_->last_submission_serial());
         if (!status && retirement_status) {
             retirement_status = status;
         }
@@ -414,10 +414,10 @@ core::Status ChunkGpuCache::retire_entry_allocations(const ChunkGpuEntry& entry,
 
 void ChunkGpuCache::collect_retired() noexcept {
     if (vertex_arena_ != nullptr) {
-        vertex_arena_->collect(device_->completed_frame_count());
+        vertex_arena_->collect(device_->completed_submission_serial());
     }
     if (index_arena_ != nullptr) {
-        index_arena_->collect(device_->completed_frame_count());
+        index_arena_->collect(device_->completed_submission_serial());
     }
 }
 

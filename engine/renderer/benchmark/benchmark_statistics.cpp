@@ -175,6 +175,8 @@ std::string BenchmarkRecorder::to_json() const {
     for (std::size_t index = 0; index < samples_.size(); ++index) {
         const auto& sample = samples_[index];
         output << "    {\"frame\": " << sample.frame_index
+               << ", \"submission_serial\": " << sample.submission_serial
+               << ", \"completed_submission_serial\": " << sample.completed_submission_serial
                << ", \"cpu_frame_ms\": " << sample.cpu_frame_ms
                << ", \"gpu_valid\": " << (sample.gpu_timing_valid ? "true" : "false")
                << ", \"gpu_timing_frame\": " << sample.gpu_timing_frame_index
@@ -219,7 +221,8 @@ std::string BenchmarkRecorder::to_json() const {
 std::string BenchmarkRecorder::to_csv() const {
     std::ostringstream output;
     output << std::fixed << std::setprecision(6);
-    output << "scene,seed,frame,cpu_frame_ms,gpu_valid,gpu_timing_frame,gpu_latency_frames,"
+    output << "scene,seed,frame,submission_serial,completed_submission_serial,cpu_frame_ms,"
+              "gpu_valid,gpu_timing_frame,gpu_latency_frames,"
               "gpu_frame_ms,gpu_opaque_ms,gpu_transfer_ms,gpu_final_copy_ms,extraction_ms,"
               "sync_ms,culling_ms,draw_list_ms,command_build_ms,command_recording_ms,snapshot_ms,"
               "meshing_ms,upload_preparation_ms,upload_ms,gpu_wait_ms,loaded_chunks,"
@@ -229,6 +232,7 @@ std::string BenchmarkRecorder::to_csv() const {
               "gpu_arena_fragmentation,pending_upload_bytes,uploaded_bytes\n";
     for (const auto& sample : samples_) {
         output << '"' << scene_ << "\"," << seed_ << ',' << sample.frame_index << ','
+               << sample.submission_serial << ',' << sample.completed_submission_serial << ','
                << sample.cpu_frame_ms << ',' << (sample.gpu_timing_valid ? 1 : 0) << ','
                << sample.gpu_timing_frame_index << ',' << sample.gpu_timing_latency_frames << ','
                << sample.gpu_frame_ms << ',' << sample.gpu_opaque_terrain_ms << ','

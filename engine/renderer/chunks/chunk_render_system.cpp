@@ -228,12 +228,18 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
 }
 
 ChunkDrawList ChunkRenderSystem::build_draw_list(const RenderCamera& camera) {
+    return build_draw_list(camera, {});
+}
+
+ChunkDrawList
+ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
+                                   std::vector<rhi::RenderDrawCommand> reusable_draw_storage) {
     ChunkDrawList result;
-    struct VisibleEntry {
-        const ChunkGpuEntry* entry = nullptr;
-        math::Vec3f origin{};
-    };
-    std::vector<VisibleEntry> visible_entries;
+    result.draws = std::move(reusable_draw_storage);
+    result.draws.clear();
+    visible_chunks_scratch_.clear();
+    visible_chunks_scratch_.reserve(cache_->stats().entry_count);
+    result.draws.reserve(cache_->stats().resident_chunk_count);
     const auto frustum = RenderFrustum::from_view_projection(camera.view_projection);
     {
         profiling::ScopedCpuTimingZone culling_zone(timings_,
@@ -249,14 +255,14 @@ ChunkDrawList ChunkRenderSystem::build_draw_list(const RenderCamera& camera) {
                 continue;
             }
             ++result.visible_chunk_count;
-            visible_entries.push_back({entry, origin.value()});
+            visible_chunks_scratch_.push_back({entry, origin.value()});
         }
     }
 
     {
         profiling::ScopedCpuTimingZone draw_zone(timings_,
                                                  profiling::CpuTimingZone::draw_list_construction);
-        for (const auto& visible : visible_entries) {
+        for (const auto& visible : visible_chunks_scratch_) {
             if (!visible.entry->has_drawable_mesh()) {
                 continue;
             }

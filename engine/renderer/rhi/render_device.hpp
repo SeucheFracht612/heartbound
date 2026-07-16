@@ -117,6 +117,7 @@ struct RenderDeviceDesc {
     std::string application_name = "Heartstead";
     RenderExtent initial_extent{1280, 720};
     PresentMode present_mode = PresentMode::fifo;
+    std::uint32_t frames_in_flight = 2;
     bool enable_validation = true;
     std::optional<platform::NativeWindowHandle> native_window;
 };
@@ -130,6 +131,8 @@ struct RenderFrameDesc {
 struct RenderFrameStats {
     RenderBackend backend = RenderBackend::headless;
     std::uint64_t frame_index = 0;
+    std::uint64_t submission_serial = 0;
+    std::uint64_t completed_submission_serial = 0;
     RenderExtent extent{};
     ClearColor clear_color{};
     bool presented = false;
@@ -181,6 +184,7 @@ struct RenderBufferBatchUploadStats {
     RenderBackend backend = RenderBackend::headless;
     std::size_t write_count = 0;
     std::size_t byte_size = 0;
+    std::uint64_t submission_serial = 0;
     bool used_fallback_staging = false;
     bool gpu_backed = false;
 };
@@ -488,6 +492,8 @@ class IRenderDevice {
     [[nodiscard]] virtual RenderDeviceCapabilities capabilities() const noexcept = 0;
     [[nodiscard]] virtual RenderExtent current_extent() const noexcept = 0;
     [[nodiscard]] virtual std::uint64_t completed_frame_count() const noexcept = 0;
+    [[nodiscard]] virtual std::uint64_t last_submission_serial() const noexcept = 0;
+    [[nodiscard]] virtual std::uint64_t completed_submission_serial() const noexcept = 0;
     [[nodiscard]] virtual std::size_t live_resource_count() const noexcept = 0;
 
     [[nodiscard]] virtual core::Status resize(RenderExtent extent) = 0;

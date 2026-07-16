@@ -91,6 +91,14 @@ class HeadlessRenderDevice final : public IRenderDevice {
         return completed_frame_count_;
     }
 
+    [[nodiscard]] std::uint64_t last_submission_serial() const noexcept override {
+        return last_submission_serial_;
+    }
+
+    [[nodiscard]] std::uint64_t completed_submission_serial() const noexcept override {
+        return completed_submission_serial_;
+    }
+
     [[nodiscard]] std::size_t live_resource_count() const noexcept override {
         return resources_.size() + image_resources_.size() + shader_modules_.size() +
                compute_pipelines_.size() + graphics_pipelines_.size();
@@ -231,7 +239,10 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.cpu_command_recording_ms = std::chrono::duration<double, std::milli>(
                                              std::chrono::steady_clock::now() - command_started)
                                              .count();
+        stats.submission_serial = ++last_submission_serial_;
         ++completed_frame_count_;
+        completed_submission_serial_ = stats.submission_serial;
+        stats.completed_submission_serial = completed_submission_serial_;
         return core::Result<RenderFrameStats>::success(stats);
     }
 
@@ -308,6 +319,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
         stats.backend = backend();
         stats.write_count = writes.size();
         stats.byte_size = byte_size;
+        stats.submission_serial = ++last_submission_serial_;
+        completed_submission_serial_ = stats.submission_serial;
         return core::Result<RenderBufferBatchUploadStats>::success(stats);
     }
 
@@ -724,6 +737,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
     RenderDeviceDesc desc_;
     std::uint64_t completed_frame_count_ = 0;
+    std::uint64_t last_submission_serial_ = 0;
+    std::uint64_t completed_submission_serial_ = 0;
     std::uint64_t next_resource_id_ = 1;
     std::unordered_map<std::uint64_t, RenderBufferDesc> resources_;
     std::unordered_map<std::uint64_t, RenderImageDesc> image_resources_;
@@ -763,6 +778,10 @@ core::Status validate_render_device_desc(const RenderDeviceDesc& desc) {
     if (desc.application_name.empty()) {
         return core::Status::failure("renderer.invalid_application_name",
                                      "render device application name must not be empty");
+    }
+    if (desc.frames_in_flight == 0 || desc.frames_in_flight > 3) {
+        return core::Status::failure("renderer.invalid_frames_in_flight",
+                                     "frames in flight must be between one and three");
     }
     return validate_render_extent(desc.initial_extent);
 }

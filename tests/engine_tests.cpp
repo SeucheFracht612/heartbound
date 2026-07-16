@@ -2413,6 +2413,12 @@ void test_renderer_rhi() {
     desc.application_name = "Heartstead Renderer Test";
     desc.initial_extent = RenderExtent{640, 360};
 
+    auto invalid_frame_count_desc = desc;
+    invalid_frame_count_desc.frames_in_flight = 0;
+    auto invalid_frame_count_device = create_render_device(invalid_frame_count_desc);
+    assert(!invalid_frame_count_device);
+    assert(invalid_frame_count_device.error().code == "renderer.invalid_frames_in_flight");
+
     auto device = create_render_device(desc);
     assert(device);
     assert(device.value()->backend() == RenderBackend::headless);
@@ -2435,6 +2441,8 @@ void test_renderer_rhi() {
     assert(capabilities.headless);
     assert(device.value()->live_resource_count() == 0);
     assert(device.value()->completed_frame_count() == 0);
+    assert(device.value()->last_submission_serial() == 0);
+    assert(device.value()->completed_submission_serial() == 0);
     assert(device.value()->current_extent().width == 640);
     assert(device.value()->current_extent().height == 360);
 
@@ -2442,6 +2450,8 @@ void test_renderer_rhi() {
         RenderFrameDesc{ClearColor{0.25F, 0.5F, 0.75F, 1.0F}, {}, true});
     assert(frame);
     assert(frame.value().frame_index == 0);
+    assert(frame.value().submission_serial == 1);
+    assert(frame.value().completed_submission_serial == 1);
     assert(frame.value().extent.width == 640);
     assert(frame.value().extent.height == 360);
     assert(frame.value().clear_color.blue == 0.75F);
@@ -2454,6 +2464,8 @@ void test_renderer_rhi() {
     assert(frame.value().synchronization_barrier_count == 2);
     assert(frame.value().submitted_synchronization_barrier_count == 2);
     assert(device.value()->completed_frame_count() == 1);
+    assert(device.value()->last_submission_serial() == 1);
+    assert(device.value()->completed_submission_serial() == 1);
 
     auto resized = device.value()->resize(RenderExtent{800, 450});
     assert(resized);

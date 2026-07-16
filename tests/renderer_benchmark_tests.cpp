@@ -41,7 +41,8 @@ void test_benchmark_statistics() {
     assert(summary.total_uploaded_bytes == 64);
     assert(recorder.to_json().find("\"p99_frame_ms\": 97.090000") != std::string::npos);
     assert(recorder.to_json().find("\"frames\": [") != std::string::npos);
-    assert(recorder.to_csv().find("scene,seed,frame,cpu_frame_ms") == 0);
+    assert(recorder.to_csv().find(
+               "scene,seed,frame,submission_serial,completed_submission_serial,cpu_frame_ms") == 0);
     assert(benchmark::format_benchmark_summary(summary).find("0.1%low=10.000fps") !=
            std::string::npos);
 }
@@ -49,16 +50,11 @@ void test_benchmark_statistics() {
 void test_all_deterministic_scenes_construct() {
     using namespace heartstead::renderer::benchmark;
     constexpr std::array kinds{
-        BenchmarkSceneKind::flat_terrain,
-        BenchmarkSceneKind::mountainous_terrain,
-        BenchmarkSceneKind::dense_caves,
-        BenchmarkSceneKind::checkerboard_geometry,
-        BenchmarkSceneKind::forest_cross_planes,
-        BenchmarkSceneKind::rapid_voxel_edits,
-        BenchmarkSceneKind::high_speed_flythrough,
-        BenchmarkSceneKind::chunk_load_unload_churn,
-        BenchmarkSceneKind::large_coordinates,
-        BenchmarkSceneKind::resize_minimize_stress,
+        BenchmarkSceneKind::flat_terrain,          BenchmarkSceneKind::mountainous_terrain,
+        BenchmarkSceneKind::dense_caves,           BenchmarkSceneKind::checkerboard_geometry,
+        BenchmarkSceneKind::forest_cross_planes,   BenchmarkSceneKind::rapid_voxel_edits,
+        BenchmarkSceneKind::high_speed_flythrough, BenchmarkSceneKind::chunk_load_unload_churn,
+        BenchmarkSceneKind::large_coordinates,     BenchmarkSceneKind::resize_minimize_stress,
     };
     for (const auto kind : kinds) {
         BenchmarkSceneConfig config;
