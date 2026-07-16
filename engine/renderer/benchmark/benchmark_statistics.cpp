@@ -63,6 +63,19 @@ namespace {
     return escaped;
 }
 
+[[nodiscard]] std::string csv_escape(std::string_view value) {
+    std::string escaped{"\""};
+    for (const char character : value) {
+        if (character == '"') {
+            escaped += "\"\"";
+        } else {
+            escaped += character;
+        }
+    }
+    escaped += '"';
+    return escaped;
+}
+
 [[nodiscard]] core::Status write_text_file(const std::filesystem::path& path,
                                            std::string_view text) {
     std::error_code error;
@@ -90,7 +103,10 @@ namespace {
 } // namespace
 
 BenchmarkRecorder::BenchmarkRecorder(std::string scene, std::uint64_t seed)
-    : scene_(std::move(scene)), seed_(seed) {}
+    : BenchmarkRecorder(BenchmarkRunMetadata{.scene = std::move(scene), .seed = seed}) {}
+
+BenchmarkRecorder::BenchmarkRecorder(BenchmarkRunMetadata metadata)
+    : metadata_(std::move(metadata)) {}
 
 void BenchmarkRecorder::record(RendererStats stats) {
     samples_.push_back(stats);
@@ -104,10 +120,14 @@ const std::vector<RendererStats>& BenchmarkRecorder::samples() const noexcept {
     return samples_;
 }
 
+const BenchmarkRunMetadata& BenchmarkRecorder::metadata() const noexcept {
+    return metadata_;
+}
+
 BenchmarkSummary BenchmarkRecorder::summarize() const {
     BenchmarkSummary summary;
-    summary.scene = scene_;
-    summary.seed = seed_;
+    summary.scene = metadata_.scene;
+    summary.seed = metadata_.seed;
     summary.sample_count = samples_.size();
     if (samples_.empty()) {
         return summary;
@@ -163,8 +183,21 @@ std::string BenchmarkRecorder::to_json() const {
     const auto summary = summarize();
     std::ostringstream output;
     output << std::fixed << std::setprecision(6);
-    output << "{\n  \"scene\": \"" << json_escape(scene_) << "\",\n"
-           << "  \"seed\": " << seed_ << ",\n"
+    output << "{\n  \"schema\": \"heartstead.renderer_benchmark.v1\",\n"
+           << "  \"scene\": \"" << json_escape(metadata_.scene) << "\",\n"
+           << "  \"seed\": " << metadata_.seed << ",\n"
+           << "  \"run\": {\n"
+           << "    \"backend\": \"" << json_escape(metadata_.backend) << "\",\n"
+           << "    \"mesher\": \"" << json_escape(metadata_.mesher) << "\",\n"
+           << "    \"initial_width\": " << metadata_.initial_width << ",\n"
+           << "    \"initial_height\": " << metadata_.initial_height << ",\n"
+           << "    \"chunk_radius\": " << metadata_.chunk_radius << ",\n"
+           << "    \"warmup_frames\": " << metadata_.warmup_frames << ",\n"
+           << "    \"measured_frames\": " << metadata_.measured_frames << ",\n"
+           << "    \"frame_cap\": " << metadata_.frame_cap << ",\n"
+           << "    \"validation_requested\": "
+           << (metadata_.validation_requested ? "true" : "false") << "\n"
+           << "  },\n"
            << "  \"summary\": {\n"
            << "    \"sample_count\": " << summary.sample_count << ",\n"
            << "    \"gpu_sample_count\": " << summary.gpu_sample_count << ",\n"
@@ -238,9 +271,13 @@ std::string BenchmarkRecorder::to_json() const {
 }
 
 std::string BenchmarkRecorder::to_csv() const {
+    const auto summary = summarize();
     std::ostringstream output;
     output << std::fixed << std::setprecision(6);
-    output << "scene,seed,frame,submission_serial,completed_submission_serial,cpu_frame_ms,"
+    output << "scene,seed,backend,mesher,initial_width,initial_height,chunk_radius,warmup_frames,"
+              "measured_frames,frame_cap,validation_requested,median_frame_ms,p95_frame_ms,"
+              "p99_frame_ms,one_percent_low_fps,point_one_percent_low_fps,maximum_frame_ms,"
+              "frame,submission_serial,completed_submission_serial,cpu_frame_ms,"
               "gpu_valid,gpu_timing_frame,gpu_latency_frames,gpu_frame_ms,gpu_upload_valid,"
               "gpu_upload_submission_serial,gpu_upload_ms,gpu_opaque_ms,gpu_transfer_ms,"
               "gpu_final_copy_ms,extraction_ms,"
@@ -253,7 +290,15 @@ std::string BenchmarkRecorder::to_csv() const {
               "gpu_arena_capacity_bytes,gpu_arena_used_bytes,gpu_arena_free_bytes,"
               "gpu_arena_fragmentation,pending_upload_bytes,uploaded_bytes\n";
     for (const auto& sample : samples_) {
-        output << '"' << scene_ << "\"," << seed_ << ',' << sample.frame_index << ','
+        output << csv_escape(metadata_.scene) << ',' << metadata_.seed << ','
+               << csv_escape(metadata_.backend) << ',' << csv_escape(metadata_.mesher) << ','
+               << metadata_.initial_width << ',' << metadata_.initial_height << ','
+               << metadata_.chunk_radius << ',' << metadata_.warmup_frames << ','
+               << metadata_.measured_frames << ',' << metadata_.frame_cap << ','
+               << (metadata_.validation_requested ? 1 : 0) << ',' << summary.median_frame_ms << ','
+               << summary.p95_frame_ms << ',' << summary.p99_frame_ms << ','
+               << summary.one_percent_low_fps << ',' << summary.point_one_percent_low_fps << ','
+               << summary.maximum_frame_ms << ',' << sample.frame_index << ','
                << sample.submission_serial << ',' << sample.completed_submission_serial << ','
                << sample.cpu_frame_ms << ',' << (sample.gpu_timing_valid ? 1 : 0) << ','
                << sample.gpu_timing_frame_index << ',' << sample.gpu_timing_latency_frames << ','

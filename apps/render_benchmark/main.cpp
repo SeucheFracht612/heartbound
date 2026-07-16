@@ -358,7 +358,19 @@ int main(int argc, char** argv) {
     }
 
     const auto scene_name = std::string(renderer::benchmark::benchmark_scene_name(options.scene));
-    renderer::benchmark::BenchmarkRecorder recorder(scene_name, options.seed);
+    renderer::benchmark::BenchmarkRunMetadata benchmark_metadata;
+    benchmark_metadata.scene = scene_name;
+    benchmark_metadata.seed = options.seed;
+    benchmark_metadata.backend = renderer::rhi::render_backend_name(options.backend);
+    benchmark_metadata.mesher = options.reference_mesher ? "reference" : "greedy";
+    benchmark_metadata.initial_width = initial_extent.width;
+    benchmark_metadata.initial_height = initial_extent.height;
+    benchmark_metadata.chunk_radius = options.chunk_radius;
+    benchmark_metadata.warmup_frames = options.warmup_frames;
+    benchmark_metadata.measured_frames = options.measured_frames;
+    benchmark_metadata.frame_cap = options.frame_cap;
+    benchmark_metadata.validation_requested = options.validation;
+    renderer::benchmark::BenchmarkRecorder recorder(std::move(benchmark_metadata));
     core::log(
         core::LogLevel::info,
         "Benchmark " + scene_name + " starting: " + std::to_string(options.warmup_frames) +

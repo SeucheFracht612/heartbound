@@ -12,6 +12,20 @@
 
 namespace heartstead::renderer::benchmark {
 
+struct BenchmarkRunMetadata {
+    std::string scene;
+    std::uint64_t seed = 0;
+    std::string backend = "headless";
+    std::string mesher = "greedy";
+    std::uint32_t initial_width = 0;
+    std::uint32_t initial_height = 0;
+    std::uint32_t chunk_radius = 0;
+    std::uint64_t warmup_frames = 0;
+    std::uint64_t measured_frames = 0;
+    std::uint32_t frame_cap = 0;
+    bool validation_requested = false;
+};
+
 struct BenchmarkSummary {
     std::string scene;
     std::uint64_t seed = 0;
@@ -38,11 +52,13 @@ struct BenchmarkSummary {
 class BenchmarkRecorder {
   public:
     BenchmarkRecorder(std::string scene, std::uint64_t seed);
+    explicit BenchmarkRecorder(BenchmarkRunMetadata metadata);
 
     void record(RendererStats stats);
     void clear() noexcept;
 
     [[nodiscard]] const std::vector<RendererStats>& samples() const noexcept;
+    [[nodiscard]] const BenchmarkRunMetadata& metadata() const noexcept;
     [[nodiscard]] BenchmarkSummary summarize() const;
     [[nodiscard]] std::string to_json() const;
     [[nodiscard]] std::string to_csv() const;
@@ -50,8 +66,7 @@ class BenchmarkRecorder {
     [[nodiscard]] core::Status write_csv(const std::filesystem::path& path) const;
 
   private:
-    std::string scene_;
-    std::uint64_t seed_ = 0;
+    BenchmarkRunMetadata metadata_;
     std::vector<RendererStats> samples_;
 };
 

@@ -10,7 +10,17 @@ namespace {
 
 void test_benchmark_statistics() {
     using namespace heartstead::renderer;
-    benchmark::BenchmarkRecorder recorder("deterministic-test", 77);
+    benchmark::BenchmarkRunMetadata metadata;
+    metadata.scene = "deterministic-test";
+    metadata.seed = 77;
+    metadata.backend = "headless";
+    metadata.mesher = "greedy";
+    metadata.initial_width = 1920;
+    metadata.initial_height = 1080;
+    metadata.chunk_radius = 16;
+    metadata.warmup_frames = 120;
+    metadata.measured_frames = 4;
+    benchmark::BenchmarkRecorder recorder(metadata);
     constexpr std::array frame_times{1.0, 2.0, 3.0, 100.0};
     for (std::size_t index = 0; index < frame_times.size(); ++index) {
         RendererStats stats;
@@ -46,11 +56,19 @@ void test_benchmark_statistics() {
     assert(std::abs(summary.point_one_percent_low_fps - 10.0) < 0.0001);
     assert(summary.maximum_frame_ms == 100.0);
     assert(summary.total_uploaded_bytes == 64);
+    assert(recorder.metadata().initial_width == 1920);
+    assert(recorder.to_json().find("\"schema\": \"heartstead.renderer_benchmark.v1\"") !=
+           std::string::npos);
+    assert(recorder.to_json().find("\"warmup_frames\": 120") != std::string::npos);
     assert(recorder.to_json().find("\"p99_frame_ms\": 97.090000") != std::string::npos);
     assert(recorder.to_json().find("\"frames\": [") != std::string::npos);
     assert(recorder.to_json().find("\"gpu_upload_ms\": 0.750000") != std::string::npos);
-    assert(recorder.to_csv().find(
-               "scene,seed,frame,submission_serial,completed_submission_serial,cpu_frame_ms") == 0);
+    assert(
+        recorder.to_csv().find(
+            "scene,seed,backend,mesher,initial_width,initial_height,chunk_radius,warmup_frames") ==
+        0);
+    assert(recorder.to_csv().find("\"headless\",\"greedy\",1920,1080,16,120,4") !=
+           std::string::npos);
     assert(benchmark::format_benchmark_summary(summary).find("0.1%low=10.000fps") !=
            std::string::npos);
 }
