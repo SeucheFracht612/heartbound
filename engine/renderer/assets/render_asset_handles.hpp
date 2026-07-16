@@ -19,9 +19,11 @@ template <typename Tag> struct RenderAssetHandle {
 struct ShaderProgramTag;
 struct TextureTag;
 struct MaterialRuntimeTag;
+struct RenderMeshTag;
 
 using ShaderProgramHandle = RenderAssetHandle<ShaderProgramTag>;
 using TextureHandle = RenderAssetHandle<TextureTag>;
 using MaterialRuntimeHandle = RenderAssetHandle<MaterialRuntimeTag>;
+using RenderMeshHandle = RenderAssetHandle<RenderMeshTag>;
 
 } // namespace heartstead::renderer

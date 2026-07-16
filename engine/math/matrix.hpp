@@ -90,6 +90,12 @@ struct Vec4f {
     return result;
 }
 
+[[nodiscard]] Mat4f rotation_x_matrix(float radians) noexcept;
+[[nodiscard]] Mat4f rotation_y_matrix(float radians) noexcept;
+[[nodiscard]] Mat4f rotation_z_matrix(float radians) noexcept;
+[[nodiscard]] Mat4f transform_matrix(const Transform3f& transform) noexcept;
+[[nodiscard]] Bounds3f transform_bounds(const Mat4f& transform, const Bounds3f& bounds) noexcept;
+
 // Right-handed perspective with Vulkan's [0, 1] depth range. The Y row is flipped so a
 // conventional positive-height Vulkan viewport preserves counter-clockwise front faces.
 [[nodiscard]] Mat4f perspective_projection(float vertical_fov_radians, float aspect_ratio,

@@ -138,6 +138,19 @@ Implemented foundation:
   - the shared terrain pipeline samples the array using integer voxel-type data from the real chunk
     vertex ABI and indexes the material table; its pipeline binds are counted per frame
 
+- Retained dynamic render scene
+  - gameplay submits generation-safe object and light proxies through `RenderScene`; removal is
+    explicit and stale update/removal handles are rejected
+  - object proxies retain exact integer world anchors, previous/current local transforms, mesh and
+    material asset handles, conservative local bounds, render layer, color, and optional parent
+  - extraction interpolates only local floating-point transforms, resolves parent/assembly
+    hierarchies from an exact root anchor, converts roots relative to the camera floating origin,
+    and frustum-culls transformed bounds
+  - compatible visible objects are grouped by layer, material, and mesh into stable instance
+    batches; hidden, visible, culled, retained, and batch counts are reported
+  - directional and point lights are retained independently and extracted into camera-relative
+    frame data without searching gameplay/entity databases
+
 - Camera and shader constants
   - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention
   - `RenderCamera` owns the local position, yaw/pitch perspective, resize-dependent aspect ratio,

@@ -83,6 +83,7 @@ target_sources(
     renderer/renderer.cpp
     renderer/renderer_stats.cpp
     renderer/render_camera.cpp
+    renderer/scene/render_scene.cpp
     renderer/rhi/render_device.cpp
     renderer/rhi/render_frame_plan.cpp
     renderer/shaders/shader_compiler.cpp
@@ -233,6 +234,7 @@ target_sources(
       renderer/renderer_config.hpp
       renderer/renderer_stats.hpp
       renderer/render_camera.hpp
+      renderer/scene/render_scene.hpp
       renderer/rhi/render_device.hpp
       renderer/rhi/render_frame_plan.hpp
       renderer/shaders/shader_compiler.hpp

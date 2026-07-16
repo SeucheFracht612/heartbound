@@ -18,6 +18,89 @@ namespace {
 
 } // namespace
 
+Mat4f rotation_x_matrix(float radians) noexcept {
+    if (!std::isfinite(radians)) {
+        return {};
+    }
+    auto result = Mat4f::identity();
+    const auto cosine = std::cos(radians);
+    const auto sine = std::sin(radians);
+    result.at(1, 1) = cosine;
+    result.at(1, 2) = -sine;
+    result.at(2, 1) = sine;
+    result.at(2, 2) = cosine;
+    return result;
+}
+
+Mat4f rotation_y_matrix(float radians) noexcept {
+    if (!std::isfinite(radians)) {
+        return {};
+    }
+    auto result = Mat4f::identity();
+    const auto cosine = std::cos(radians);
+    const auto sine = std::sin(radians);
+    result.at(0, 0) = cosine;
+    result.at(0, 2) = sine;
+    result.at(2, 0) = -sine;
+    result.at(2, 2) = cosine;
+    return result;
+}
+
+Mat4f rotation_z_matrix(float radians) noexcept {
+    if (!std::isfinite(radians)) {
+        return {};
+    }
+    auto result = Mat4f::identity();
+    const auto cosine = std::cos(radians);
+    const auto sine = std::sin(radians);
+    result.at(0, 0) = cosine;
+    result.at(0, 1) = -sine;
+    result.at(1, 0) = sine;
+    result.at(1, 1) = cosine;
+    return result;
+}
+
+Mat4f transform_matrix(const Transform3f& transform) noexcept {
+    if (!transform.is_finite() || !transform.has_non_zero_scale()) {
+        return {};
+    }
+    constexpr auto degrees_to_radians = std::numbers::pi_v<float> / 180.0F;
+    const auto rotation = rotation_z_matrix(transform.rotation_degrees.z * degrees_to_radians) *
+                          rotation_y_matrix(transform.rotation_degrees.y * degrees_to_radians) *
+                          rotation_x_matrix(transform.rotation_degrees.x * degrees_to_radians);
+    return translation_matrix(transform.position) * rotation * scale_matrix(transform.scale);
+}
+
+Bounds3f transform_bounds(const Mat4f& transform, const Bounds3f& bounds) noexcept {
+    if (!transform.is_finite() || !bounds.is_valid()) {
+        return {};
+    }
+    Bounds3f result;
+    bool first = true;
+    for (std::size_t corner = 0; corner < 8; ++corner) {
+        const Vec4f point{
+            (corner & 1U) != 0 ? bounds.max.x : bounds.min.x,
+            (corner & 2U) != 0 ? bounds.max.y : bounds.min.y,
+            (corner & 4U) != 0 ? bounds.max.z : bounds.min.z,
+            1.0F,
+        };
+        const auto transformed = transform * point;
+        if (!transformed.is_finite() || transformed.w == 0.0F) {
+            return {};
+        }
+        const Vec3f value{transformed.x / transformed.w, transformed.y / transformed.w,
+                          transformed.z / transformed.w};
+        if (first) {
+            result = {value, value};
+            first = false;
+        } else {
+            result.min = component_min(result.min, value);
+            result.max = component_max(result.max, value);
+        }
+    }
+    return result;
+}
+
 bool Mat4f::is_finite() const noexcept {
     return std::ranges::all_of(elements, [](float value) { return std::isfinite(value); });
 }
