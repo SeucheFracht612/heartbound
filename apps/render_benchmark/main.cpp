@@ -37,6 +37,8 @@ struct Options {
     std::uint64_t measured_frames = 300;
     std::uint32_t chunk_radius = 1;
     std::uint32_t frame_cap = 0;
+    std::uint32_t width = 1280;
+    std::uint32_t height = 720;
     OutputFormat format = OutputFormat::json;
     std::filesystem::path output;
     bool validation = true;
@@ -133,6 +135,8 @@ void print_usage() {
                  "  --frames N         Measured frames (default 300)\n"
                  "  --warmup N         Unrecorded warm-up frames (default 60)\n"
                  "  --radius N         Horizontal chunk radius, 0..8 (default 1)\n"
+                 "  --width N          Initial framebuffer width (default 1280)\n"
+                 "  --height N         Initial framebuffer height (default 720)\n"
                  "  --seed N           Deterministic unsigned 64-bit scene seed\n"
                  "  --frame-cap N      Sleep to cap at N FPS; 0 is uncapped (default)\n"
                  "  --output PATH      Result path (default benchmark-SCENE.json)\n"
@@ -208,7 +212,8 @@ template <typename Integer>
             }
             options.scene = *scene;
         } else if (argument == "--frames" || argument == "--warmup" || argument == "--seed" ||
-                   argument == "--radius" || argument == "--frame-cap") {
+                   argument == "--radius" || argument == "--frame-cap" || argument == "--width" ||
+                   argument == "--height") {
             auto value = next_value();
             if (!value) {
                 return core::Result<Options>::failure(value.error().code, value.error().message);
@@ -241,6 +246,18 @@ template <typename Integer>
                                                           "--radius must be in the range 0..8");
                 }
                 options.chunk_radius = *parsed;
+            } else if (argument == "--width" || argument == "--height") {
+                const auto parsed = parse_unsigned<std::uint32_t>(value.value());
+                if (!parsed || *parsed < 64 || *parsed > 16'384) {
+                    return core::Result<Options>::failure(
+                        "renderer.benchmark_invalid_extent",
+                        "--width and --height must be in the range 64..16384");
+                }
+                if (argument == "--width") {
+                    options.width = *parsed;
+                } else {
+                    options.height = *parsed;
+                }
             } else {
                 const auto parsed = parse_unsigned<std::uint32_t>(value.value());
                 if (!parsed) {
@@ -332,7 +349,7 @@ int main(int argc, char** argv) {
         return fail(parsed_options.error().message);
     }
     const auto options = parsed_options.value();
-    constexpr renderer::rhi::RenderExtent initial_extent{1280, 720};
+    const renderer::rhi::RenderExtent initial_extent{options.width, options.height};
 
     renderer::benchmark::BenchmarkSceneConfig scene_config;
     scene_config.kind = options.scene;
@@ -437,6 +454,8 @@ int main(int argc, char** argv) {
     renderer_init.voxel_palette = &scene.value()->palette();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 64;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 512U * 1024U * 1024U;
+    renderer_init.chunk_config.distances.mesh_horizontal_radius = 22;
+    renderer_init.chunk_config.distances.gpu_resident_horizontal_radius = 22;
     renderer_init.chunk_config.meshing_mode = options.reference_mesher
                                                   ? renderer::ChunkMeshingMode::reference
                                                   : renderer::ChunkMeshingMode::greedy;

@@ -79,8 +79,9 @@ record includes a deterministic one-draw instancing baseline. Rendering is uncap
 `--frame-cap` is zero, which is the default.
 
 JSON uses schema `heartstead.renderer_benchmark.v1`. Both export formats record the scene, seed,
-backend, mesher, initial resolution, radius, warm-up/measured frame counts, frame cap, and validation
-request. CSV repeats the aggregate frame-time summary on each row for self-contained tabular use.
+backend, mesher, configurable initial resolution (`--width`/`--height`), radius,
+warm-up/measured frame counts, frame cap, and validation request. CSV repeats the aggregate
+frame-time summary on each row for self-contained tabular use.
 
 ## Verification snapshot
 
