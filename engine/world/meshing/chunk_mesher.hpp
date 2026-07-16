@@ -13,6 +13,8 @@ namespace heartstead::world {
 
 class ChunkDatabase;
 class VoxelPalette;
+struct BlockRenderTableSnapshot;
+struct ChunkNeighborhoodSnapshot;
 
 enum class ChunkMeshFaceDirection {
     negative_x,
@@ -31,6 +33,8 @@ struct ChunkMeshVertex {
     std::uint16_t voxel_type = 0;
     std::uint8_t light = 0;
     std::uint16_t state_bits = 0;
+
+    friend auto operator<=>(const ChunkMeshVertex&, const ChunkMeshVertex&) = default;
 };
 
 struct RichBlockMeshInstance {
@@ -68,6 +72,9 @@ class ChunkMesher {
     [[nodiscard]] static core::Result<ChunkMesh> build_surface_mesh(const VoxelChunk& chunk);
     [[nodiscard]] static core::Result<ChunkMesh>
     build_surface_mesh(const ChunkMeshingContext& context);
+    [[nodiscard]] static core::Result<ChunkMesh>
+    build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborhood,
+                       const BlockRenderTableSnapshot& render_table);
 };
 
 [[nodiscard]] math::Vec3f chunk_mesh_face_normal(ChunkMeshFaceDirection direction) noexcept;

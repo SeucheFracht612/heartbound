@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace heartstead::world {
@@ -62,6 +63,7 @@ class VoxelChunk {
     [[nodiscard]] ChunkIdentity identity() const noexcept;
     [[nodiscard]] std::uint64_t content_revision() const noexcept;
     [[nodiscard]] const ChunkDirtyState& dirty() const noexcept;
+    [[nodiscard]] std::span<const VoxelCell> cells() const noexcept;
     [[nodiscard]] core::Result<VoxelCell> get(VoxelCoord coord) const;
 
     [[nodiscard]] core::Status set(VoxelCoord coord, VoxelCell cell);

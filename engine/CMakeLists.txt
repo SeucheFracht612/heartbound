@@ -118,6 +118,7 @@ target_sources(
     world/chunks/chunk_database.cpp
     world/chunks/chunk_edit_delta_codec.cpp
     world/meshing/chunk_mesher.cpp
+    world/meshing/chunk_mesh_snapshot.cpp
     world/missing_prototype.cpp
     world/operations/world_operation.cpp
     world/replication_delta.cpp
@@ -259,6 +260,7 @@ target_sources(
       world/coords/world_coords.hpp
       world/coords/world_position.hpp
       world/meshing/chunk_mesher.hpp
+      world/meshing/chunk_mesh_snapshot.hpp
       world/missing_prototype.hpp
       world/operations/world_operation.hpp
       world/replication_delta.hpp

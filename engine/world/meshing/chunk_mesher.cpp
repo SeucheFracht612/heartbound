@@ -1,6 +1,7 @@
 #include "engine/world/meshing/chunk_mesher.hpp"
 
 #include "engine/world/chunks/chunk_database.hpp"
+#include "engine/world/meshing/chunk_mesh_snapshot.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 
 #include <algorithm>
@@ -31,6 +32,11 @@ struct CellModelView {
     VoxelCell cell{};
     const VoxelDefinition* definition = nullptr;
     const BlockModelDefinition* model = nullptr;
+};
+
+struct SnapshotCellModelView {
+    VoxelCell cell{};
+    const MeshingBlockInfo* block = nullptr;
 };
 
 [[nodiscard]] constexpr std::array<FaceTemplate, 6> face_templates() noexcept {
@@ -166,6 +172,22 @@ resolve_relative_cell(ChunkCoord center, std::int32_t x, std::int32_t y, std::in
            view.definition->occlusion == BlockOcclusionBehavior::full_cube;
 }
 
+[[nodiscard]] SnapshotCellModelView
+query_cell(const ChunkNeighborhoodSnapshot& neighborhood,
+           const BlockRenderTableSnapshot& render_table, std::int32_t x,
+           std::int32_t y, std::int32_t z) noexcept {
+    SnapshotCellModelView result;
+    result.cell = neighborhood.cell_relative(x, y, z);
+    if (!result.cell.is_air()) {
+        result.block = render_table.find(result.cell.type);
+    }
+    return result;
+}
+
+[[nodiscard]] bool is_full_occluder(const SnapshotCellModelView& view) noexcept {
+    return !view.cell.is_air() && view.block != nullptr && view.block->full_occluder;
+}
+
 [[nodiscard]] bool nearly_equal(float left, float right) noexcept {
     return std::abs(left - right) <= 0.0001F;
 }
@@ -244,6 +266,29 @@ void add_box(ChunkMesh& mesh, const ChunkMeshingContext& context, VoxelCoord coo
     }
 }
 
+void add_box(ChunkMesh& mesh, const ChunkNeighborhoodSnapshot& neighborhood,
+             const BlockRenderTableSnapshot& render_table, VoxelCoord coord, VoxelCell cell,
+             const BlockModelBox& box) {
+    const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
+                             static_cast<float>(coord.z)};
+    for (const auto& face : face_templates()) {
+        if (box_face_is_on_cell_boundary(box, face.direction)) {
+            const auto neighbor = query_cell(
+                neighborhood, render_table, static_cast<std::int32_t>(coord.x) + face.offset_x,
+                static_cast<std::int32_t>(coord.y) + face.offset_y,
+                static_cast<std::int32_t>(coord.z) + face.offset_z);
+            if (is_full_occluder(neighbor)) {
+                continue;
+            }
+        }
+        std::array<math::Vec3f, 4> positions{};
+        for (std::size_t index = 0; index < positions.size(); ++index) {
+            positions[index] = box_corner(box, face.corners[index], origin);
+        }
+        add_quad(mesh, positions, chunk_mesh_face_normal(face.direction), cell);
+    }
+}
+
 void add_cross_planes(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell) {
     const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
                              static_cast<float>(coord.z)};
@@ -274,6 +319,21 @@ void add_rich_instance(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell,
     }
     mesh.rich_instances.push_back(
         {model.prototype_id, coord, bounds, cell.type, cell.state_bits, cell.metadata_handle});
+}
+
+void add_rich_instance(ChunkMesh& mesh, VoxelCoord coord, VoxelCell cell,
+                       const MeshingBlockInfo& block) {
+    const math::Vec3f origin{static_cast<float>(coord.x), static_cast<float>(coord.y),
+                             static_cast<float>(coord.z)};
+    const math::Bounds3f bounds{origin + block.render_bounds.min,
+                               origin + block.render_bounds.max};
+    if (mesh.vertices.empty() && mesh.rich_instances.empty()) {
+        mesh.local_bounds = bounds;
+    } else {
+        mesh.local_bounds = mesh.local_bounds.merged_with(bounds);
+    }
+    mesh.rich_instances.push_back({block.model_prototype_id, coord, bounds, cell.type,
+                                   cell.state_bits, cell.metadata_handle});
 }
 
 [[nodiscard]] std::uint16_t required_halo_radius(const ChunkMeshingContext& context) {
@@ -406,6 +466,55 @@ core::Result<ChunkMesh> ChunkMesher::build_surface_mesh(const ChunkMeshingContex
     }
 
     auto status = mesh.validate();
+    if (!status) {
+        return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
+    }
+    return core::Result<ChunkMesh>::success(std::move(mesh));
+}
+
+core::Result<ChunkMesh>
+ChunkMesher::build_surface_mesh(const ChunkNeighborhoodSnapshot& neighborhood,
+                                const BlockRenderTableSnapshot& render_table) {
+    auto status = neighborhood.validate();
+    if (!status) {
+        return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
+    }
+    status = render_table.validate();
+    if (!status) {
+        return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
+    }
+
+    ChunkMesh mesh;
+    mesh.chunk_coord = neighborhood.center_identity.coordinate;
+    mesh.provided_halo_radius = neighborhood.halo_radius;
+    mesh.required_halo_radius = neighborhood.halo_radius;
+    for (std::uint16_t z = 0; z < VoxelChunk::edge_length; ++z) {
+        for (std::uint16_t y = 0; y < VoxelChunk::edge_length; ++y) {
+            for (std::uint16_t x = 0; x < VoxelChunk::edge_length; ++x) {
+                const auto cell = neighborhood.cell(x, y, z);
+                if (cell.is_air()) {
+                    continue;
+                }
+                const auto* block = render_table.find(cell.type);
+                if (block == nullptr) {
+                    return core::Result<ChunkMesh>::failure(
+                        "chunk_mesh.unknown_voxel_type",
+                        "snapshot contains a voxel type missing from its block render table");
+                }
+                if (block->geometry == MeshingGeometryKind::rich_model) {
+                    add_rich_instance(mesh, {x, y, z}, cell, *block);
+                } else if (block->geometry == MeshingGeometryKind::cross_plane) {
+                    add_cross_planes(mesh, {x, y, z}, cell);
+                } else {
+                    for (const auto& box : block->boxes) {
+                        add_box(mesh, neighborhood, render_table, {x, y, z}, cell, box);
+                    }
+                }
+            }
+        }
+    }
+
+    status = mesh.validate();
     if (!status) {
         return core::Result<ChunkMesh>::failure(status.error().code, status.error().message);
     }

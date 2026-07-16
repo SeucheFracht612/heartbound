@@ -4,6 +4,8 @@
 #include "engine/renderer/rhi/render_frame_plan.hpp"
 #include "engine/renderer/shaders/spirv_loader.hpp"
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
+#include "engine/world/meshing/chunk_mesher.hpp"
+#include "engine/world/meshing/chunk_mesh_snapshot.hpp"
 
 #include <array>
 #include <cassert>
@@ -214,6 +216,51 @@ void test_unified_headless_frame_submission() {
     assert(out_of_bounds.error().code == "renderer.draw_index_range_out_of_bounds");
 }
 
+void test_immutable_chunk_meshing_snapshot() {
+    using namespace heartstead;
+    world::ChunkDatabase chunks;
+    const world::ChunkCoord center_coord{7, 0, -3};
+    const world::ChunkCoord neighbor_coord{8, 0, -3};
+    auto& center = chunks.get_or_create(center_coord);
+    auto& neighbor = chunks.get_or_create(neighbor_coord);
+    assert(center.set({31, 4, 5}, world::VoxelCell{1, 255}));
+    assert(neighbor.set({0, 4, 5}, world::VoxelCell{1, 255}));
+
+    auto table = world::build_block_render_table_snapshot(nullptr);
+    assert(table);
+    auto snapshot = world::build_chunk_neighborhood_snapshot(
+        chunks, center.identity(), table.value());
+    assert(snapshot);
+    assert(snapshot.value().halo_radius == 1);
+    assert(snapshot.value().side_length == 34);
+    assert(snapshot.value().cell_count() == 34U * 34U * 34U);
+    assert(snapshot.value().dependencies.size() == 27);
+    assert(world::dependency_revisions_match(chunks, snapshot.value().dependencies));
+
+    auto immutable_mesh =
+        world::ChunkMesher::build_surface_mesh(snapshot.value(), table.value());
+    assert(immutable_mesh);
+    world::ChunkMeshingContext live_context{center, nullptr, &chunks, 1};
+    auto reference_mesh = world::ChunkMesher::build_surface_mesh(live_context);
+    assert(reference_mesh);
+    assert(immutable_mesh.value().face_count == reference_mesh.value().face_count);
+    assert(immutable_mesh.value().vertices == reference_mesh.value().vertices);
+    assert(immutable_mesh.value().indices == reference_mesh.value().indices);
+
+    assert(neighbor.set({0, 4, 5}, world::VoxelCell::air()));
+    assert(!world::dependency_revisions_match(chunks, snapshot.value().dependencies));
+    auto unchanged_old_snapshot =
+        world::ChunkMesher::build_surface_mesh(snapshot.value(), table.value());
+    assert(unchanged_old_snapshot);
+    assert(unchanged_old_snapshot.value().face_count == immutable_mesh.value().face_count);
+
+    const auto old_neighbor_identity = neighbor.identity();
+    assert(chunks.erase(neighbor_coord));
+    auto& reloaded_neighbor = chunks.get_or_create(neighbor_coord);
+    assert(reloaded_neighbor.identity() != old_neighbor_identity);
+    assert(!world::dependency_revisions_match(chunks, snapshot.value().dependencies));
+}
+
 } // namespace
 
 int main() {
@@ -224,5 +271,6 @@ int main() {
     test_spirv_validation();
     test_minimized_window_and_idempotent_quit();
     test_unified_headless_frame_submission();
+    test_immutable_chunk_meshing_snapshot();
     return 0;
 }

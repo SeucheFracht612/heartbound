@@ -296,11 +296,23 @@ core::Status VoxelPalette::add(VoxelDefinition definition) {
     by_type_.emplace(definition.type, index);
     by_prototype_.emplace(definition.prototype_id.value(), index);
     definitions_.push_back(std::move(definition));
+    if (render_revision_ == std::numeric_limits<std::uint64_t>::max()) {
+        std::terminate();
+    }
+    ++render_revision_;
     return core::Status::ok();
 }
 
 core::Status VoxelPalette::add_block_model(BlockModelDefinition definition) {
-    return block_models_.add(std::move(definition));
+    auto status = block_models_.add(std::move(definition));
+    if (!status) {
+        return status;
+    }
+    if (render_revision_ == std::numeric_limits<std::uint64_t>::max()) {
+        std::terminate();
+    }
+    ++render_revision_;
+    return core::Status::ok();
 }
 
 const VoxelDefinition* VoxelPalette::find_by_type(std::uint16_t type) const noexcept {
@@ -380,6 +392,10 @@ std::size_t VoxelPalette::size() const noexcept {
 
 bool VoxelPalette::empty() const noexcept {
     return definitions_.empty();
+}
+
+std::uint64_t VoxelPalette::render_revision() const noexcept {
+    return render_revision_;
 }
 
 VoxelPaletteManifest VoxelPalette::manifest() const {

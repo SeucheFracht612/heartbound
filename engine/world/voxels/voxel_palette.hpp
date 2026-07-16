@@ -93,6 +93,7 @@ class VoxelPalette {
     [[nodiscard]] std::uint16_t neighbor_dependency_radius(VoxelCell cell) const noexcept;
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] std::uint64_t render_revision() const noexcept;
     [[nodiscard]] VoxelPaletteManifest manifest() const;
 
   private:
@@ -100,6 +101,7 @@ class VoxelPalette {
     BlockModelDatabase block_models_;
     std::unordered_map<std::uint16_t, std::size_t> by_type_;
     std::unordered_map<std::string, std::size_t> by_prototype_;
+    std::uint64_t render_revision_ = 1;
 };
 
 [[nodiscard]] core::Result<VoxelDefinition>

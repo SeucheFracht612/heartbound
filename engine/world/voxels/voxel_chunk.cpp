@@ -53,6 +53,10 @@ const ChunkDirtyState& VoxelChunk::dirty() const noexcept {
     return dirty_;
 }
 
+std::span<const VoxelCell> VoxelChunk::cells() const noexcept {
+    return cells_;
+}
+
 core::Result<VoxelCell> VoxelChunk::get(VoxelCoord coord) const {
     if (!contains(coord)) {
         return core::Result<VoxelCell>::failure("chunk.coord_out_of_bounds",
