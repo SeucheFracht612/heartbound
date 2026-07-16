@@ -262,11 +262,13 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
         frame_timing_active_ = false;
         return executed;
     }
+    const auto complete_frame_ms = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - frame_started_at_)
+                                       .count();
+    cpu_timings_.add(profiling::CpuTimingZone::complete_frame, complete_frame_ms);
+    stats_.cpu_frame_ms = cpu_timings_.milliseconds(profiling::CpuTimingZone::complete_frame);
     update_frontend_stats(stats_.loaded_chunks);
     update_backend_stats(executed.value());
-    stats_.cpu_frame_ms = std::chrono::duration<double, std::milli>(
-                              std::chrono::steady_clock::now() - frame_started_at_)
-                              .count();
     frame_timing_active_ = false;
     return executed;
 }
@@ -341,8 +343,7 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
         cpu_timings_.milliseconds(profiling::CpuTimingZone::chunk_synchronization);
     stats_.culling_ms = chunks.culling_ms;
     stats_.draw_list_ms = chunks.draw_list_ms;
-    stats_.command_build_ms =
-        chunks.draw_list_ms + cpu_timings_.milliseconds(profiling::CpuTimingZone::command_build);
+    stats_.command_build_ms = cpu_timings_.milliseconds(profiling::CpuTimingZone::command_build);
     stats_.chunk_snapshot_ms = chunks.chunk_snapshot_ms;
     stats_.meshing_ms = chunks.meshing_ms;
     stats_.upload_preparation_ms = chunks.upload_preparation_ms;

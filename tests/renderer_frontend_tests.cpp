@@ -30,6 +30,8 @@ void test_scoped_cpu_timing_zones() {
     }
     assert(timings.milliseconds(heartstead::profiling::CpuTimingZone::meshing) > 0.0);
     assert(heartstead::profiling::cpu_timing_zone_name(
+               heartstead::profiling::CpuTimingZone::complete_frame) == "complete_frame");
+    assert(heartstead::profiling::cpu_timing_zone_name(
                heartstead::profiling::CpuTimingZone::visibility_culling) == "visibility_culling");
     timings.reset();
     assert(timings.milliseconds(heartstead::profiling::CpuTimingZone::meshing) == 0.0);
@@ -611,6 +613,9 @@ void test_renderer_frontend_submits_headless_frames() {
     const auto& renderer_stats = retained_renderer.stats();
     assert(renderer_stats.cpu_frame_ms > 0.0);
     assert(renderer_stats.chunk_synchronization_ms > 0.0);
+    assert(renderer_stats.render_extraction_ms > 0.0);
+    assert(renderer_stats.draw_list_ms > 0.0);
+    assert(renderer_stats.command_build_ms > 0.0);
     assert(renderer_stats.meshing_ms > 0.0);
     assert(renderer_stats.upload_ms > 0.0);
     assert(renderer_stats.command_recording_ms > 0.0);
