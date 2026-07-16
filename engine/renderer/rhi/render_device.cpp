@@ -398,6 +398,13 @@ class HeadlessRenderDevice final : public IRenderDevice {
             }
         }
 
+        const auto existing = pipeline_layouts_.find(desc.material_id.value());
+        if (existing != pipeline_layouts_.end() &&
+            equivalent_render_pipeline_layout(existing->second, desc)) {
+            stats.bound_pipeline_count = pipeline_layouts_.size();
+            return core::Result<RenderPipelineLayoutStats>::success(stats);
+        }
+
         destroy_compute_pipelines_for_material(desc.material_id);
         destroy_graphics_pipelines_for_material(desc.material_id);
         destroy_descriptor_writes_for_material(desc.material_id);
@@ -982,6 +989,35 @@ core::Status validate_render_pipeline_layout_shape(const RenderPipelineLayoutDes
         }
     }
     return core::Status::ok();
+}
+
+bool equivalent_render_pipeline_layout(const RenderPipelineLayoutDesc& left,
+                                       const RenderPipelineLayoutDesc& right) noexcept {
+    if (left.material_id != right.material_id ||
+        left.shader_template.namespace_id != right.shader_template.namespace_id ||
+        left.shader_template.relative_path != right.shader_template.relative_path ||
+        left.pipeline_version != right.pipeline_version ||
+        left.descriptors.size() != right.descriptors.size() ||
+        left.push_constant_ranges.size() != right.push_constant_ranges.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < left.descriptors.size(); ++index) {
+        const auto& first = left.descriptors[index];
+        const auto& second = right.descriptors[index];
+        if (first.name != second.name || first.kind != second.kind || first.slot != second.slot ||
+            first.required != second.required) {
+            return false;
+        }
+    }
+    for (std::size_t index = 0; index < left.push_constant_ranges.size(); ++index) {
+        const auto& first = left.push_constant_ranges[index];
+        const auto& second = right.push_constant_ranges[index];
+        if (first.stages != second.stages || first.byte_offset != second.byte_offset ||
+            first.byte_size != second.byte_size) {
+            return false;
+        }
+    }
+    return true;
 }
 
 core::Status validate_render_compute_pipeline_shape(const RenderComputePipelineDesc& desc) {

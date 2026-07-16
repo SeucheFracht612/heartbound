@@ -63,9 +63,11 @@ target_sources(
     replay/command_replay.cpp
     renderer/benchmark/benchmark_scene.cpp
     renderer/benchmark/benchmark_statistics.cpp
+    renderer/assets/shader_manager.cpp
     renderer/materials/material_asset_validation.cpp
     renderer/materials/material_definition.cpp
     renderer/materials/material_pipeline_layout.cpp
+    renderer/materials/pipeline_cache.cpp
     renderer/materials/material_prototype_loader.cpp
     renderer/camera/frustum.cpp
     renderer/chunks/chunk_gpu_cache.cpp
@@ -203,9 +205,12 @@ target_sources(
       replay/command_replay.hpp
       renderer/benchmark/benchmark_scene.hpp
       renderer/benchmark/benchmark_statistics.hpp
+      renderer/assets/render_asset_handles.hpp
+      renderer/assets/shader_manager.hpp
       renderer/materials/material_asset_validation.hpp
       renderer/materials/material_definition.hpp
       renderer/materials/material_pipeline_layout.hpp
+      renderer/materials/pipeline_cache.hpp
       renderer/materials/material_prototype_loader.hpp
       renderer/camera/frustum.hpp
       renderer/chunks/chunk_gpu_cache.hpp

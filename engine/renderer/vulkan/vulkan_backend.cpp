@@ -2134,20 +2134,27 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.push_constant_range_count = desc.push_constant_ranges.size();
         stats.gpu_backed = true;
 
+        const auto key = stats.material_id.value();
+        const auto existing = pipeline_layouts_.find(key);
+        if (existing != pipeline_layouts_.end() &&
+            rhi::equivalent_render_pipeline_layout(existing->second.desc, desc)) {
+            stats.bound_pipeline_count = pipeline_layouts_.size();
+            return core::Result<rhi::RenderPipelineLayoutStats>::success(stats);
+        }
+
         auto resource = create_pipeline_layout_resource(std::move(desc));
         if (!resource) {
             return core::Result<rhi::RenderPipelineLayoutStats>::failure(resource.error().code,
                                                                          resource.error().message);
         }
 
-        const auto key = stats.material_id.value();
         destroy_compute_pipelines_for_material(stats.material_id);
         destroy_graphics_pipelines_for_material(stats.material_id);
         destroy_descriptor_writes_for_material(stats.material_id);
-        auto existing = pipeline_layouts_.find(key);
-        if (existing != pipeline_layouts_.end()) {
-            destroy_pipeline_layout_resource(existing->second);
-            existing->second = std::move(resource.value());
+        auto replacement = pipeline_layouts_.find(key);
+        if (replacement != pipeline_layouts_.end()) {
+            destroy_pipeline_layout_resource(replacement->second);
+            replacement->second = std::move(resource.value());
         } else {
             pipeline_layouts_.emplace(key, std::move(resource.value()));
         }

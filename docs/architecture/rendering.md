@@ -270,6 +270,17 @@ later integration slices. Draw-command and visibility vectors retain their capac
 the remaining frame-plan metadata is small and will move into the broader frame allocator as more
 passes are introduced.
 
+Runtime shader programs use generation-safe `ShaderProgramHandle` values and retain stage entry
+points, dependencies, and an explicit shader-interface contract. The shader manager validates all
+SPIR-V before module creation. Development reload creates every replacement module before changing
+the resident program, keeps superseded modules alive while dependent pipelines rebuild, and leaves
+the previous program untouched on load failure. `PipelineCache` keys graphics pipelines by shader
+program, vertex layout, render phase, attachment formats, raster/depth/blend state, sample count,
+and feature flags. Common pipelines are prewarmed, then the cache is sealed so a normal frame cannot
+create a surprise pipeline. Reload rebuilds dependent entries transactionally and preserves their
+old pipelines if any replacement fails. Rebinding a byte-for-byte equivalent RHI layout is
+idempotent so prewarming and shader replacement do not invalidate unrelated pipelines.
+
 The current shader compiler has development validators plus a production SPIR-V passthrough
 profile. Development preserves source bytes behind explicit compiled-shader metadata and rejects
 empty or unsupported shader sources. Production currently accepts only `.spv` assets that pass

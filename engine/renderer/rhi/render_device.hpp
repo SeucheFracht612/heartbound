@@ -547,6 +547,9 @@ validate_render_shader_module_upload(const RenderShaderModuleDesc& desc,
                                      std::span<const std::uint32_t> spirv_words);
 [[nodiscard]] core::Status
 validate_render_pipeline_layout_shape(const RenderPipelineLayoutDesc& desc);
+[[nodiscard]] bool
+equivalent_render_pipeline_layout(const RenderPipelineLayoutDesc& left,
+                                  const RenderPipelineLayoutDesc& right) noexcept;
 [[nodiscard]] core::Status
 validate_render_compute_pipeline_shape(const RenderComputePipelineDesc& desc);
 [[nodiscard]] core::Status
