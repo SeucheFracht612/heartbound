@@ -2,6 +2,9 @@
 
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <limits>
 #include <utility>
 
 namespace heartstead::renderer {
@@ -80,7 +83,17 @@ core::Status Renderer::synchronize_chunks(world::WorldState& world, const Render
         return core::Status::failure("renderer.not_initialized",
                                      "renderer must be initialized before chunk synchronization");
     }
-    return chunk_system_->synchronize(world, camera);
+    cpu_timings_.reset();
+    frame_started_at_ = std::chrono::steady_clock::now();
+    frame_timing_active_ = true;
+    auto status = core::Status::ok();
+    {
+        profiling::ScopedCpuTimingZone synchronization_zone(
+            cpu_timings_, profiling::CpuTimingZone::chunk_synchronization);
+        status = chunk_system_->synchronize(world, camera);
+    }
+    update_frontend_stats(world.chunks().chunk_count());
+    return status;
 }
 
 core::Status Renderer::process_chunk_loads(std::span<const world::ChunkStreamLoadReport> loads) {
@@ -114,15 +127,40 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
         return core::Result<rhi::RenderFrameStats>::failure(
             "renderer.not_initialized", "renderer must be initialized before rendering");
     }
-    auto draws = chunk_system_->build_draw_list(camera);
+    if (!frame_timing_active_) {
+        cpu_timings_.reset();
+        frame_started_at_ = std::chrono::steady_clock::now();
+        frame_timing_active_ = true;
+    }
+    ChunkDrawList draws;
+    {
+        profiling::ScopedCpuTimingZone extraction_zone(cpu_timings_,
+                                                       profiling::CpuTimingZone::render_extraction);
+        draws = chunk_system_->build_draw_list(camera);
+    }
     RenderCommandLists command_lists;
     command_lists.world_draws = std::move(draws.draws);
-    auto frame = frame_builder_->build(camera, std::move(command_lists));
+    auto frame = [&]() {
+        profiling::ScopedCpuTimingZone command_zone(cpu_timings_,
+                                                    profiling::CpuTimingZone::command_build);
+        return frame_builder_->build(camera, std::move(command_lists));
+    }();
     if (!frame) {
         return core::Result<rhi::RenderFrameStats>::failure(frame.error().code,
                                                             frame.error().message);
     }
-    return device_->execute_frame(frame.value());
+    auto executed = device_->execute_frame(frame.value());
+    if (!executed) {
+        frame_timing_active_ = false;
+        return executed;
+    }
+    update_frontend_stats(stats_.loaded_chunks);
+    update_backend_stats(executed.value());
+    stats_.cpu_frame_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - frame_started_at_)
+                              .count();
+    frame_timing_active_ = false;
+    return executed;
 }
 
 core::Status Renderer::resize(rhi::RenderExtent extent) {
@@ -146,12 +184,63 @@ const ChunkRenderStats& Renderer::chunk_stats() const noexcept {
     return chunk_system_ == nullptr ? empty_chunk_stats : chunk_system_->stats();
 }
 
+const RendererStats& Renderer::stats() const noexcept {
+    return stats_;
+}
+
 rhi::IRenderDevice* Renderer::device() noexcept {
     return device_.get();
 }
 
 const rhi::IRenderDevice* Renderer::device() const noexcept {
     return device_.get();
+}
+
+void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
+    const auto saturating_u32 = [](std::size_t value) noexcept {
+        return static_cast<std::uint32_t>(
+            std::min(value, static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    };
+    const auto& chunks = chunk_stats();
+    stats_.render_extraction_ms =
+        cpu_timings_.milliseconds(profiling::CpuTimingZone::render_extraction);
+    stats_.chunk_synchronization_ms =
+        cpu_timings_.milliseconds(profiling::CpuTimingZone::chunk_synchronization);
+    stats_.culling_ms = chunks.culling_ms;
+    stats_.draw_list_ms = chunks.draw_list_ms;
+    stats_.command_build_ms =
+        chunks.draw_list_ms + cpu_timings_.milliseconds(profiling::CpuTimingZone::command_build);
+    stats_.chunk_snapshot_ms = chunks.chunk_snapshot_ms;
+    stats_.meshing_ms = chunks.meshing_ms;
+    stats_.upload_preparation_ms = chunks.upload_preparation_ms;
+    stats_.upload_ms = chunks.upload_ms;
+    stats_.loaded_chunks = saturating_u32(loaded_chunk_count);
+    stats_.mesh_pending_chunks = saturating_u32(chunks.pending_mesh_count);
+    stats_.upload_pending_chunks = saturating_u32(chunks.pending_upload_count);
+    stats_.resident_chunks = saturating_u32(chunks.cache.resident_chunk_count);
+    stats_.visible_chunks = saturating_u32(chunks.visible_chunk_count);
+    stats_.culled_chunks = saturating_u32(chunks.culled_chunk_count);
+    stats_.drawn_chunks = saturating_u32(chunks.draw_count);
+    stats_.vertices = chunks.visible_vertex_count;
+    stats_.triangles = chunks.visible_index_count / 3;
+    stats_.resident_mesh_bytes = chunks.cache.resident_bytes;
+    stats_.pending_upload_bytes = chunks.pending_upload_bytes;
+    stats_.uploaded_bytes_this_frame = chunks.uploaded_bytes;
+}
+
+void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept {
+    stats_.frame_index = frame.frame_index;
+    stats_.draw_calls = static_cast<std::uint32_t>(std::min(
+        frame.draw_count, static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    stats_.command_recording_ms = frame.cpu_command_recording_ms;
+    stats_.gpu_wait_ms = frame.cpu_gpu_wait_ms;
+    stats_.gpu_timing_valid = frame.gpu_timing_valid;
+    stats_.gpu_timing_frame_index = frame.gpu_timing_frame_index;
+    stats_.gpu_timing_latency_frames = frame.gpu_timing_latency_frames;
+    stats_.gpu_frame_ms = frame.gpu_frame_ms;
+    stats_.gpu_opaque_terrain_ms = frame.gpu_opaque_terrain_ms;
+    stats_.gpu_transfer_ms = frame.gpu_transfer_ms;
+    stats_.gpu_final_copy_ms = frame.gpu_final_copy_ms;
 }
 
 core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> vertex_spirv,

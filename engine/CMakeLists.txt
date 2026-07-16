@@ -56,6 +56,7 @@ target_sources(
     physics/physics_world.cpp
     player_profiles/map_discovery.cpp
     player_profiles/player_profile.cpp
+    profiling/cpu_timing.cpp
     processes/process.cpp
     processes/process_environment.cpp
     processes/process_prototype.cpp
@@ -69,6 +70,7 @@ target_sources(
     renderer/chunks/chunk_render_system.cpp
     renderer/frame/frame_builder.cpp
     renderer/renderer.cpp
+    renderer/renderer_stats.cpp
     renderer/render_camera.cpp
     renderer/rhi/render_device.cpp
     renderer/rhi/render_frame_plan.cpp
@@ -188,6 +190,7 @@ target_sources(
       physics/physics_world.hpp
       player_profiles/map_discovery.hpp
       player_profiles/player_profile.hpp
+      profiling/cpu_timing.hpp
       processes/process.hpp
       processes/process_environment.hpp
       processes/process_prototype.hpp
@@ -202,6 +205,7 @@ target_sources(
       renderer/frame/frame_builder.hpp
       renderer/frame/render_commands.hpp
       renderer/renderer.hpp
+      renderer/renderer_stats.hpp
       renderer/render_camera.hpp
       renderer/rhi/render_device.hpp
       renderer/rhi/render_frame_plan.hpp

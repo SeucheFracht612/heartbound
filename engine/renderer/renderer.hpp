@@ -1,13 +1,16 @@
 #pragma once
 
 #include "engine/core/result.hpp"
+#include "engine/profiling/cpu_timing.hpp"
 #include "engine/renderer/chunks/chunk_render_system.hpp"
 #include "engine/renderer/frame/frame_builder.hpp"
 #include "engine/renderer/render_camera.hpp"
+#include "engine/renderer/renderer_stats.hpp"
 #include "engine/renderer/rhi/render_device.hpp"
 #include "engine/world/streaming/chunk_streamer.hpp"
 #include "engine/world/world_state.hpp"
 
+#include <chrono>
 #include <memory>
 #include <span>
 #include <vector>
@@ -48,6 +51,7 @@ class Renderer {
 
     [[nodiscard]] bool is_initialized() const noexcept;
     [[nodiscard]] const ChunkRenderStats& chunk_stats() const noexcept;
+    [[nodiscard]] const RendererStats& stats() const noexcept;
     [[nodiscard]] rhi::IRenderDevice* device() noexcept;
     [[nodiscard]] const rhi::IRenderDevice* device() const noexcept;
 
@@ -55,6 +59,8 @@ class Renderer {
     [[nodiscard]] core::Status
     create_terrain_pipeline(std::span<const std::uint32_t> vertex_spirv,
                             std::span<const std::uint32_t> fragment_spirv);
+    void update_frontend_stats(std::size_t loaded_chunk_count) noexcept;
+    void update_backend_stats(const rhi::RenderFrameStats& frame) noexcept;
 
     std::unique_ptr<rhi::IRenderDevice> device_;
     rhi::RenderResourceHandle terrain_vertex_shader_;
@@ -63,6 +69,10 @@ class Renderer {
     std::unique_ptr<ChunkGpuCache> chunk_cache_;
     std::unique_ptr<ChunkRenderSystem> chunk_system_;
     std::unique_ptr<FrameBuilder> frame_builder_;
+    profiling::CpuTimingRecorder cpu_timings_{};
+    RendererStats stats_{};
+    std::chrono::steady_clock::time_point frame_started_at_{};
+    bool frame_timing_active_ = false;
 };
 
 } // namespace heartstead::renderer

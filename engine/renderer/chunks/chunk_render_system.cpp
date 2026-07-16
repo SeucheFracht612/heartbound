@@ -122,6 +122,7 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
     stats_.uploaded_bytes = 0;
     stats_.failed_mesh_count = 0;
     stats_.failed_upload_count = 0;
+    timings_.reset();
 
     status = reconcile_loaded_chunks(world);
     if (!status) {
@@ -136,46 +137,65 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
     }
     stats_.cache = cache_->stats();
     refresh_queue_stats();
+    refresh_timing_stats();
     return first_failure;
 }
 
 ChunkDrawList ChunkRenderSystem::build_draw_list(const RenderCamera& camera) {
     ChunkDrawList result;
-    for (const auto* entry : cache_->entries()) {
-        if (entry->state != ChunkGpuState::resident) {
-            continue;
+    struct VisibleEntry {
+        const ChunkGpuEntry* entry = nullptr;
+        math::Vec3f origin{};
+    };
+    std::vector<VisibleEntry> visible_entries;
+    const auto frustum = RenderFrustum::from_view_projection(camera.view_projection);
+    {
+        profiling::ScopedCpuTimingZone culling_zone(timings_,
+                                                    profiling::CpuTimingZone::visibility_culling);
+        for (const auto* entry : cache_->entries()) {
+            if (entry->state != ChunkGpuState::resident) {
+                continue;
+            }
+            const auto origin = camera_relative_chunk_origin(entry->identity.coordinate, camera);
+            if (!origin ||
+                !frustum.intersects(translated_bounds(entry->local_bounds, origin.value()))) {
+                ++result.culled_chunk_count;
+                continue;
+            }
+            ++result.visible_chunk_count;
+            visible_entries.push_back({entry, origin.value()});
         }
-        const auto origin = camera_relative_chunk_origin(entry->identity.coordinate, camera);
-        if (!origin || !is_visible(entry->identity.coordinate, entry->local_bounds, camera)) {
-            ++result.culled_chunk_count;
-            continue;
-        }
-        ++result.visible_chunk_count;
-        if (!entry->has_drawable_mesh()) {
-            continue;
-        }
-
-        rhi::RenderDrawCommand draw;
-        draw.pipeline = terrain_pipeline_;
-        draw.vertex_buffer = entry->vertex_buffer;
-        draw.index_buffer = entry->index_buffer;
-        draw.index_count = entry->index_count;
-        draw.instance_count = 1;
-        draw.camera_relative_origin = origin.value();
-        result.draws.push_back(draw);
-        result.vertex_count += entry->vertex_count;
-        result.index_count += entry->index_count;
     }
 
-    std::ranges::stable_sort(
-        result.draws, [](const rhi::RenderDrawCommand& left, const rhi::RenderDrawCommand& right) {
+    {
+        profiling::ScopedCpuTimingZone draw_zone(timings_,
+                                                 profiling::CpuTimingZone::draw_list_construction);
+        for (const auto& visible : visible_entries) {
+            if (!visible.entry->has_drawable_mesh()) {
+                continue;
+            }
+            rhi::RenderDrawCommand draw;
+            draw.pipeline = terrain_pipeline_;
+            draw.vertex_buffer = visible.entry->vertex_buffer;
+            draw.index_buffer = visible.entry->index_buffer;
+            draw.index_count = visible.entry->index_count;
+            draw.instance_count = 1;
+            draw.camera_relative_origin = visible.origin;
+            result.draws.push_back(draw);
+            result.vertex_count += visible.entry->vertex_count;
+            result.index_count += visible.entry->index_count;
+        }
+        std::ranges::stable_sort(result.draws, [](const rhi::RenderDrawCommand& left,
+                                                  const rhi::RenderDrawCommand& right) {
             return left.pipeline.value < right.pipeline.value;
         });
+    }
     stats_.visible_chunk_count = result.visible_chunk_count;
     stats_.culled_chunk_count = result.culled_chunk_count;
     stats_.draw_count = result.draws.size();
     stats_.visible_vertex_count = result.vertex_count;
     stats_.visible_index_count = result.index_count;
+    refresh_timing_stats();
     return result;
 }
 
@@ -283,14 +303,25 @@ core::Status ChunkRenderSystem::process_mesh_queue(world::WorldState& world,
             !cache_->contains(pending.identity)) {
             continue;
         }
-        const auto requested_revision = chunk->content_revision();
+        std::uint64_t requested_revision = 0;
+        {
+            profiling::ScopedCpuTimingZone snapshot_zone(timings_,
+                                                         profiling::CpuTimingZone::chunk_snapshot);
+            // Milestone 2 still meshes synchronously from live storage. This zone measures the
+            // identity/revision capture and becomes the immutable snapshot copy zone before jobs.
+            requested_revision = chunk->content_revision();
+        }
         world::ChunkMeshingContext context{
             *chunk,
             palette_,
             &world.chunks(),
             world::BlockModelDefinition::max_dependency_radius,
         };
-        auto mesh = world::ChunkMesher::build_surface_mesh(context);
+        auto mesh = [&]() {
+            profiling::ScopedCpuTimingZone meshing_zone(timings_,
+                                                        profiling::CpuTimingZone::meshing);
+            return world::ChunkMesher::build_surface_mesh(context);
+        }();
         ++stats_.meshed_chunk_count;
         if (!mesh) {
             ++stats_.failed_mesh_count;
@@ -311,16 +342,20 @@ core::Status ChunkRenderSystem::process_mesh_queue(world::WorldState& world,
         std::erase_if(pending_uploads_, [&pending](const PendingUpload& upload) {
             return upload.identity == pending.identity;
         });
-        auto built_mesh = std::move(mesh).value();
-        PendingUpload upload;
-        upload.identity = pending.identity;
-        upload.content_revision = requested_revision;
-        upload.local_bounds = built_mesh.local_bounds;
-        upload.vertices = terrain::make_gpu_chunk_vertices(built_mesh.vertices);
-        upload.indices = std::move(built_mesh.indices);
-        upload.forced = pending.forced;
-        upload.sequence = pending.sequence;
-        pending_uploads_.push_back(std::move(upload));
+        {
+            profiling::ScopedCpuTimingZone preparation_zone(
+                timings_, profiling::CpuTimingZone::upload_preparation);
+            auto built_mesh = std::move(mesh).value();
+            PendingUpload upload;
+            upload.identity = pending.identity;
+            upload.content_revision = requested_revision;
+            upload.local_bounds = built_mesh.local_bounds;
+            upload.vertices = terrain::make_gpu_chunk_vertices(built_mesh.vertices);
+            upload.indices = std::move(built_mesh.indices);
+            upload.forced = pending.forced;
+            upload.sequence = pending.sequence;
+            pending_uploads_.push_back(std::move(upload));
+        }
         cache_->mark_cpu_mesh_ready(pending.identity);
         cache_->mark_upload_pending(pending.identity);
     }
@@ -355,8 +390,11 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
             continue;
         }
 
-        auto upload = cache_->replace_mesh(pending.identity, pending.content_revision,
-                                           pending.local_bounds, pending.vertices, pending.indices);
+        auto upload = [&]() {
+            profiling::ScopedCpuTimingZone upload_zone(timings_, profiling::CpuTimingZone::upload);
+            return cache_->replace_mesh(pending.identity, pending.content_revision,
+                                        pending.local_bounds, pending.vertices, pending.indices);
+        }();
         if (!upload) {
             ++stats_.failed_upload_count;
             pending.sequence = next_sequence_++;
@@ -469,6 +507,16 @@ void ChunkRenderSystem::refresh_queue_stats() noexcept {
     for (const auto& upload : pending_uploads_) {
         stats_.pending_upload_bytes += upload.byte_size();
     }
+}
+
+void ChunkRenderSystem::refresh_timing_stats() noexcept {
+    stats_.culling_ms = timings_.milliseconds(profiling::CpuTimingZone::visibility_culling);
+    stats_.draw_list_ms = timings_.milliseconds(profiling::CpuTimingZone::draw_list_construction);
+    stats_.chunk_snapshot_ms = timings_.milliseconds(profiling::CpuTimingZone::chunk_snapshot);
+    stats_.meshing_ms = timings_.milliseconds(profiling::CpuTimingZone::meshing);
+    stats_.upload_preparation_ms =
+        timings_.milliseconds(profiling::CpuTimingZone::upload_preparation);
+    stats_.upload_ms = timings_.milliseconds(profiling::CpuTimingZone::upload);
 }
 
 } // namespace heartstead::renderer

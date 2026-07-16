@@ -67,15 +67,15 @@ enum class RenderShaderStageFlags : std::uint32_t {
 };
 
 [[nodiscard]] constexpr RenderShaderStageFlags operator|(RenderShaderStageFlags left,
-                                                          RenderShaderStageFlags right) noexcept {
+                                                         RenderShaderStageFlags right) noexcept {
     return static_cast<RenderShaderStageFlags>(static_cast<std::uint32_t>(left) |
-                                                static_cast<std::uint32_t>(right));
+                                               static_cast<std::uint32_t>(right));
 }
 
 [[nodiscard]] constexpr RenderShaderStageFlags operator&(RenderShaderStageFlags left,
-                                                          RenderShaderStageFlags right) noexcept {
+                                                         RenderShaderStageFlags right) noexcept {
     return static_cast<RenderShaderStageFlags>(static_cast<std::uint32_t>(left) &
-                                                static_cast<std::uint32_t>(right));
+                                               static_cast<std::uint32_t>(right));
 }
 
 [[nodiscard]] constexpr bool any(RenderShaderStageFlags flags) noexcept {
@@ -135,6 +135,15 @@ struct RenderFrameStats {
     std::size_t draw_count = 0;
     std::size_t indexed_draw_count = 0;
     std::size_t total_indices = 0;
+    double cpu_command_recording_ms = 0.0;
+    double cpu_gpu_wait_ms = 0.0;
+    bool gpu_timing_valid = false;
+    std::uint64_t gpu_timing_frame_index = 0;
+    std::uint32_t gpu_timing_latency_frames = 0;
+    double gpu_frame_ms = 0.0;
+    double gpu_opaque_terrain_ms = 0.0;
+    double gpu_transfer_ms = 0.0;
+    double gpu_final_copy_ms = 0.0;
 };
 
 struct RenderBufferDesc {
@@ -507,7 +516,8 @@ validate_render_mesh_bindings_shape(std::span<const RenderMeshBinding> draws);
 [[nodiscard]] std::size_t render_image_format_bytes_per_pixel(RenderImageFormat format) noexcept;
 [[nodiscard]] std::string_view render_descriptor_kind_name(RenderDescriptorKind kind) noexcept;
 [[nodiscard]] std::string_view render_shader_stage_name(RenderShaderStage stage) noexcept;
-[[nodiscard]] std::string_view render_primitive_topology_name(RenderPrimitiveTopology value) noexcept;
+[[nodiscard]] std::string_view
+render_primitive_topology_name(RenderPrimitiveTopology value) noexcept;
 [[nodiscard]] std::string_view render_polygon_mode_name(RenderPolygonMode value) noexcept;
 [[nodiscard]] std::string_view render_cull_mode_name(RenderCullMode value) noexcept;
 [[nodiscard]] std::string_view render_front_face_name(RenderFrontFace value) noexcept;

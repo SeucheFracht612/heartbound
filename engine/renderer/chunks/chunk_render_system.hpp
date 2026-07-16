@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/core/result.hpp"
+#include "engine/profiling/cpu_timing.hpp"
 #include "engine/renderer/camera/frustum.hpp"
 #include "engine/renderer/chunks/chunk_gpu_cache.hpp"
 #include "engine/renderer/render_camera.hpp"
@@ -39,6 +40,13 @@ struct ChunkRenderStats {
     std::size_t draw_count = 0;
     std::size_t visible_vertex_count = 0;
     std::size_t visible_index_count = 0;
+
+    double culling_ms = 0.0;
+    double draw_list_ms = 0.0;
+    double chunk_snapshot_ms = 0.0;
+    double meshing_ms = 0.0;
+    double upload_preparation_ms = 0.0;
+    double upload_ms = 0.0;
 };
 
 struct ChunkDrawList {
@@ -102,6 +110,7 @@ class ChunkRenderSystem {
     [[nodiscard]] static core::Result<math::Vec3f>
     camera_relative_chunk_origin(world::ChunkCoord coord, const RenderCamera& camera);
     void refresh_queue_stats() noexcept;
+    void refresh_timing_stats() noexcept;
 
     ChunkGpuCache* cache_ = nullptr;
     rhi::RenderResourceHandle terrain_pipeline_;
@@ -111,6 +120,7 @@ class ChunkRenderSystem {
     std::vector<PendingUpload> pending_uploads_;
     std::uint64_t next_sequence_ = 1;
     ChunkRenderStats stats_{};
+    profiling::CpuTimingRecorder timings_{};
 };
 
 } // namespace heartstead::renderer

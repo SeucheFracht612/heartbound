@@ -1,3 +1,4 @@
+#include "engine/profiling/cpu_timing.hpp"
 #include "engine/renderer/camera/frustum.hpp"
 #include "engine/renderer/chunks/chunk_gpu_cache.hpp"
 #include "engine/renderer/chunks/chunk_render_system.hpp"
@@ -13,6 +14,24 @@
 #include <ranges>
 
 namespace {
+
+void test_scoped_cpu_timing_zones() {
+    heartstead::profiling::CpuTimingRecorder timings;
+    {
+        heartstead::profiling::ScopedCpuTimingZone zone(
+            timings, heartstead::profiling::CpuTimingZone::meshing);
+        std::uint64_t work = 0;
+        for (std::uint64_t index = 0; index < 10'000; ++index) {
+            work += index;
+        }
+        assert(work > 0);
+    }
+    assert(timings.milliseconds(heartstead::profiling::CpuTimingZone::meshing) > 0.0);
+    assert(heartstead::profiling::cpu_timing_zone_name(
+               heartstead::profiling::CpuTimingZone::visibility_culling) == "visibility_culling");
+    timings.reset();
+    assert(timings.milliseconds(heartstead::profiling::CpuTimingZone::meshing) == 0.0);
+}
 
 void test_frustum_aabb_culling() {
     heartstead::renderer::RenderCamera camera;
@@ -271,6 +290,22 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(first_frame.value().total_indices > 0);
     assert(retained_renderer.chunk_stats().visible_chunk_count == 1);
     assert(retained_renderer.chunk_stats().culled_chunk_count == 0);
+    const auto& renderer_stats = retained_renderer.stats();
+    assert(renderer_stats.cpu_frame_ms > 0.0);
+    assert(renderer_stats.chunk_synchronization_ms > 0.0);
+    assert(renderer_stats.meshing_ms > 0.0);
+    assert(renderer_stats.upload_ms > 0.0);
+    assert(renderer_stats.command_recording_ms > 0.0);
+    assert(renderer_stats.loaded_chunks == 1);
+    assert(renderer_stats.resident_chunks == 1);
+    assert(renderer_stats.visible_chunks == 1);
+    assert(renderer_stats.drawn_chunks == 1);
+    assert(renderer_stats.draw_calls == 1);
+    assert(renderer_stats.vertices > 0);
+    assert(renderer_stats.triangles > 0);
+    assert(renderer_stats.resident_mesh_bytes > 0);
+    assert(renderer_stats.uploaded_bytes_this_frame > 0);
+    assert(!renderer::format_renderer_stats(renderer_stats).empty());
 
     const auto uploaded_before_resize = retained_renderer.chunk_stats().cache.uploaded_chunk_count;
     assert(retained_renderer.resize({800, 400}));
@@ -303,6 +338,7 @@ void test_renderer_frontend_submits_headless_frames() {
 } // namespace
 
 int main() {
+    test_scoped_cpu_timing_zones();
     test_frustum_aabb_culling();
     test_chunk_gpu_cache_lifecycle();
     test_chunk_render_system_retains_rebuilds_and_culls();

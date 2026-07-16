@@ -4,6 +4,7 @@
 #include "engine/renderer/vulkan/vulkan_backend.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -119,6 +120,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
     [[nodiscard]] core::Result<RenderFrameStats>
     execute_frame(const RenderFrameSubmission& frame) override {
+        const auto command_started = std::chrono::steady_clock::now();
         auto shape_status = validate_render_frame_submission_shape(frame);
         if (!shape_status) {
             return core::Result<RenderFrameStats>::failure(shape_status.error().code,
@@ -214,7 +216,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
                         return resource != nullptr && is_depth_format(resource->format) &&
                                is_depth_format(pipeline->second.depth_target_format);
                     });
-                if (!has_color_target || (pipeline->second.depth_test_enable && !has_depth_target)) {
+                if (!has_color_target ||
+                    (pipeline->second.depth_test_enable && !has_depth_target)) {
                     return core::Result<RenderFrameStats>::failure(
                         "renderer.incompatible_draw_targets",
                         "render draw pass targets do not match its graphics pipeline");
@@ -225,6 +228,9 @@ class HeadlessRenderDevice final : public IRenderDevice {
                 stats.total_indices += draw.index_count;
             }
         }
+        stats.cpu_command_recording_ms = std::chrono::duration<double, std::milli>(
+                                             std::chrono::steady_clock::now() - command_started)
+                                             .count();
         ++completed_frame_count_;
         return core::Result<RenderFrameStats>::success(stats);
     }
@@ -834,10 +840,9 @@ core::Status validate_render_pipeline_layout_shape(const RenderPipelineLayoutDes
         }
     }
 
-    constexpr auto valid_stage_bits =
-        static_cast<std::uint32_t>(RenderShaderStageFlags::vertex) |
-        static_cast<std::uint32_t>(RenderShaderStageFlags::fragment) |
-        static_cast<std::uint32_t>(RenderShaderStageFlags::compute);
+    constexpr auto valid_stage_bits = static_cast<std::uint32_t>(RenderShaderStageFlags::vertex) |
+                                      static_cast<std::uint32_t>(RenderShaderStageFlags::fragment) |
+                                      static_cast<std::uint32_t>(RenderShaderStageFlags::compute);
     for (std::size_t range_index = 0; range_index < desc.push_constant_ranges.size();
          ++range_index) {
         const auto& range = desc.push_constant_ranges[range_index];
@@ -856,7 +861,8 @@ core::Status validate_render_pipeline_layout_shape(const RenderPipelineLayoutDes
         for (std::size_t previous_index = 0; previous_index < range_index; ++previous_index) {
             const auto& previous = desc.push_constant_ranges[previous_index];
             const auto previous_end = previous.byte_offset + previous.byte_size;
-            const auto overlaps = range.byte_offset < previous_end && previous.byte_offset < range_end;
+            const auto overlaps =
+                range.byte_offset < previous_end && previous.byte_offset < range_end;
             if (overlaps && any(range.stages & previous.stages)) {
                 return core::Status::failure(
                     "renderer.overlapping_push_constant_stages",
