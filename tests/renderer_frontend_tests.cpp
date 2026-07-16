@@ -633,6 +633,8 @@ void test_renderer_frontend_submits_headless_frames() {
     init.static_mesh_fragment_spirv = test_spirv;
     init.debug_vertex_spirv = test_spirv;
     init.debug_fragment_spirv = test_spirv;
+    init.ui_vertex_spirv = test_spirv;
+    init.ui_fragment_spirv = test_spirv;
     init.development_shader_hot_reload = true;
     init.chunk_config.max_chunks_meshed_per_frame = 2;
     init.chunk_config.max_bytes_uploaded_per_frame = 1024 * 1024;
@@ -643,10 +645,10 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(retained_renderer.is_initialized());
     assert(retained_renderer.device() != nullptr);
     const auto initialized_resource_count = retained_renderer.device()->live_resource_count();
-    // Six shader modules, nine prewarmed pipelines, four fallback textures, one terrain texture
-    // array, one shared sampler, one material-table buffer, two static-mesh arenas, and one
-    // buffered instance-storage buffer plus two buffered debug-geometry buffers.
-    assert(initialized_resource_count == 27);
+    // Eight shader modules, ten prewarmed pipelines, four fallback textures, terrain/UI arrays,
+    // one shared sampler, one material-table buffer, static arenas/instances, and buffered
+    // debug/UI geometry.
+    assert(initialized_resource_count == 33);
 
     renderer::rhi::RenderEnvironmentData invalid_environment;
     invalid_environment.fog_end = invalid_environment.fog_start;
@@ -670,6 +672,10 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(!retained_renderer.reload_debug_shaders(invalid_spirv, test_spirv));
     assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
     assert(retained_renderer.reload_debug_shaders(test_spirv, test_spirv));
+    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
+    assert(!retained_renderer.reload_ui_shaders(invalid_spirv, test_spirv));
+    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
+    assert(retained_renderer.reload_ui_shaders(test_spirv, test_spirv));
     assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
 
     world::WorldState world;
@@ -727,9 +733,9 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(renderer_stats.drawn_chunks == 1);
     assert(renderer_stats.draw_calls == 1);
     assert(renderer_stats.pipeline_switches == 1);
-    assert(renderer_stats.resident_textures == 5);
+    assert(renderer_stats.resident_textures == 6);
     assert(renderer_stats.runtime_materials == 255);
-    assert(renderer_stats.resident_pipelines == 9);
+    assert(renderer_stats.resident_pipelines == 10);
     assert(renderer_stats.resident_texture_bytes > 0);
     assert(renderer_stats.vertices > 0);
     assert(renderer_stats.triangles > 0);
@@ -770,11 +776,21 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(retained_renderer.debug_renderer()->submit_axes(object_anchor.value(), 1.0F));
     assert(retained_renderer.debug_renderer()->submit_text(
         {object_anchor.value(), "frontend debug label"}));
+    assert(retained_renderer.ui_renderer() != nullptr);
+    renderer::UiQuadDesc ui_quad;
+    ui_quad.minimum_pixels = {8.0F, 8.0F};
+    ui_quad.maximum_pixels = {120.0F, 42.0F};
+    ui_quad.color = {0.3F, 0.7F, 1.0F, 0.8F};
+    ui_quad.scissor_enabled = true;
+    ui_quad.scissor = {4, 4, 160, 64};
+    assert(retained_renderer.ui_renderer()->submit_quad(ui_quad));
+    assert(retained_renderer.ui_renderer()->submit_text(
+        {{12.0F, 48.0F}, "FPS 144", 8.0F, {1.0F, 1.0F, 1.0F, 1.0F}}));
     auto instanced_frame = retained_renderer.render(camera, 0.5F);
     assert(instanced_frame);
-    assert(instanced_frame.value().draw_count == 3);
-    assert(instanced_frame.value().indexed_draw_count == 3);
-    assert(instanced_frame.value().pipeline_bind_count == 3);
+    assert(instanced_frame.value().draw_count == 5);
+    assert(instanced_frame.value().indexed_draw_count == 5);
+    assert(instanced_frame.value().pipeline_bind_count == 4);
     assert(retained_renderer.scene_stats().scene.visible_objects == 3);
     assert(retained_renderer.scene_stats().submitted_instances == 2);
     assert(retained_renderer.scene_stats().draw_calls == 1);
@@ -786,6 +802,10 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(retained_renderer.stats().debug_lines == 3);
     assert(retained_renderer.stats().debug_draw_calls == 1);
     assert(retained_renderer.stats().debug_labels == 1);
+    assert(retained_renderer.stats().ui_vertices == 32);
+    assert(retained_renderer.stats().ui_draw_calls == 2);
+    assert(retained_renderer.stats().ui_clipped_draw_calls == 1);
+    assert(retained_renderer.stats().ui_glyphs == 7);
 
     renderer::RenderSceneUpdate remove_object;
     remove_object.kind = renderer::RenderSceneUpdateKind::remove_object;

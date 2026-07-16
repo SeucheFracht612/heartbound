@@ -161,6 +161,26 @@ Implemented foundation:
   - instance capacity is a fixed configuration budget: overflow is delayed/dropped visibly in
     statistics instead of growing frame memory without bound
 
+- Gameplay rendering tools
+  - `DebugRenderer` accepts thread-safe one-frame or timed lines, rays, axes, AABBs, oriented
+    boxes, spheres, and camera-relative text-label bridge records; depth-tested and overlay lines
+    use separately prewarmed line-list pipelines
+  - debug geometry uses an asserted 28-byte vertex ABI, fixed line/text capacities, rotating
+    device-local buffer segments, batched writes, and visible overflow/upload/draw counters
+  - `UiRenderer` accepts owner-thread screen-space triangle batches, quads, and text, batches a
+    complete text string into one indexed draw, and emits only renderer-neutral UI commands
+  - UI vertices use an asserted 36-byte ABI with explicit position, UV, color, and integer atlas
+    layer locations; the built-in two-layer sRGB atlas provides a white primitive layer and a
+    deterministic 5x7 fallback diagnostic font
+  - clipping is a per-draw RHI scissor validated against the current framebuffer before either
+    backend executes it; the Vulkan backend programs the dynamic scissor immediately before the
+    indexed draw
+  - UI geometry has fixed vertex/index capacities and rotating device-local segments. Statistics
+    expose vertices, glyphs, clipped draws, upload bytes, and overflow instead of allowing
+    unbounded frame allocations
+  - debug and UI shaders participate in development hot reload while preserving the last valid
+    program and pipeline when validation or replacement fails
+
 - Camera and shader constants
   - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention
   - `RenderCamera` owns the local position, yaw/pitch perspective, resize-dependent aspect ratio,

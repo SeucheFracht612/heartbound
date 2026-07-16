@@ -16,6 +16,7 @@
 #include "engine/renderer/rhi/render_device.hpp"
 #include "engine/renderer/scene/render_scene.hpp"
 #include "engine/renderer/scene/scene_render_system.hpp"
+#include "engine/renderer/ui/ui_renderer.hpp"
 #include "engine/world/streaming/chunk_streamer.hpp"
 #include "engine/world/world_state.hpp"
 
@@ -35,12 +36,15 @@ struct RendererInitDesc {
     std::vector<std::uint32_t> static_mesh_fragment_spirv;
     std::vector<std::uint32_t> debug_vertex_spirv;
     std::vector<std::uint32_t> debug_fragment_spirv;
+    std::vector<std::uint32_t> ui_vertex_spirv;
+    std::vector<std::uint32_t> ui_fragment_spirv;
     const world::VoxelPalette* voxel_palette = nullptr;
     ChunkRenderConfig chunk_config{};
     ChunkGpuCacheConfig chunk_gpu_cache_config{};
     MeshManagerConfig mesh_manager_config{};
     SceneRenderConfig scene_render_config{};
     DebugRendererConfig debug_renderer_config{};
+    UiRendererConfig ui_renderer_config{};
     rhi::ClearColor clear_color{0.055F, 0.09F, 0.14F, 1.0F};
     rhi::RenderEnvironmentData environment{};
     bool development_shader_hot_reload = false;
@@ -88,6 +92,9 @@ class Renderer {
     [[nodiscard]] core::Status
     reload_debug_shaders(std::span<const std::uint32_t> vertex_spirv,
                          std::span<const std::uint32_t> fragment_spirv);
+    [[nodiscard]] core::Status
+    reload_ui_shaders(std::span<const std::uint32_t> vertex_spirv,
+                      std::span<const std::uint32_t> fragment_spirv);
 
     [[nodiscard]] bool is_initialized() const noexcept;
     [[nodiscard]] const ChunkRenderStats& chunk_stats() const noexcept;
@@ -97,6 +104,8 @@ class Renderer {
     [[nodiscard]] DebugRenderer* debug_renderer() noexcept;
     [[nodiscard]] const DebugRenderer* debug_renderer() const noexcept;
     [[nodiscard]] std::span<const DebugTextLabelFrame> debug_text_labels() const noexcept;
+    [[nodiscard]] UiRenderer* ui_renderer() noexcept;
+    [[nodiscard]] const UiRenderer* ui_renderer() const noexcept;
     [[nodiscard]] rhi::IRenderDevice* device() noexcept;
     [[nodiscard]] const rhi::IRenderDevice* device() const noexcept;
 
@@ -111,6 +120,9 @@ class Renderer {
     [[nodiscard]] core::Status
     create_debug_pipelines(std::span<const std::uint32_t> vertex_spirv,
                            std::span<const std::uint32_t> fragment_spirv);
+    [[nodiscard]] core::Status
+    create_ui_pipeline(std::span<const std::uint32_t> vertex_spirv,
+                       std::span<const std::uint32_t> fragment_spirv);
     void update_frontend_stats(std::size_t loaded_chunk_count) noexcept;
     void update_backend_stats(const rhi::RenderFrameStats& frame) noexcept;
 
@@ -121,10 +133,14 @@ class Renderer {
     std::array<GraphicsPipelineKey, 3> scene_pipeline_keys_{};
     DebugPipelineSet debug_pipelines_{};
     std::array<GraphicsPipelineKey, 2> debug_pipeline_keys_{};
+    rhi::RenderResourceHandle ui_pipeline_{};
+    GraphicsPipelineKey ui_pipeline_key_{};
     ShaderProgramHandle terrain_shader_program_;
     ShaderProgramHandle scene_shader_program_;
     ShaderProgramHandle debug_shader_program_;
+    ShaderProgramHandle ui_shader_program_;
     TextureHandle terrain_texture_array_;
+    TextureHandle ui_texture_atlas_;
     rhi::RenderResourceHandle terrain_sampler_;
     std::unique_ptr<ShaderManager> shader_manager_;
     std::unique_ptr<SamplerCache> sampler_cache_;
@@ -136,6 +152,7 @@ class Renderer {
     std::unique_ptr<ChunkRenderSystem> chunk_system_;
     std::unique_ptr<SceneRenderSystem> scene_render_system_;
     std::unique_ptr<DebugRenderer> debug_renderer_;
+    std::unique_ptr<UiRenderer> ui_renderer_;
     std::unique_ptr<FrameBuilder> frame_builder_;
     RenderScene scene_;
     profiling::CpuTimingRecorder cpu_timings_{};
@@ -143,6 +160,7 @@ class Renderer {
     RenderCommandLists draw_command_scratch_;
     SceneDrawCommands scene_draw_scratch_;
     DebugFrameCommands debug_frame_scratch_;
+    UiFrameCommands ui_frame_scratch_;
     std::vector<DebugTextLabelFrame> debug_text_labels_;
     rhi::RenderEnvironmentData environment_{};
     RendererStats stats_{};

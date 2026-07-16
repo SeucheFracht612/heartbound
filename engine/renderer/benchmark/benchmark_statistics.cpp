@@ -335,6 +335,18 @@ std::string BenchmarkRecorder::to_json() const {
                << ", \"resident_textures\": " << sample.resident_textures
                << ", \"runtime_materials\": " << sample.runtime_materials
                << ", \"resident_pipelines\": " << sample.resident_pipelines
+               << ", \"retained_objects\": " << sample.retained_objects
+               << ", \"visible_objects\": " << sample.visible_objects
+               << ", \"culled_objects\": " << sample.culled_objects
+               << ", \"submitted_instances\": " << sample.submitted_instances
+               << ", \"instance_draw_calls\": " << sample.instance_draw_calls
+               << ", \"debug_lines\": " << sample.debug_lines
+               << ", \"debug_draw_calls\": " << sample.debug_draw_calls
+               << ", \"debug_labels\": " << sample.debug_labels
+               << ", \"ui_vertices\": " << sample.ui_vertices
+               << ", \"ui_glyphs\": " << sample.ui_glyphs
+               << ", \"ui_draw_calls\": " << sample.ui_draw_calls
+               << ", \"ui_clipped_draw_calls\": " << sample.ui_clipped_draw_calls
                << ", \"vertices\": " << sample.vertices << ", \"triangles\": " << sample.triangles
                << ", \"resident_texture_bytes\": " << sample.resident_texture_bytes
                << ", \"resident_mesh_bytes\": " << sample.resident_mesh_bytes
@@ -367,7 +379,10 @@ std::string BenchmarkRecorder::to_csv() const {
               "culled_chunks,drawn_chunks,draw_calls,opaque_terrain_draws,"
               "alpha_tested_terrain_draws,transparent_terrain_draws,pipeline_switches,"
               "resident_textures,"
-              "runtime_materials,resident_pipelines,vertices,triangles,resident_texture_bytes,"
+              "runtime_materials,resident_pipelines,retained_objects,visible_objects,"
+              "culled_objects,submitted_instances,instance_draw_calls,debug_lines,"
+              "debug_draw_calls,debug_labels,ui_vertices,ui_glyphs,ui_draw_calls,"
+              "ui_clipped_draw_calls,vertices,triangles,resident_texture_bytes,"
               "resident_mesh_bytes,"
               "gpu_arena_capacity_bytes,gpu_arena_used_bytes,gpu_arena_free_bytes,"
               "gpu_arena_fragmentation,pending_upload_bytes,uploaded_bytes\n";
@@ -401,6 +416,12 @@ std::string BenchmarkRecorder::to_csv() const {
                << ',' << sample.transparent_terrain_draws << ',' << sample.pipeline_switches << ','
                << sample.resident_textures << ','
                << sample.runtime_materials << ',' << sample.resident_pipelines << ','
+               << sample.retained_objects << ',' << sample.visible_objects << ','
+               << sample.culled_objects << ',' << sample.submitted_instances << ','
+               << sample.instance_draw_calls << ',' << sample.debug_lines << ','
+               << sample.debug_draw_calls << ',' << sample.debug_labels << ','
+               << sample.ui_vertices << ',' << sample.ui_glyphs << ',' << sample.ui_draw_calls << ','
+               << sample.ui_clipped_draw_calls << ','
                << sample.vertices << ',' << sample.triangles << ',' << sample.resident_texture_bytes
                << ',' << sample.resident_mesh_bytes << ',' << sample.gpu_arena_capacity_bytes << ','
                << sample.gpu_arena_used_bytes << ',' << sample.gpu_arena_free_bytes << ','

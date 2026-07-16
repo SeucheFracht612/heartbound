@@ -262,6 +262,12 @@ void test_unified_headless_frame_submission() {
     auto out_of_bounds = device.value()->execute_frame(frame);
     assert(!out_of_bounds);
     assert(out_of_bounds.error().code == "renderer.draw_index_range_out_of_bounds");
+    frame.pass_commands.front().draws.front().first_index = 0;
+    frame.pass_commands.front().draws.front().scissor_enabled = true;
+    frame.pass_commands.front().draws.front().scissor = {600, 0, 64, 64};
+    auto invalid_scissor = device.value()->execute_frame(frame);
+    assert(!invalid_scissor);
+    assert(invalid_scissor.error().code == "renderer.invalid_draw_scissor");
 }
 
 void test_immutable_chunk_meshing_snapshot() {

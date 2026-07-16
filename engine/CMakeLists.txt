@@ -92,6 +92,7 @@ target_sources(
     renderer/shaders/shader_compiler.cpp
     renderer/shaders/spirv_loader.cpp
     renderer/terrain/gpu_chunk_vertex.cpp
+    renderer/ui/ui_renderer.cpp
     renderer/vulkan/vulkan_backend.cpp
     renderer/world_render_list.cpp
     rooms/room_descriptor_prototype.cpp

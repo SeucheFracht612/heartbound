@@ -4779,6 +4779,15 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                                          draw.index_type == rhi::RenderIndexType::uint16
                                              ? VK_INDEX_TYPE_UINT16
                                              : VK_INDEX_TYPE_UINT32);
+                    VkRect2D draw_scissor{};
+                    if (draw.scissor_enabled) {
+                        draw_scissor.offset = {static_cast<std::int32_t>(draw.scissor.x),
+                                               static_cast<std::int32_t>(draw.scissor.y)};
+                        draw_scissor.extent = {draw.scissor.width, draw.scissor.height};
+                    } else {
+                        draw_scissor.extent = {target_extent.width, target_extent.height};
+                    }
+                    vkCmdSetScissor(frame_commands, 0, 1, &draw_scissor);
                     const rhi::ChunkPushConstants constants{
                         frame.camera.view_projection,
                         {draw.camera_relative_origin.x, draw.camera_relative_origin.y,

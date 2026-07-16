@@ -14,6 +14,21 @@ enum class Axis3 {
     z,
 };
 
+template <typename T> struct Vec2 {
+    T x{};
+    T y{};
+
+    [[nodiscard]] constexpr bool is_finite() const noexcept {
+        if constexpr (std::is_floating_point_v<T>) {
+            return std::isfinite(x) && std::isfinite(y);
+        } else {
+            return true;
+        }
+    }
+
+    friend constexpr auto operator<=>(const Vec2&, const Vec2&) = default;
+};
+
 template <typename T> struct Vec3 {
     T x{};
     T y{};
@@ -168,6 +183,8 @@ template <typename T> [[nodiscard]] constexpr Vec3<T> splat(T value) noexcept {
 
 using Vec3f = Vec3<float>;
 using Vec3d = Vec3<double>;
+using Vec2f = Vec2<float>;
+using Vec2d = Vec2<double>;
 using Coord3i = Vec3<std::int32_t>;
 using Coord3i64 = Vec3<std::int64_t>;
 using Coord3u16 = Vec3<std::uint16_t>;

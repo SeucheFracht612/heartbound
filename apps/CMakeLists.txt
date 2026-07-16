@@ -9,6 +9,8 @@ function(heartstead_attach_terrain_shader_assets target)
   set(static_fragment_source "${shader_source_dir}/static_mesh.frag")
   set(debug_vertex_source "${shader_source_dir}/debug_line.vert")
   set(debug_fragment_source "${shader_source_dir}/debug_line.frag")
+  set(ui_vertex_source "${shader_source_dir}/ui.vert")
+  set(ui_fragment_source "${shader_source_dir}/ui.frag")
 
   if(HEARTSTEAD_GLSLANG_VALIDATOR)
     set(vertex_spirv "${compiled_shader_dir}/terrain.vert.spv")
@@ -17,9 +19,12 @@ function(heartstead_attach_terrain_shader_assets target)
     set(static_fragment_spirv "${compiled_shader_dir}/static_mesh.frag.spv")
     set(debug_vertex_spirv "${compiled_shader_dir}/debug_line.vert.spv")
     set(debug_fragment_spirv "${compiled_shader_dir}/debug_line.frag.spv")
+    set(ui_vertex_spirv "${compiled_shader_dir}/ui.vert.spv")
+    set(ui_fragment_spirv "${compiled_shader_dir}/ui.frag.spv")
     add_custom_command(
       OUTPUT "${vertex_spirv}" "${fragment_spirv}" "${static_vertex_spirv}"
              "${static_fragment_spirv}" "${debug_vertex_spirv}" "${debug_fragment_spirv}"
+             "${ui_vertex_spirv}" "${ui_fragment_spirv}"
       COMMAND ${CMAKE_COMMAND} -E make_directory "${compiled_shader_dir}"
       COMMAND "${HEARTSTEAD_GLSLANG_VALIDATOR}" -V --target-env vulkan1.0
               "${vertex_source}" -o "${vertex_spirv}"
@@ -33,8 +38,13 @@ function(heartstead_attach_terrain_shader_assets target)
               "${debug_vertex_source}" -o "${debug_vertex_spirv}"
       COMMAND "${HEARTSTEAD_GLSLANG_VALIDATOR}" -V --target-env vulkan1.0
               "${debug_fragment_source}" -o "${debug_fragment_spirv}"
+      COMMAND "${HEARTSTEAD_GLSLANG_VALIDATOR}" -V --target-env vulkan1.0
+              "${ui_vertex_source}" -o "${ui_vertex_spirv}"
+      COMMAND "${HEARTSTEAD_GLSLANG_VALIDATOR}" -V --target-env vulkan1.0
+              "${ui_fragment_source}" -o "${ui_fragment_spirv}"
       DEPENDS "${vertex_source}" "${fragment_source}" "${static_vertex_source}"
               "${static_fragment_source}" "${debug_vertex_source}" "${debug_fragment_source}"
+              "${ui_vertex_source}" "${ui_fragment_source}"
       COMMENT "Compiling renderer GLSL to SPIR-V"
       VERBATIM
     )
@@ -45,6 +55,8 @@ function(heartstead_attach_terrain_shader_assets target)
     set(static_fragment_spirv "${shader_source_dir}/static_mesh.frag.spv")
     set(debug_vertex_spirv "${shader_source_dir}/debug_line.vert.spv")
     set(debug_fragment_spirv "${shader_source_dir}/debug_line.frag.spv")
+    set(ui_vertex_spirv "${shader_source_dir}/ui.vert.spv")
+    set(ui_fragment_spirv "${shader_source_dir}/ui.frag.spv")
   endif()
 
   add_custom_target(
@@ -62,6 +74,10 @@ function(heartstead_attach_terrain_shader_assets target)
             "$<TARGET_FILE_DIR:${target}>/assets/shaders/debug_line.vert"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${debug_fragment_source}"
             "$<TARGET_FILE_DIR:${target}>/assets/shaders/debug_line.frag"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ui_vertex_source}"
+            "$<TARGET_FILE_DIR:${target}>/assets/shaders/ui.vert"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ui_fragment_source}"
+            "$<TARGET_FILE_DIR:${target}>/assets/shaders/ui.frag"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${vertex_spirv}"
             "$<TARGET_FILE_DIR:${target}>/assets/shaders/terrain.vert.spv"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${fragment_spirv}"
@@ -74,8 +90,13 @@ function(heartstead_attach_terrain_shader_assets target)
             "$<TARGET_FILE_DIR:${target}>/assets/shaders/debug_line.vert.spv"
     COMMAND ${CMAKE_COMMAND} -E copy_if_different "${debug_fragment_spirv}"
             "$<TARGET_FILE_DIR:${target}>/assets/shaders/debug_line.frag.spv"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ui_vertex_spirv}"
+            "$<TARGET_FILE_DIR:${target}>/assets/shaders/ui.vert.spv"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ui_fragment_spirv}"
+            "$<TARGET_FILE_DIR:${target}>/assets/shaders/ui.frag.spv"
     DEPENDS "${vertex_spirv}" "${fragment_spirv}" "${static_vertex_spirv}"
             "${static_fragment_spirv}" "${debug_vertex_spirv}" "${debug_fragment_spirv}"
+            "${ui_vertex_spirv}" "${ui_fragment_spirv}"
     COMMENT "Staging compiled renderer shader assets for ${target}"
     VERBATIM
   )

@@ -48,6 +48,7 @@ heartstead_add_foundation_test(heartstead_greedy_chunk_mesher_tests
 heartstead_add_foundation_test(heartstead_render_scene_tests render_scene_tests.cpp)
 heartstead_add_foundation_test(heartstead_mesh_manager_tests mesh_manager_tests.cpp)
 heartstead_add_foundation_test(heartstead_debug_renderer_tests debug_renderer_tests.cpp)
+heartstead_add_foundation_test(heartstead_ui_renderer_tests ui_renderer_tests.cpp)
 
 function(heartstead_add_smoke_test test_name target_name)
   if(TARGET ${target_name})

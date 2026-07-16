@@ -111,6 +111,8 @@ int main() {
         renderer::shaders::load_spirv_file(shader_root / "debug_line.vert.spv");
     auto debug_fragment_spirv =
         renderer::shaders::load_spirv_file(shader_root / "debug_line.frag.spv");
+    auto ui_vertex_spirv = renderer::shaders::load_spirv_file(shader_root / "ui.vert.spv");
+    auto ui_fragment_spirv = renderer::shaders::load_spirv_file(shader_root / "ui.frag.spv");
     if (!vertex_spirv) {
         return fail("Vertex shader loading failed visibly: " + vertex_spirv.error().message);
     }
@@ -127,6 +129,11 @@ int main() {
                     (!debug_vertex_spirv ? debug_vertex_spirv.error().message
                                          : debug_fragment_spirv.error().message));
     }
+    if (!ui_vertex_spirv || !ui_fragment_spirv) {
+        return fail("UI shader loading failed visibly: " +
+                    (!ui_vertex_spirv ? ui_vertex_spirv.error().message
+                                      : ui_fragment_spirv.error().message));
+    }
 
     renderer::RendererInitDesc renderer_init;
     renderer_init.device = std::move(device).value();
@@ -136,6 +143,8 @@ int main() {
     renderer_init.static_mesh_fragment_spirv = std::move(static_fragment_spirv).value();
     renderer_init.debug_vertex_spirv = std::move(debug_vertex_spirv).value();
     renderer_init.debug_fragment_spirv = std::move(debug_fragment_spirv).value();
+    renderer_init.ui_vertex_spirv = std::move(ui_vertex_spirv).value();
+    renderer_init.ui_fragment_spirv = std::move(ui_fragment_spirv).value();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 2;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 4 * 1024 * 1024;
     renderer::Renderer retained_renderer;

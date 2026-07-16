@@ -535,6 +535,18 @@ core::Status validate_render_frame_submission_shape(const RenderFrameSubmission&
                     "renderer.invalid_camera_relative_translation",
                     "render draw camera-relative origin must contain finite values");
             }
+            if (draw.scissor_enabled) {
+                const auto right = static_cast<std::uint64_t>(draw.scissor.x) +
+                                   static_cast<std::uint64_t>(draw.scissor.width);
+                const auto bottom = static_cast<std::uint64_t>(draw.scissor.y) +
+                                    static_cast<std::uint64_t>(draw.scissor.height);
+                if (draw.scissor.width == 0 || draw.scissor.height == 0 ||
+                    right > frame.plan.extent.width || bottom > frame.plan.extent.height) {
+                    return core::Status::failure(
+                        "renderer.invalid_draw_scissor",
+                        "enabled draw scissor must be nonempty and contained by the frame extent");
+                }
+            }
         }
     }
     return core::Status::ok();

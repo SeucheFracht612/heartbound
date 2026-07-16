@@ -112,6 +112,13 @@ struct RenderFramePlan {
     [[nodiscard]] ClearColor first_clear_color() const noexcept;
 };
 
+struct RenderScissorRect {
+    std::uint32_t x = 0;
+    std::uint32_t y = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
 struct RenderDrawCommand {
     RenderResourceHandle pipeline;
     RenderResourceHandle vertex_buffer;
@@ -127,6 +134,8 @@ struct RenderDrawCommand {
     RenderIndexType index_type = RenderIndexType::uint32;
     // Renderer-side stable ordering metadata. Backends deliberately ignore this value.
     float sort_depth = 0.0F;
+    bool scissor_enabled = false;
+    RenderScissorRect scissor{};
 };
 
 struct RenderPassCommands {

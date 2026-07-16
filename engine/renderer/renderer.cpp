@@ -120,6 +120,111 @@ make_debug_shader_program(std::span<const std::uint32_t> vertex_spirv,
     return shader_program;
 }
 
+[[nodiscard]] ShaderProgramDesc
+make_ui_shader_program(std::span<const std::uint32_t> vertex_spirv,
+                       std::span<const std::uint32_t> fragment_spirv) {
+    ShaderProgramDesc shader_program;
+    shader_program.id = "ui";
+    shader_program.stages = {
+        {rhi::RenderShaderStage::vertex, "main", {vertex_spirv.begin(), vertex_spirv.end()},
+         "ui.vert.spv"},
+        {rhi::RenderShaderStage::fragment, "main", {fragment_spirv.begin(), fragment_spirv.end()},
+         "ui.frag.spv"},
+    };
+    shader_program.interface.vertex_stride = sizeof(GpuUiVertex);
+    for (const auto& attribute : gpu_ui_vertex_attributes) {
+        shader_program.interface.vertex_inputs.push_back({attribute.location, attribute.format});
+    }
+    shader_program.interface.descriptors = {
+        {"ui_atlas", rhi::RenderDescriptorKind::sampled_texture, 0, true},
+    };
+    shader_program.interface.push_constant_ranges.push_back(
+        {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
+         sizeof(rhi::ChunkPushConstants)});
+    shader_program.dependencies = {"gpu_ui_vertex_v1", "ui_atlas_v1"};
+    return shader_program;
+}
+
+[[nodiscard]] std::array<std::uint8_t, 7> fallback_glyph_rows(unsigned char character) {
+    if (character >= 'a' && character <= 'z') {
+        character = static_cast<unsigned char>(character - 'a' + 'A');
+    }
+    switch (character) {
+    case '0': return {14, 17, 19, 21, 25, 17, 14};
+    case '1': return {4, 12, 4, 4, 4, 4, 14};
+    case '2': return {14, 17, 1, 2, 4, 8, 31};
+    case '3': return {30, 1, 1, 14, 1, 1, 30};
+    case '4': return {2, 6, 10, 18, 31, 2, 2};
+    case '5': return {31, 16, 16, 30, 1, 1, 30};
+    case '6': return {14, 16, 16, 30, 17, 17, 14};
+    case '7': return {31, 1, 2, 4, 8, 8, 8};
+    case '8': return {14, 17, 17, 14, 17, 17, 14};
+    case '9': return {14, 17, 17, 15, 1, 1, 14};
+    case 'A': return {14, 17, 17, 31, 17, 17, 17};
+    case 'B': return {30, 17, 17, 30, 17, 17, 30};
+    case 'C': return {15, 16, 16, 16, 16, 16, 15};
+    case 'D': return {30, 17, 17, 17, 17, 17, 30};
+    case 'E': return {31, 16, 16, 30, 16, 16, 31};
+    case 'F': return {31, 16, 16, 30, 16, 16, 16};
+    case 'G': return {15, 16, 16, 23, 17, 17, 14};
+    case 'H': return {17, 17, 17, 31, 17, 17, 17};
+    case 'I': return {14, 4, 4, 4, 4, 4, 14};
+    case 'J': return {7, 2, 2, 2, 18, 18, 12};
+    case 'K': return {17, 18, 20, 24, 20, 18, 17};
+    case 'L': return {16, 16, 16, 16, 16, 16, 31};
+    case 'M': return {17, 27, 21, 21, 17, 17, 17};
+    case 'N': return {17, 25, 21, 19, 17, 17, 17};
+    case 'O': return {14, 17, 17, 17, 17, 17, 14};
+    case 'P': return {30, 17, 17, 30, 16, 16, 16};
+    case 'Q': return {14, 17, 17, 17, 21, 18, 13};
+    case 'R': return {30, 17, 17, 30, 20, 18, 17};
+    case 'S': return {15, 16, 16, 14, 1, 1, 30};
+    case 'T': return {31, 4, 4, 4, 4, 4, 4};
+    case 'U': return {17, 17, 17, 17, 17, 17, 14};
+    case 'V': return {17, 17, 17, 17, 10, 10, 4};
+    case 'W': return {17, 17, 17, 21, 21, 27, 17};
+    case 'X': return {17, 17, 10, 4, 10, 17, 17};
+    case 'Y': return {17, 17, 10, 4, 4, 4, 4};
+    case 'Z': return {31, 1, 2, 4, 8, 16, 31};
+    case '-': return {0, 0, 0, 31, 0, 0, 0};
+    case '_': return {0, 0, 0, 0, 0, 0, 31};
+    case '.': return {0, 0, 0, 0, 0, 12, 12};
+    case ':': return {0, 12, 12, 0, 12, 12, 0};
+    case '/': return {1, 2, 2, 4, 8, 8, 16};
+    case '?': return {14, 17, 1, 2, 4, 0, 4};
+    default: return {};
+    }
+}
+
+[[nodiscard]] std::vector<std::byte> make_ui_atlas() {
+    constexpr std::size_t width = 128;
+    constexpr std::size_t height = 64;
+    constexpr std::size_t layer_size = width * height * 4U;
+    std::vector<std::byte> pixels(layer_size * 2U, std::byte{0});
+    std::fill_n(pixels.begin(), static_cast<std::ptrdiff_t>(layer_size), std::byte{0xff});
+    for (std::uint32_t character = 0; character < 128U; ++character) {
+        const auto rows = fallback_glyph_rows(static_cast<unsigned char>(character));
+        const auto cell_x = (character % 16U) * 8U;
+        const auto cell_y = (character / 16U) * 8U;
+        for (std::uint32_t row = 0; row < rows.size(); ++row) {
+            for (std::uint32_t column = 0; column < 5U; ++column) {
+                if ((rows[row] & (1U << (4U - column))) == 0U) {
+                    continue;
+                }
+                const auto offset = layer_size +
+                                    (static_cast<std::size_t>(cell_y + row) * width + cell_x +
+                                     column + 1U) *
+                                        4U;
+                pixels[offset] = std::byte{0xff};
+                pixels[offset + 1U] = std::byte{0xff};
+                pixels[offset + 2U] = std::byte{0xff};
+                pixels[offset + 3U] = std::byte{0xff};
+            }
+        }
+    }
+    return pixels;
+}
+
 } // namespace
 
 Renderer::~Renderer() {
@@ -152,6 +257,10 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         return config_status;
     }
     config_status = desc.debug_renderer_config.validate();
+    if (!config_status) {
+        return config_status;
+    }
+    config_status = desc.ui_renderer_config.validate();
     if (!config_status) {
         return config_status;
     }
@@ -193,6 +302,12 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         (void)shutdown();
         return core::Status::failure(error.code, error.message);
     }
+    pipeline_status = create_ui_pipeline(desc.ui_vertex_spirv, desc.ui_fragment_spirv);
+    if (!pipeline_status) {
+        const auto error = pipeline_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
     pipeline_cache_->seal();
 
     mesh_manager_ = std::make_unique<MeshManager>(*device_);
@@ -220,6 +335,13 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
     auto debug_status = debug_renderer_->initialize(desc.debug_renderer_config);
     if (!debug_status) {
         const auto error = debug_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
+    ui_renderer_ = std::make_unique<UiRenderer>(*device_, ui_pipeline_);
+    auto ui_status = ui_renderer_->initialize(device_->current_extent(), desc.ui_renderer_config);
+    if (!ui_status) {
+        const auto error = ui_status.error();
         (void)shutdown();
         return core::Status::failure(error.code, error.message);
     }
@@ -255,9 +377,14 @@ core::Status Renderer::shutdown() {
     draw_command_scratch_ = {};
     scene_draw_scratch_ = {};
     debug_frame_scratch_ = {};
+    ui_frame_scratch_ = {};
     debug_text_labels_.clear();
     scene_.clear();
     frame_builder_.reset();
+    if (ui_renderer_ != nullptr) {
+        remember_failure(ui_renderer_->shutdown());
+        ui_renderer_.reset();
+    }
     if (debug_renderer_ != nullptr) {
         remember_failure(debug_renderer_->shutdown());
         debug_renderer_.reset();
@@ -304,10 +431,14 @@ core::Status Renderer::shutdown() {
     scene_pipeline_keys_ = {};
     debug_pipelines_ = {};
     debug_pipeline_keys_ = {};
+    ui_pipeline_ = {};
+    ui_pipeline_key_ = {};
     terrain_shader_program_ = {};
     scene_shader_program_ = {};
     debug_shader_program_ = {};
+    ui_shader_program_ = {};
     terrain_texture_array_ = {};
+    ui_texture_atlas_ = {};
     terrain_sampler_ = {};
     environment_ = {};
     device_.reset();
@@ -362,7 +493,7 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera,
                                                     float simulation_alpha,
                                                     float delta_seconds) {
     if (device_ == nullptr || chunk_system_ == nullptr || scene_render_system_ == nullptr ||
-        debug_renderer_ == nullptr || frame_builder_ == nullptr) {
+        debug_renderer_ == nullptr || ui_renderer_ == nullptr || frame_builder_ == nullptr) {
         return core::Result<rhi::RenderFrameStats>::failure(
             "renderer.not_initialized", "renderer must be initialized before rendering");
     }
@@ -385,6 +516,8 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera,
         std::move(draw_command_scratch_.alpha_tested_terrain_draws);
     command_lists.transparent_terrain_draws =
         std::move(draw_command_scratch_.transparent_terrain_draws);
+    debug_frame_scratch_.draws = std::move(draw_command_scratch_.debug_draws);
+    ui_frame_scratch_.draws = std::move(draw_command_scratch_.ui_draws);
     command_lists.opaque_terrain_draws.clear();
     command_lists.alpha_tested_terrain_draws.clear();
     command_lists.transparent_terrain_draws.clear();
@@ -419,6 +552,13 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera,
     }
     command_lists.debug_draws = std::move(debug_frame.value().draws);
     debug_text_labels_ = std::move(debug_frame.value().text_labels);
+    auto ui_frame = ui_renderer_->build_frame(std::move(ui_frame_scratch_));
+    if (!ui_frame) {
+        frame_timing_active_ = false;
+        return core::Result<rhi::RenderFrameStats>::failure(ui_frame.error().code,
+                                                            ui_frame.error().message);
+    }
+    command_lists.ui_draws = std::move(ui_frame.value().draws);
     auto frame = [&]() {
         profiling::ScopedCpuTimingZone command_zone(cpu_timings_,
                                                     profiling::CpuTimingZone::command_build);
@@ -470,7 +610,7 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera,
 }
 
 core::Status Renderer::resize(rhi::RenderExtent extent) {
-    if (device_ == nullptr || frame_builder_ == nullptr) {
+    if (device_ == nullptr || frame_builder_ == nullptr || ui_renderer_ == nullptr) {
         return core::Status::failure("renderer.not_initialized",
                                      "renderer must be initialized before resizing");
     }
@@ -478,7 +618,11 @@ core::Status Renderer::resize(rhi::RenderExtent extent) {
     if (!status) {
         return status;
     }
-    return frame_builder_->resize(extent);
+    status = frame_builder_->resize(extent);
+    if (!status) {
+        return status;
+    }
+    return ui_renderer_->resize(extent);
 }
 
 core::Status Renderer::reload_terrain_shaders(std::span<const std::uint32_t> vertex_spirv,
@@ -566,6 +710,30 @@ core::Status Renderer::reload_debug_shaders(std::span<const std::uint32_t> verte
     return debug_renderer_->set_pipelines(debug_pipelines_);
 }
 
+core::Status Renderer::reload_ui_shaders(std::span<const std::uint32_t> vertex_spirv,
+                                         std::span<const std::uint32_t> fragment_spirv) {
+    if (!is_initialized() || shader_manager_ == nullptr || pipeline_cache_ == nullptr ||
+        ui_renderer_ == nullptr) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized before shader reload");
+    }
+    auto status = shader_manager_->reload_program(
+        ui_shader_program_, make_ui_shader_program(vertex_spirv, fragment_spirv));
+    if (!status) {
+        return status;
+    }
+    status = pipeline_cache_->rebuild_program(ui_shader_program_);
+    if (!status) {
+        return status;
+    }
+    auto pipeline = pipeline_cache_->find(ui_pipeline_key_);
+    if (!pipeline) {
+        return core::Status::failure(pipeline.error().code, pipeline.error().message);
+    }
+    ui_pipeline_ = pipeline.value();
+    return ui_renderer_->set_pipeline(ui_pipeline_);
+}
+
 core::Status Renderer::set_environment(rhi::RenderEnvironmentData environment) {
     if (!is_initialized()) {
         return core::Status::failure("renderer.not_initialized",
@@ -632,8 +800,9 @@ bool Renderer::is_initialized() const noexcept {
            frame_builder_ != nullptr && shader_manager_ != nullptr && texture_manager_ != nullptr &&
            material_cache_ != nullptr && pipeline_cache_ != nullptr && mesh_manager_ != nullptr &&
            scene_render_system_ != nullptr && debug_renderer_ != nullptr &&
+           ui_renderer_ != nullptr &&
            terrain_pipelines_.is_valid() &&
-           scene_pipelines_.is_valid() && debug_pipelines_.is_valid();
+           scene_pipelines_.is_valid() && debug_pipelines_.is_valid() && ui_pipeline_.is_valid();
 }
 
 const ChunkRenderStats& Renderer::chunk_stats() const noexcept {
@@ -663,6 +832,14 @@ const DebugRenderer* Renderer::debug_renderer() const noexcept {
 
 std::span<const DebugTextLabelFrame> Renderer::debug_text_labels() const noexcept {
     return debug_text_labels_;
+}
+
+UiRenderer* Renderer::ui_renderer() noexcept {
+    return ui_renderer_.get();
+}
+
+const UiRenderer* Renderer::ui_renderer() const noexcept {
+    return ui_renderer_.get();
 }
 
 rhi::IRenderDevice* Renderer::device() noexcept {
@@ -733,6 +910,15 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
         stats_.debug_labels = debug.active_text_labels;
         stats_.debug_overflow = debug.overflowed_lines + debug.overflowed_text_labels;
         stats_.debug_uploaded_bytes = debug.uploaded_bytes;
+    }
+    if (ui_renderer_ != nullptr) {
+        const auto& ui = ui_renderer_->stats();
+        stats_.ui_draw_calls = ui.draw_calls;
+        stats_.ui_clipped_draw_calls = ui.clipped_draw_calls;
+        stats_.ui_vertices = ui.submitted_vertices;
+        stats_.ui_glyphs = ui.submitted_glyphs;
+        stats_.ui_uploaded_bytes = ui.uploaded_bytes;
+        stats_.ui_overflow = ui.overflowed_batches;
     }
     stats_.vertices = chunks.visible_vertex_count;
     stats_.triangles = chunks.visible_index_count / 3;
@@ -1168,6 +1354,98 @@ core::Status Renderer::create_debug_pipelines(std::span<const std::uint32_t> ver
         return core::Status::failure(overlay.error().code, overlay.error().message);
     }
     debug_pipelines_ = {depth.value(), overlay.value()};
+    return core::Status::ok();
+}
+
+core::Status Renderer::create_ui_pipeline(std::span<const std::uint32_t> vertex_spirv,
+                                          std::span<const std::uint32_t> fragment_spirv) {
+    if (shader_manager_ == nullptr || pipeline_cache_ == nullptr || texture_manager_ == nullptr ||
+        !terrain_sampler_.is_valid()) {
+        return core::Status::failure("renderer.runtime_assets_uninitialized",
+                                     "UI runtime asset managers must be initialized first");
+    }
+    const auto material = core::PrototypeId::parse("base:materials/ui");
+    if (!material) {
+        return core::Status::failure("renderer.invalid_ui_material",
+                                     "internal UI material id is invalid");
+    }
+    TextureUploadDesc atlas_desc;
+    atlas_desc.id = "builtin:ui_atlas";
+    atlas_desc.width = 128;
+    atlas_desc.height = 64;
+    atlas_desc.array_layers = 2;
+    atlas_desc.color_space = TextureColorSpace::srgb;
+    atlas_desc.generate_mipmaps = true;
+    atlas_desc.rgba8 = make_ui_atlas();
+    auto atlas = texture_manager_->create_texture(std::move(atlas_desc));
+    if (!atlas) {
+        return core::Status::failure(atlas.error().code, atlas.error().message);
+    }
+    ui_texture_atlas_ = atlas.value();
+    const auto* atlas_view = texture_manager_->find(ui_texture_atlas_);
+    if (atlas_view == nullptr) {
+        return core::Status::failure("renderer.ui_atlas_missing",
+                                     "UI atlas disappeared after creation");
+    }
+    auto shader = shader_manager_->create_program(make_ui_shader_program(vertex_spirv,
+                                                                          fragment_spirv));
+    if (!shader) {
+        return core::Status::failure(shader.error().code, shader.error().message);
+    }
+    ui_shader_program_ = shader.value();
+
+    rhi::RenderPipelineLayoutDesc layout;
+    layout.material_id = material.value();
+    layout.shader_template = {"base", "shaders/ui.vert"};
+    layout.descriptors = {
+        {"ui_atlas", rhi::RenderDescriptorKind::sampled_texture, 0, true},
+    };
+    layout.push_constant_ranges.push_back(
+        {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
+         sizeof(rhi::ChunkPushConstants)});
+    layout.debug_name = "ui_layout";
+
+    rhi::RenderGraphicsPipelineDesc pipeline;
+    pipeline.material_id = material.value();
+    pipeline.debug_name = "ui_pipeline";
+    pipeline.vertex_stride = sizeof(GpuUiVertex);
+    pipeline.vertex_attributes.assign(gpu_ui_vertex_attributes.begin(),
+                                      gpu_ui_vertex_attributes.end());
+    pipeline.topology = rhi::RenderPrimitiveTopology::triangle_list;
+    pipeline.polygon_mode = rhi::RenderPolygonMode::fill;
+    pipeline.cull_mode = rhi::RenderCullMode::none;
+    pipeline.front_face = rhi::RenderFrontFace::counter_clockwise;
+    // Keep a compatible physical render pass while always accepting UI fragments.
+    pipeline.depth_test_enable = true;
+    pipeline.depth_write_enable = false;
+    pipeline.depth_compare = rhi::RenderCompareOperation::always;
+    pipeline.blend_mode = rhi::RenderBlendMode::alpha;
+    pipeline.color_target_format = rhi::RenderImageFormat::rgba8_unorm;
+    pipeline.depth_target_format = rhi::RenderImageFormat::d32_sfloat;
+    ui_pipeline_key_.shader_program = ui_shader_program_;
+    ui_pipeline_key_.vertex_layout =
+        hash_vertex_layout(pipeline.vertex_stride, pipeline.vertex_attributes);
+    ui_pipeline_key_.render_phase = RenderPhase::ui;
+    ui_pipeline_key_.color_format = pipeline.color_target_format;
+    ui_pipeline_key_.depth_format = pipeline.depth_target_format;
+    ui_pipeline_key_.cull_mode = pipeline.cull_mode;
+    ui_pipeline_key_.front_face = pipeline.front_face;
+    ui_pipeline_key_.depth_test = pipeline.depth_test_enable;
+    ui_pipeline_key_.depth_write = pipeline.depth_write_enable;
+    ui_pipeline_key_.depth_compare = pipeline.depth_compare;
+    ui_pipeline_key_.blend_mode = pipeline.blend_mode;
+    auto created = pipeline_cache_->prewarm(ui_pipeline_key_, layout, std::move(pipeline));
+    if (!created) {
+        return core::Status::failure(created.error().code, created.error().message);
+    }
+    ui_pipeline_ = created.value();
+    const rhi::RenderDescriptorWrite atlas_write{
+        material.value(), "ui_atlas", atlas_view->image, 0, 0, terrain_sampler_};
+    auto binding =
+        device_->write_descriptors(std::span<const rhi::RenderDescriptorWrite>{&atlas_write, 1});
+    if (!binding) {
+        return core::Status::failure(binding.error().code, binding.error().message);
+    }
     return core::Status::ok();
 }
 

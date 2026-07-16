@@ -70,7 +70,7 @@ core::Result<rhi::RenderFramePlan> FrameBuilder::build_plan() const {
         return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
     }
     status = builder.add_pass(
-        {"ui", RenderPassKind::ui, {"output"}, {"output"}, {}, false});
+        {"ui", RenderPassKind::ui, {"output", "depth"}, {"output", "depth"}, {}, false});
     if (!status) {
         return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
     }

@@ -104,6 +104,26 @@ struct Options {
     return core::Status::ok();
 }
 
+[[nodiscard]] core::Status submit_benchmark_ui(renderer::Renderer& active_renderer) {
+    auto* ui = active_renderer.ui_renderer();
+    if (ui == nullptr) {
+        return core::Status::failure("renderer.benchmark_missing_ui_renderer",
+                                     "forest benchmark requires the UI renderer");
+    }
+    renderer::UiQuadDesc benchmark_badge;
+    benchmark_badge.minimum_pixels = {18.0F, 18.0F};
+    benchmark_badge.maximum_pixels = {286.0F, 58.0F};
+    benchmark_badge.color = {0.12F, 0.32F, 0.62F, 0.82F};
+    benchmark_badge.scissor_enabled = true;
+    benchmark_badge.scissor = {12, 12, 300, 54};
+    auto ui_status = ui->submit_quad(benchmark_badge);
+    if (!ui_status) {
+        return ui_status;
+    }
+    return ui->submit_text({{26.0F, 31.0F}, "HEARTSTEAD RENDERER", 8.0F,
+                            {1.0F, 1.0F, 1.0F, 1.0F}, true, {12, 12, 300, 54}});
+}
+
 void print_usage() {
     std::cout << "Usage: heartstead_render_benchmark [options]\n"
                  "  --scene NAME       flat, mountains, caves, checkerboard, forest, rapid-edits,\n"
@@ -356,6 +376,8 @@ int main(int argc, char** argv) {
     std::vector<std::uint32_t> static_fragment_spirv;
     std::vector<std::uint32_t> debug_vertex_spirv;
     std::vector<std::uint32_t> debug_fragment_spirv;
+    std::vector<std::uint32_t> ui_vertex_spirv;
+    std::vector<std::uint32_t> ui_fragment_spirv;
     if (options.backend == renderer::rhi::RenderBackend::vulkan) {
         const auto shader_root =
             std::filesystem::path{HEARTSTEAD_RENDER_BENCHMARK_ASSET_DIR} / "shaders";
@@ -369,14 +391,18 @@ int main(int argc, char** argv) {
             renderer::shaders::load_spirv_file(shader_root / "debug_line.vert.spv");
         auto debug_fragment =
             renderer::shaders::load_spirv_file(shader_root / "debug_line.frag.spv");
+        auto ui_vertex = renderer::shaders::load_spirv_file(shader_root / "ui.vert.spv");
+        auto ui_fragment = renderer::shaders::load_spirv_file(shader_root / "ui.frag.spv");
         if (!vertex || !fragment || !static_vertex || !static_fragment || !debug_vertex ||
-            !debug_fragment) {
+            !debug_fragment || !ui_vertex || !ui_fragment) {
             const auto& error = !vertex          ? vertex.error()
                                 : !fragment      ? fragment.error()
                                 : !static_vertex ? static_vertex.error()
                                 : !static_fragment ? static_fragment.error()
-                                : !debug_vertex    ? debug_vertex.error()
-                                                   : debug_fragment.error();
+                                : !debug_vertex   ? debug_vertex.error()
+                                : !debug_fragment ? debug_fragment.error()
+                                : !ui_vertex      ? ui_vertex.error()
+                                                  : ui_fragment.error();
             return fail(error.message);
         }
         vertex_spirv = std::move(vertex).value();
@@ -385,6 +411,8 @@ int main(int argc, char** argv) {
         static_fragment_spirv = std::move(static_fragment).value();
         debug_vertex_spirv = std::move(debug_vertex).value();
         debug_fragment_spirv = std::move(debug_fragment).value();
+        ui_vertex_spirv = std::move(ui_vertex).value();
+        ui_fragment_spirv = std::move(ui_fragment).value();
     } else {
         vertex_spirv = {0x07230203, 0x00010000, 0, 1, 0};
         fragment_spirv = vertex_spirv;
@@ -392,6 +420,8 @@ int main(int argc, char** argv) {
         static_fragment_spirv = vertex_spirv;
         debug_vertex_spirv = vertex_spirv;
         debug_fragment_spirv = vertex_spirv;
+        ui_vertex_spirv = vertex_spirv;
+        ui_fragment_spirv = vertex_spirv;
     }
 
     renderer::RendererInitDesc renderer_init;
@@ -402,6 +432,8 @@ int main(int argc, char** argv) {
     renderer_init.static_mesh_fragment_spirv = std::move(static_fragment_spirv);
     renderer_init.debug_vertex_spirv = std::move(debug_vertex_spirv);
     renderer_init.debug_fragment_spirv = std::move(debug_fragment_spirv);
+    renderer_init.ui_vertex_spirv = std::move(ui_vertex_spirv);
+    renderer_init.ui_fragment_spirv = std::move(ui_fragment_spirv);
     renderer_init.voxel_palette = &scene.value()->palette();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 64;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 512U * 1024U * 1024U;
@@ -432,6 +464,12 @@ int main(int argc, char** argv) {
             active_renderer.synchronize_chunks(scene.value()->world(), scene.value()->camera());
         if (!status) {
             return fail(status.error().message);
+        }
+        if (options.scene == renderer::benchmark::BenchmarkSceneKind::forest_cross_planes) {
+            status = submit_benchmark_ui(active_renderer);
+            if (!status) {
+                return fail(status.error().message);
+            }
         }
         auto frame = active_renderer.render(scene.value()->camera());
         if (!frame) {
@@ -504,6 +542,12 @@ int main(int argc, char** argv) {
                 active_renderer.synchronize_chunks(scene.value()->world(), scene.value()->camera());
             if (!status) {
                 return fail(status.error().message);
+            }
+            if (options.scene == renderer::benchmark::BenchmarkSceneKind::forest_cross_planes) {
+                status = submit_benchmark_ui(active_renderer);
+                if (!status) {
+                    return fail(status.error().message);
+                }
             }
             auto frame = active_renderer.render(scene.value()->camera());
             if (!frame) {
