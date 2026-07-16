@@ -629,18 +629,22 @@ void test_renderer_frontend_submits_headless_frames() {
     init.device = std::move(device).value();
     init.terrain_vertex_spirv = test_spirv;
     init.terrain_fragment_spirv = test_spirv;
+    init.static_mesh_vertex_spirv = test_spirv;
+    init.static_mesh_fragment_spirv = test_spirv;
     init.development_shader_hot_reload = true;
     init.chunk_config.max_chunks_meshed_per_frame = 2;
     init.chunk_config.max_bytes_uploaded_per_frame = 1024 * 1024;
+    init.scene_render_config.maximum_instances_per_frame = 2;
 
     renderer::Renderer retained_renderer;
     assert(retained_renderer.initialize(std::move(init)));
     assert(retained_renderer.is_initialized());
     assert(retained_renderer.device() != nullptr);
     const auto initialized_resource_count = retained_renderer.device()->live_resource_count();
-    // Two shader modules, four phase pipelines, four fallback textures, one terrain texture array,
-    // one shared sampler, and one GPU material-table buffer.
-    assert(initialized_resource_count == 13);
+    // Four shader modules, seven prewarmed pipelines, four fallback textures, one terrain texture
+    // array, one shared sampler, one material-table buffer, two static-mesh arenas, and one
+    // buffered instance-storage buffer.
+    assert(initialized_resource_count == 21);
 
     renderer::rhi::RenderEnvironmentData invalid_environment;
     invalid_environment.fog_end = invalid_environment.fog_start;
@@ -656,6 +660,10 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(!retained_renderer.reload_terrain_shaders(invalid_spirv, test_spirv));
     assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
     assert(retained_renderer.reload_terrain_shaders(test_spirv, test_spirv));
+    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
+    assert(!retained_renderer.reload_static_mesh_shaders(invalid_spirv, test_spirv));
+    assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
+    assert(retained_renderer.reload_static_mesh_shaders(test_spirv, test_spirv));
     assert(retained_renderer.device()->live_resource_count() == initialized_resource_count);
 
     world::WorldState world;
@@ -715,13 +723,68 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(renderer_stats.pipeline_switches == 1);
     assert(renderer_stats.resident_textures == 5);
     assert(renderer_stats.runtime_materials == 255);
-    assert(renderer_stats.resident_pipelines == 4);
+    assert(renderer_stats.resident_pipelines == 7);
     assert(renderer_stats.resident_texture_bytes > 0);
     assert(renderer_stats.vertices > 0);
     assert(renderer_stats.triangles > 0);
     assert(renderer_stats.resident_mesh_bytes > 0);
     assert(renderer_stats.uploaded_bytes_this_frame > 0);
     assert(!renderer::format_renderer_stats(renderer_stats).empty());
+
+    constexpr std::array<renderer::GpuStaticMeshVertex, 3> object_vertices{{
+        {{-0.5F, -0.5F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F}},
+        {{0.5F, -0.5F, 0.0F}, {0.0F, 0.0F, 1.0F}, {1.0F, 0.0F}},
+        {{0.0F, 0.5F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.5F, 1.0F}},
+    }};
+    constexpr std::array<std::uint32_t, 3> object_indices{0, 1, 2};
+    auto object_mesh = retained_renderer.create_static_mesh(
+        {"frontend_triangle", object_vertices, object_indices,
+         {{-0.5F, -0.5F, 0.0F}, {0.5F, 0.5F, 0.0F}}});
+    assert(object_mesh);
+    auto object_anchor = world::WorldPosition::from_anchor(camera.floating_origin.block, {});
+    assert(object_anchor);
+    renderer::RenderObjectProxy object;
+    object.anchor = object_anchor.value();
+    object.previous_transform.position = {0.0F, 0.0F, -5.0F};
+    object.current_transform = object.previous_transform;
+    object.mesh = object_mesh.value();
+    object.material = {1, 1};
+    object.local_bounds = {{-0.5F, -0.5F, 0.0F}, {0.5F, 0.5F, 0.0F}};
+    auto object_id = retained_renderer.create_object(object);
+    assert(object_id);
+    object.previous_transform.position.x = 1.25F;
+    object.current_transform = object.previous_transform;
+    auto second_object_id = retained_renderer.create_object(object);
+    assert(second_object_id);
+    object.previous_transform.position.x = -1.25F;
+    object.current_transform = object.previous_transform;
+    auto third_object_id = retained_renderer.create_object(object);
+    assert(third_object_id);
+    auto instanced_frame = retained_renderer.render(camera, 0.5F);
+    assert(instanced_frame);
+    assert(instanced_frame.value().draw_count == 2);
+    assert(instanced_frame.value().indexed_draw_count == 2);
+    assert(instanced_frame.value().pipeline_bind_count == 2);
+    assert(retained_renderer.scene_stats().scene.visible_objects == 3);
+    assert(retained_renderer.scene_stats().submitted_instances == 2);
+    assert(retained_renderer.scene_stats().draw_calls == 1);
+    assert(retained_renderer.scene_stats().dropped_instances == 1);
+    assert(retained_renderer.scene_stats().uploaded_instance_bytes ==
+           sizeof(renderer::GpuObjectInstance) * 2);
+
+    renderer::RenderSceneUpdate remove_object;
+    remove_object.kind = renderer::RenderSceneUpdateKind::remove_object;
+    remove_object.object_id = object_id.value();
+    auto remove_second_object = remove_object;
+    remove_second_object.object_id = second_object_id.value();
+    auto remove_third_object = remove_object;
+    remove_third_object.object_id = third_object_id.value();
+    const std::array removals{remove_object, remove_second_object, remove_third_object};
+    assert(retained_renderer.apply_scene_updates(removals));
+    assert(retained_renderer.release_static_mesh(object_mesh.value()));
+    auto terrain_only_frame = retained_renderer.render(camera);
+    assert(terrain_only_frame);
+    assert(terrain_only_frame.value().draw_count == 1);
 
     const auto uploaded_before_resize = retained_renderer.chunk_stats().cache.uploaded_chunk_count;
     assert(retained_renderer.resize({800, 400}));

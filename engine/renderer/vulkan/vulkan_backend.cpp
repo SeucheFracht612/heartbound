@@ -2762,7 +2762,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
             materials.insert(draw.material_id.value());
             stats.total_vertices += draw.vertex_count;
-            stats.total_indices += draw.index_count;
+            stats.total_indices +=
+                static_cast<std::size_t>(draw.index_count) * draw.instance_count;
         }
 
         status = submit_offscreen_mesh_draws(draws);
@@ -5066,7 +5067,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 stats.transparent_terrain_draw_count += commands.draws.size();
             }
             for (const auto& draw : commands.draws) {
-                stats.total_indices += draw.index_count;
+                stats.total_indices +=
+                    static_cast<std::size_t>(draw.index_count) * draw.instance_count;
             }
         }
         return core::Result<rhi::RenderFrameStats>::success(stats);

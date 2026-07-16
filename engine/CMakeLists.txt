@@ -64,6 +64,7 @@ target_sources(
     renderer/benchmark/benchmark_scene.cpp
     renderer/benchmark/benchmark_statistics.cpp
     renderer/assets/sampler_cache.cpp
+    renderer/assets/mesh_manager.cpp
     renderer/assets/shader_manager.cpp
     renderer/assets/texture_manager.cpp
     renderer/materials/material_asset_validation.cpp
@@ -84,6 +85,7 @@ target_sources(
     renderer/renderer_stats.cpp
     renderer/render_camera.cpp
     renderer/scene/render_scene.cpp
+    renderer/scene/scene_render_system.cpp
     renderer/rhi/render_device.cpp
     renderer/rhi/render_frame_plan.cpp
     renderer/shaders/shader_compiler.cpp
@@ -212,6 +214,7 @@ target_sources(
       renderer/benchmark/benchmark_scene.hpp
       renderer/benchmark/benchmark_statistics.hpp
       renderer/assets/render_asset_handles.hpp
+      renderer/assets/mesh_manager.hpp
       renderer/assets/sampler_cache.hpp
       renderer/assets/shader_manager.hpp
       renderer/assets/texture_manager.hpp
@@ -235,6 +238,7 @@ target_sources(
       renderer/renderer_stats.hpp
       renderer/render_camera.hpp
       renderer/scene/render_scene.hpp
+      renderer/scene/scene_render_system.hpp
       renderer/rhi/render_device.hpp
       renderer/rhi/render_frame_plan.hpp
       renderer/shaders/shader_compiler.hpp

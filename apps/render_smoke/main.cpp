@@ -103,17 +103,28 @@ int main() {
         std::filesystem::path{HEARTSTEAD_RENDER_SMOKE_ASSET_DIR} / "shaders";
     auto vertex_spirv = renderer::shaders::load_spirv_file(shader_root / "terrain.vert.spv");
     auto fragment_spirv = renderer::shaders::load_spirv_file(shader_root / "terrain.frag.spv");
+    auto static_vertex_spirv =
+        renderer::shaders::load_spirv_file(shader_root / "static_mesh.vert.spv");
+    auto static_fragment_spirv =
+        renderer::shaders::load_spirv_file(shader_root / "static_mesh.frag.spv");
     if (!vertex_spirv) {
         return fail("Vertex shader loading failed visibly: " + vertex_spirv.error().message);
     }
     if (!fragment_spirv) {
         return fail("Fragment shader loading failed visibly: " + fragment_spirv.error().message);
     }
+    if (!static_vertex_spirv || !static_fragment_spirv) {
+        return fail("Static-mesh shader loading failed visibly: " +
+                    (!static_vertex_spirv ? static_vertex_spirv.error().message
+                                          : static_fragment_spirv.error().message));
+    }
 
     renderer::RendererInitDesc renderer_init;
     renderer_init.device = std::move(device).value();
     renderer_init.terrain_vertex_spirv = std::move(vertex_spirv).value();
     renderer_init.terrain_fragment_spirv = std::move(fragment_spirv).value();
+    renderer_init.static_mesh_vertex_spirv = std::move(static_vertex_spirv).value();
+    renderer_init.static_mesh_fragment_spirv = std::move(static_fragment_spirv).value();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 2;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 4 * 1024 * 1024;
     renderer::Renderer retained_renderer;

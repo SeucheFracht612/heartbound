@@ -1,0 +1,87 @@
+#pragma once
+
+#include "engine/core/result.hpp"
+#include "engine/renderer/assets/mesh_manager.hpp"
+#include "engine/renderer/rhi/render_frame_plan.hpp"
+#include "engine/renderer/scene/render_scene.hpp"
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
+namespace heartstead::renderer {
+
+struct alignas(16) GpuObjectInstance {
+    math::Mat4f camera_relative_transform = math::Mat4f::identity();
+    float color[4]{1.0F, 1.0F, 1.0F, 1.0F};
+    std::uint32_t metadata[4]{};
+};
+
+static_assert(sizeof(GpuObjectInstance) == 96);
+static_assert(offsetof(GpuObjectInstance, camera_relative_transform) == 0);
+static_assert(offsetof(GpuObjectInstance, color) == 64);
+static_assert(offsetof(GpuObjectInstance, metadata) == 80);
+
+struct ScenePipelineSet {
+    rhi::RenderResourceHandle opaque;
+    rhi::RenderResourceHandle alpha_tested;
+    rhi::RenderResourceHandle transparent;
+
+    [[nodiscard]] bool is_valid() const noexcept;
+    [[nodiscard]] rhi::RenderResourceHandle for_layer(RenderLayer layer) const noexcept;
+};
+
+struct SceneRenderConfig {
+    std::uint32_t maximum_instances_per_frame = 65'536;
+    std::uint32_t buffered_frames = 3;
+
+    [[nodiscard]] core::Status validate() const;
+};
+
+struct SceneRenderStats {
+    RenderSceneStats scene;
+    std::uint32_t submitted_instances = 0;
+    std::uint32_t draw_calls = 0;
+    std::uint32_t dropped_instances = 0;
+    std::uint64_t uploaded_instance_bytes = 0;
+    std::uint64_t instance_buffer_bytes = 0;
+};
+
+struct SceneDrawCommands {
+    std::vector<rhi::RenderDrawCommand> opaque_and_cutout;
+    std::vector<rhi::RenderDrawCommand> transparent;
+    SceneRenderStats stats;
+};
+
+class SceneRenderSystem {
+  public:
+    SceneRenderSystem(rhi::IRenderDevice& device, MeshManager& meshes,
+                      ScenePipelineSet pipelines, core::PrototypeId pipeline_material);
+    ~SceneRenderSystem();
+
+    SceneRenderSystem(const SceneRenderSystem&) = delete;
+    SceneRenderSystem& operator=(const SceneRenderSystem&) = delete;
+
+    [[nodiscard]] core::Status initialize(SceneRenderConfig config = {});
+    [[nodiscard]] core::Result<SceneDrawCommands> build_draw_commands(
+        const RenderScene& scene, const RenderCamera& camera, float simulation_alpha,
+        SceneDrawCommands scratch = {});
+    [[nodiscard]] core::Status set_pipelines(ScenePipelineSet pipelines) noexcept;
+    [[nodiscard]] core::Status shutdown();
+    [[nodiscard]] const SceneRenderStats& stats() const noexcept;
+    [[nodiscard]] rhi::RenderResourceHandle instance_buffer() const noexcept;
+
+  private:
+    rhi::IRenderDevice* device_ = nullptr;
+    MeshManager* meshes_ = nullptr;
+    ScenePipelineSet pipelines_{};
+    core::PrototypeId pipeline_material_;
+    SceneRenderConfig config_{};
+    rhi::RenderResourceHandle instance_buffer_;
+    std::vector<GpuObjectInstance> instance_scratch_;
+    std::uint64_t frame_number_ = 0;
+    SceneRenderStats stats_{};
+};
+
+} // namespace heartstead::renderer

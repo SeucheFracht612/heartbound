@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <iterator>
 #include <limits>
 #include <utility>
 
@@ -71,6 +72,32 @@ make_terrain_shader_program(std::span<const std::uint32_t> vertex_spirv,
     return shader_program;
 }
 
+[[nodiscard]] ShaderProgramDesc
+make_static_mesh_shader_program(std::span<const std::uint32_t> vertex_spirv,
+                                std::span<const std::uint32_t> fragment_spirv) {
+    ShaderProgramDesc shader_program;
+    shader_program.id = "static_mesh";
+    shader_program.stages = {
+        {rhi::RenderShaderStage::vertex, "main", {vertex_spirv.begin(), vertex_spirv.end()},
+         "static_mesh.vert.spv"},
+        {rhi::RenderShaderStage::fragment, "main", {fragment_spirv.begin(), fragment_spirv.end()},
+         "static_mesh.frag.spv"},
+    };
+    shader_program.interface.vertex_stride = sizeof(GpuStaticMeshVertex);
+    for (const auto& attribute : gpu_static_mesh_vertex_attributes) {
+        shader_program.interface.vertex_inputs.push_back({attribute.location, attribute.format});
+    }
+    shader_program.interface.descriptors = {
+        {"object_instances", rhi::RenderDescriptorKind::storage_buffer, 0, true},
+    };
+    shader_program.interface.push_constant_ranges.push_back(
+        {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
+         sizeof(rhi::ChunkPushConstants)});
+    shader_program.dependencies = {"gpu_static_mesh_vertex_v1", "gpu_object_instance_v1",
+                                   "chunk_push_constants_v2"};
+    return shader_program;
+}
+
 } // namespace
 
 Renderer::~Renderer() {
@@ -91,6 +118,14 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         return config_status;
     }
     config_status = desc.chunk_gpu_cache_config.validate();
+    if (!config_status) {
+        return config_status;
+    }
+    config_status = desc.mesh_manager_config.validate();
+    if (!config_status) {
+        return config_status;
+    }
+    config_status = desc.scene_render_config.validate();
     if (!config_status) {
         return config_status;
     }
@@ -118,6 +153,36 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         (void)shutdown();
         return core::Status::failure(error.code, error.message);
     }
+    pipeline_status = create_scene_pipelines(desc.static_mesh_vertex_spirv,
+                                             desc.static_mesh_fragment_spirv);
+    if (!pipeline_status) {
+        const auto error = pipeline_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
+    pipeline_cache_->seal();
+
+    mesh_manager_ = std::make_unique<MeshManager>(*device_);
+    auto mesh_status = mesh_manager_->initialize(desc.mesh_manager_config);
+    if (!mesh_status) {
+        const auto error = mesh_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
+    const auto scene_material = core::PrototypeId::parse("base:materials/static_instances");
+    if (!scene_material) {
+        (void)shutdown();
+        return core::Status::failure("renderer.invalid_scene_material",
+                                     "internal static-instance material id is invalid");
+    }
+    scene_render_system_ = std::make_unique<SceneRenderSystem>(
+        *device_, *mesh_manager_, scene_pipelines_, scene_material.value());
+    auto scene_status = scene_render_system_->initialize(desc.scene_render_config);
+    if (!scene_status) {
+        const auto error = scene_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
 
     chunk_cache_ = std::make_unique<ChunkGpuCache>(*device_);
     auto cache_status = chunk_cache_->initialize(desc.chunk_gpu_cache_config);
@@ -141,9 +206,20 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
 
 core::Status Renderer::shutdown() {
     core::Status first_failure = core::Status::ok();
+    const auto remember_failure = [&first_failure](core::Status status) {
+        if (!status && first_failure) {
+            first_failure = status;
+        }
+    };
     chunk_draw_scratch_.clear();
     draw_command_scratch_ = {};
+    scene_draw_scratch_ = {};
+    scene_.clear();
     frame_builder_.reset();
+    if (scene_render_system_ != nullptr) {
+        remember_failure(scene_render_system_->shutdown());
+        scene_render_system_.reset();
+    }
     chunk_system_.reset();
     if (chunk_cache_ != nullptr) {
         auto status = chunk_cache_->clear();
@@ -152,12 +228,10 @@ core::Status Renderer::shutdown() {
         }
         chunk_cache_.reset();
     }
-
-    const auto remember_failure = [&first_failure](core::Status status) {
-        if (!status && first_failure) {
-            first_failure = status;
-        }
-    };
+    if (mesh_manager_ != nullptr) {
+        remember_failure(mesh_manager_->shutdown());
+        mesh_manager_.reset();
+    }
     if (pipeline_cache_ != nullptr) {
         remember_failure(pipeline_cache_->shutdown());
         pipeline_cache_.reset();
@@ -180,7 +254,10 @@ core::Status Renderer::shutdown() {
     }
     terrain_pipelines_ = {};
     terrain_pipeline_keys_ = {};
+    scene_pipelines_ = {};
+    scene_pipeline_keys_ = {};
     terrain_shader_program_ = {};
+    scene_shader_program_ = {};
     terrain_texture_array_ = {};
     terrain_sampler_ = {};
     environment_ = {};
@@ -232,8 +309,10 @@ core::Status Renderer::process_chunk_evictions(const world::ChunkStreamEvictionR
     return chunk_system_->process_chunk_evictions(eviction);
 }
 
-core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera) {
-    if (device_ == nullptr || chunk_system_ == nullptr || frame_builder_ == nullptr) {
+core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera,
+                                                    float simulation_alpha) {
+    if (device_ == nullptr || chunk_system_ == nullptr || scene_render_system_ == nullptr ||
+        frame_builder_ == nullptr) {
         return core::Result<rhi::RenderFrameStats>::failure(
             "renderer.not_initialized", "renderer must be initialized before rendering");
     }
@@ -268,6 +347,19 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
             command_lists.transparent_terrain_draws.push_back(draw);
         }
     }
+    auto scene_draws = scene_render_system_->build_draw_commands(
+        scene_, camera, simulation_alpha, std::move(scene_draw_scratch_));
+    if (!scene_draws) {
+        frame_timing_active_ = false;
+        return core::Result<rhi::RenderFrameStats>::failure(scene_draws.error().code,
+                                                            scene_draws.error().message);
+    }
+    command_lists.rich_instance_draws = std::move(scene_draws.value().opaque_and_cutout);
+    auto& transparent_instances = scene_draws.value().transparent;
+    command_lists.transparent_terrain_draws.insert(
+        command_lists.transparent_terrain_draws.end(),
+        std::make_move_iterator(transparent_instances.begin()),
+        std::make_move_iterator(transparent_instances.end()));
     auto frame = [&]() {
         profiling::ScopedCpuTimingZone command_zone(cpu_timings_,
                                                     profiling::CpuTimingZone::command_build);
@@ -358,6 +450,35 @@ core::Status Renderer::reload_terrain_shaders(std::span<const std::uint32_t> ver
     return chunk_system_->set_terrain_pipelines(terrain_pipelines_);
 }
 
+core::Status Renderer::reload_static_mesh_shaders(
+    std::span<const std::uint32_t> vertex_spirv,
+    std::span<const std::uint32_t> fragment_spirv) {
+    if (!is_initialized() || shader_manager_ == nullptr || pipeline_cache_ == nullptr ||
+        scene_render_system_ == nullptr) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized before shader reload");
+    }
+    auto status = shader_manager_->reload_program(
+        scene_shader_program_, make_static_mesh_shader_program(vertex_spirv, fragment_spirv));
+    if (!status) {
+        return status;
+    }
+    status = pipeline_cache_->rebuild_program(scene_shader_program_);
+    if (!status) {
+        return status;
+    }
+    std::array<rhi::RenderResourceHandle, 3> rebuilt{};
+    for (std::size_t index = 0; index < scene_pipeline_keys_.size(); ++index) {
+        auto pipeline = pipeline_cache_->find(scene_pipeline_keys_[index]);
+        if (!pipeline) {
+            return core::Status::failure(pipeline.error().code, pipeline.error().message);
+        }
+        rebuilt[index] = pipeline.value();
+    }
+    scene_pipelines_ = {rebuilt[0], rebuilt[1], rebuilt[2]};
+    return scene_render_system_->set_pipelines(scene_pipelines_);
+}
+
 core::Status Renderer::set_environment(rhi::RenderEnvironmentData environment) {
     if (!is_initialized()) {
         return core::Status::failure("renderer.not_initialized",
@@ -371,10 +492,60 @@ core::Status Renderer::set_environment(rhi::RenderEnvironmentData environment) {
     return core::Status::ok();
 }
 
+RenderObjectId Renderer::reserve_object_id() {
+    return scene_.reserve_object_id();
+}
+
+RenderLightId Renderer::reserve_light_id() {
+    return scene_.reserve_light_id();
+}
+
+core::Result<RenderObjectId> Renderer::create_object(RenderObjectProxy object) {
+    if (!is_initialized()) {
+        return core::Result<RenderObjectId>::failure("renderer.not_initialized",
+                                                     "renderer must be initialized first");
+    }
+    return scene_.create_object(std::move(object));
+}
+
+core::Result<RenderLightId> Renderer::create_light(RenderLightProxy light) {
+    if (!is_initialized()) {
+        return core::Result<RenderLightId>::failure("renderer.not_initialized",
+                                                    "renderer must be initialized first");
+    }
+    return scene_.create_light(std::move(light));
+}
+
+core::Status Renderer::apply_scene_updates(std::span<const RenderSceneUpdate> updates) {
+    if (!is_initialized()) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized first");
+    }
+    return scene_.apply(updates);
+}
+
+core::Result<RenderMeshHandle> Renderer::create_static_mesh(const StaticMeshUploadDesc& desc) {
+    if (mesh_manager_ == nullptr) {
+        return core::Result<RenderMeshHandle>::failure("renderer.not_initialized",
+                                                       "renderer must be initialized first");
+    }
+    return mesh_manager_->create_mesh(desc);
+}
+
+core::Status Renderer::release_static_mesh(RenderMeshHandle handle) {
+    if (mesh_manager_ == nullptr) {
+        return core::Status::failure("renderer.not_initialized",
+                                     "renderer must be initialized first");
+    }
+    return mesh_manager_->release(handle);
+}
+
 bool Renderer::is_initialized() const noexcept {
     return device_ != nullptr && chunk_cache_ != nullptr && chunk_system_ != nullptr &&
            frame_builder_ != nullptr && shader_manager_ != nullptr && texture_manager_ != nullptr &&
-           material_cache_ != nullptr && pipeline_cache_ != nullptr && terrain_pipelines_.is_valid();
+           material_cache_ != nullptr && pipeline_cache_ != nullptr && mesh_manager_ != nullptr &&
+           scene_render_system_ != nullptr && terrain_pipelines_.is_valid() &&
+           scene_pipelines_.is_valid();
 }
 
 const ChunkRenderStats& Renderer::chunk_stats() const noexcept {
@@ -383,6 +554,15 @@ const ChunkRenderStats& Renderer::chunk_stats() const noexcept {
 
 const RendererStats& Renderer::stats() const noexcept {
     return stats_;
+}
+
+const SceneRenderStats& Renderer::scene_stats() const noexcept {
+    static const SceneRenderStats empty;
+    return scene_render_system_ == nullptr ? empty : scene_render_system_->stats();
+}
+
+RenderMeshHandle Renderer::fallback_mesh() const noexcept {
+    return mesh_manager_ == nullptr ? RenderMeshHandle{} : mesh_manager_->fallback_mesh();
 }
 
 rhi::IRenderDevice* Renderer::device() noexcept {
@@ -430,6 +610,22 @@ void Renderer::update_frontend_stats(std::size_t loaded_chunk_count) noexcept {
         stats_.resident_pipelines =
             saturating_u32(pipeline_cache_->stats().resident_pipeline_count);
     }
+    if (scene_render_system_ != nullptr) {
+        const auto& scene = scene_render_system_->stats();
+        stats_.retained_objects = scene.scene.retained_objects;
+        stats_.visible_objects = scene.scene.visible_objects;
+        stats_.culled_objects = scene.scene.culled_objects;
+        stats_.instance_batches = scene.scene.instance_batches;
+        stats_.submitted_instances = scene.submitted_instances;
+        stats_.instance_draw_calls = scene.draw_calls;
+        stats_.dropped_instances = scene.dropped_instances;
+        stats_.uploaded_instance_bytes = scene.uploaded_instance_bytes;
+    }
+    if (mesh_manager_ != nullptr) {
+        const auto meshes = mesh_manager_->stats();
+        stats_.resident_static_meshes = saturating_u32(meshes.resident_mesh_count);
+        stats_.resident_static_mesh_bytes = meshes.resident_mesh_bytes;
+    }
     stats_.vertices = chunks.visible_vertex_count;
     stats_.triangles = chunks.visible_index_count / 3;
     stats_.resident_mesh_bytes = chunks.cache.resident_bytes;
@@ -470,6 +666,7 @@ void Renderer::update_backend_stats(const rhi::RenderFrameStats& frame) noexcept
     stats_.pipeline_switches = static_cast<std::uint32_t>(
         std::min(frame.pipeline_bind_count,
                  static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())));
+    stats_.triangles = frame.total_indices / 3U;
     stats_.command_recording_ms = frame.cpu_command_recording_ms;
     stats_.gpu_wait_ms += frame.cpu_gpu_wait_ms;
     stats_.gpu_timing_valid = frame.gpu_timing_valid;
@@ -701,7 +898,94 @@ core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> ve
     if (!material_status) {
         return material_status;
     }
-    pipeline_cache_->seal();
+    return core::Status::ok();
+}
+
+core::Status Renderer::create_scene_pipelines(std::span<const std::uint32_t> vertex_spirv,
+                                              std::span<const std::uint32_t> fragment_spirv) {
+    if (shader_manager_ == nullptr || pipeline_cache_ == nullptr) {
+        return core::Status::failure("renderer.runtime_assets_uninitialized",
+                                     "scene runtime asset managers must be initialized first");
+    }
+    const auto material = core::PrototypeId::parse("base:materials/static_instances");
+    if (!material) {
+        return core::Status::failure("renderer.invalid_scene_material",
+                                     "internal static-instance material id is invalid");
+    }
+    auto shader = shader_manager_->create_program(
+        make_static_mesh_shader_program(vertex_spirv, fragment_spirv));
+    if (!shader) {
+        return core::Status::failure(shader.error().code, shader.error().message);
+    }
+    scene_shader_program_ = shader.value();
+
+    rhi::RenderPipelineLayoutDesc layout;
+    layout.material_id = material.value();
+    layout.shader_template = {"base", "shaders/static_mesh.vert"};
+    layout.descriptors = {
+        {"object_instances", rhi::RenderDescriptorKind::storage_buffer, 0, true},
+    };
+    layout.push_constant_ranges.push_back(
+        {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
+         sizeof(rhi::ChunkPushConstants)});
+    layout.debug_name = "static_instances_layout";
+
+    rhi::RenderGraphicsPipelineDesc pipeline;
+    pipeline.material_id = material.value();
+    pipeline.vertex_stride = sizeof(GpuStaticMeshVertex);
+    pipeline.vertex_attributes.assign(std::begin(gpu_static_mesh_vertex_attributes),
+                                      std::end(gpu_static_mesh_vertex_attributes));
+    pipeline.topology = rhi::RenderPrimitiveTopology::triangle_list;
+    pipeline.polygon_mode = rhi::RenderPolygonMode::fill;
+    pipeline.cull_mode = rhi::RenderCullMode::back;
+    pipeline.front_face = rhi::RenderFrontFace::counter_clockwise;
+    pipeline.depth_test_enable = true;
+    pipeline.depth_write_enable = true;
+    pipeline.depth_compare = rhi::RenderCompareOperation::less;
+    pipeline.blend_mode = rhi::RenderBlendMode::disabled;
+    pipeline.color_target_format = rhi::RenderImageFormat::rgba8_unorm;
+    pipeline.depth_target_format = rhi::RenderImageFormat::d32_sfloat;
+    const auto vertex_layout = hash_vertex_layout(pipeline.vertex_stride, pipeline.vertex_attributes);
+    const auto prewarm = [&](std::size_t index, RenderPhase phase,
+                             rhi::RenderGraphicsPipelineDesc desc)
+        -> core::Result<rhi::RenderResourceHandle> {
+        GraphicsPipelineKey key;
+        key.shader_program = scene_shader_program_;
+        key.vertex_layout = vertex_layout;
+        key.render_phase = phase;
+        key.color_format = desc.color_target_format;
+        key.depth_format = desc.depth_target_format;
+        key.cull_mode = desc.cull_mode;
+        key.front_face = desc.front_face;
+        key.depth_test = desc.depth_test_enable;
+        key.depth_write = desc.depth_write_enable;
+        key.depth_compare = desc.depth_compare;
+        key.blend_mode = desc.blend_mode;
+        scene_pipeline_keys_[index] = key;
+        return pipeline_cache_->prewarm(key, layout, std::move(desc));
+    };
+    pipeline.debug_name = "opaque_static_instances_pipeline";
+    auto opaque = prewarm(0, RenderPhase::static_instances, pipeline);
+    if (!opaque) {
+        return core::Status::failure(opaque.error().code, opaque.error().message);
+    }
+    auto alpha_desc = pipeline;
+    alpha_desc.debug_name = "alpha_tested_static_instances_pipeline";
+    alpha_desc.cull_mode = rhi::RenderCullMode::none;
+    auto alpha = prewarm(1, RenderPhase::static_instances, std::move(alpha_desc));
+    if (!alpha) {
+        return core::Status::failure(alpha.error().code, alpha.error().message);
+    }
+    auto transparent_desc = pipeline;
+    transparent_desc.debug_name = "transparent_static_instances_pipeline";
+    transparent_desc.depth_write_enable = false;
+    transparent_desc.blend_mode = rhi::RenderBlendMode::alpha;
+    auto transparent =
+        prewarm(2, RenderPhase::transparent_terrain, std::move(transparent_desc));
+    if (!transparent) {
+        return core::Status::failure(transparent.error().code, transparent.error().message);
+    }
+    scene_pipelines_ = {opaque.value(), alpha.value(), transparent.value()};
     return core::Status::ok();
 }
 

@@ -34,6 +34,10 @@ std::string format_renderer_stats(const RendererStats& stats) {
            << '/' << stats.resident_texture_bytes << " materials=" << stats.runtime_materials
            << " triangles=" << stats.triangles << " resident_bytes=" << stats.resident_mesh_bytes
            << '/' << stats.gpu_terrain_budget_bytes
+           << " objects=" << stats.visible_objects << '/' << stats.retained_objects
+           << " instances=" << stats.submitted_instances << '/' << stats.instance_draw_calls
+           << " static_meshes=" << stats.resident_static_meshes << '/'
+           << stats.resident_static_mesh_bytes
            << " suppressed=" << stats.residency_suppressed_chunks
            << " evicted=" << stats.distance_evicted_meshes << '/'
            << stats.memory_pressure_evicted_meshes << " arena=" << stats.gpu_arena_used_bytes << '/'

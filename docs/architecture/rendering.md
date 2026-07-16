@@ -150,6 +150,16 @@ Implemented foundation:
     batches; hidden, visible, culled, retained, and batch counts are reported
   - directional and point lights are retained independently and extracted into camera-relative
     frame data without searching gameplay/entity databases
+  - `MeshManager` validates an explicit 32-byte static-mesh vertex ABI, caches shared assets by id,
+    suballocates device-local vertex/index arenas, retires released ranges by submission serial, and
+    resolves stale/missing handles to a visible manager-owned error cube
+  - `SceneRenderSystem` flattens batches into a 96-byte instance ABI (camera-relative matrix,
+    color, layer metadata), rotates through buffered storage-table segments, and emits one indexed
+    draw per compatible mesh/material/layer batch using `first_instance`
+  - opaque, cutout, and transparent object pipelines are prewarmed; transparent instances and
+    batches use stable back-to-front ordering, depth testing, blending, and disabled depth writes
+  - instance capacity is a fixed configuration budget: overflow is delayed/dropped visibly in
+    statistics instead of growing frame memory without bound
 
 - Camera and shader constants
   - `Mat4f` uses column-major storage, column vectors, and Vulkan's zero-to-one depth convention

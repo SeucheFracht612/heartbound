@@ -1,0 +1,101 @@
+#include "engine/renderer/assets/mesh_manager.hpp"
+
+#include <array>
+#include <cassert>
+
+namespace {
+
+using namespace heartstead;
+
+constexpr std::array<renderer::GpuStaticMeshVertex, 3> triangle_vertices{{
+    {{-1.0F, -1.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.0F, 0.0F}},
+    {{1.0F, -1.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {1.0F, 0.0F}},
+    {{0.0F, 1.0F, 0.0F}, {0.0F, 0.0F, 1.0F}, {0.5F, 1.0F}},
+}};
+constexpr std::array<std::uint32_t, 3> triangle_indices{0, 1, 2};
+
+void test_mesh_upload_cache_fallback_and_release() {
+    renderer::rhi::RenderDeviceDesc desc;
+    desc.backend = renderer::rhi::RenderBackend::headless;
+    auto device = renderer::rhi::create_render_device(desc);
+    assert(device);
+    const auto baseline = device.value()->live_resource_count();
+
+    renderer::MeshManager manager(*device.value());
+    renderer::MeshManagerConfig config;
+    config.vertex_initial_bytes = 4096;
+    config.vertex_maximum_bytes = 8192;
+    config.index_initial_bytes = 4096;
+    config.index_maximum_bytes = 8192;
+    assert(manager.initialize(config));
+    assert(manager.fallback_mesh().is_valid());
+    assert(manager.find_exact(manager.fallback_mesh()) != nullptr);
+    assert(manager.stats().resident_mesh_count == 1);
+    assert(device.value()->live_resource_count() == baseline + 2);
+
+    const renderer::StaticMeshUploadDesc upload{
+        "test_triangle", triangle_vertices, triangle_indices,
+        {{-1.0F, -1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}}};
+    auto mesh = manager.create_mesh(upload);
+    assert(mesh);
+    const auto* view = manager.find_exact(mesh.value());
+    assert(view != nullptr);
+    assert(view->vertex_count == 3);
+    assert(view->index_count == 3);
+    assert(view->vertices.buffer.is_valid());
+    assert(view->indices.buffer.is_valid());
+    assert(!view->fallback);
+    assert(manager.stats().resident_mesh_count == 2);
+
+    auto duplicate = manager.create_mesh(upload);
+    assert(duplicate);
+    assert(duplicate.value() == mesh.value());
+    assert(manager.stats().uploaded_mesh_count == 2); // fallback plus the triangle
+
+    assert(manager.release(mesh.value()));
+    assert(manager.find_exact(mesh.value()) == nullptr);
+    const auto* fallback = manager.find(mesh.value());
+    assert(fallback != nullptr);
+    assert(fallback->handle == manager.fallback_mesh());
+    assert(fallback->fallback);
+    assert(manager.stats().fallback_resolution_count == 1);
+    assert(!manager.release(mesh.value()));
+
+    auto replacement = manager.create_mesh(upload);
+    assert(replacement);
+    assert(replacement.value().index == mesh.value().index);
+    assert(replacement.value().generation != mesh.value().generation);
+
+    assert(manager.shutdown());
+    assert(device.value()->live_resource_count() == baseline);
+}
+
+void test_invalid_mesh_rejected_without_allocating() {
+    renderer::rhi::RenderDeviceDesc desc;
+    auto device = renderer::rhi::create_render_device(desc);
+    assert(device);
+    renderer::MeshManager manager(*device.value());
+    renderer::MeshManagerConfig config;
+    config.vertex_initial_bytes = 4096;
+    config.vertex_maximum_bytes = 8192;
+    config.index_initial_bytes = 4096;
+    config.index_maximum_bytes = 8192;
+    assert(manager.initialize(config));
+    const auto resources = device.value()->live_resource_count();
+
+    constexpr std::array<std::uint32_t, 3> invalid_indices{0, 1, 99};
+    auto invalid = manager.create_mesh({"invalid", triangle_vertices, invalid_indices,
+                                        {{-1.0F, -1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}}});
+    assert(!invalid);
+    assert(invalid.error().code == "mesh_manager.index_out_of_bounds");
+    assert(device.value()->live_resource_count() == resources);
+    assert(manager.shutdown());
+}
+
+} // namespace
+
+int main() {
+    test_mesh_upload_cache_fallback_and_release();
+    test_invalid_mesh_rejected_without_allocating();
+    return 0;
+}

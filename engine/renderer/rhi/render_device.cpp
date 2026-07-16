@@ -251,7 +251,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
                     }
                     ++stats.draw_count;
                     ++stats.indexed_draw_count;
-                    stats.total_indices += draw.index_count;
+                    stats.total_indices += static_cast<std::size_t>(draw.index_count) *
+                                           draw.instance_count;
                 }
             }
         }
@@ -695,7 +696,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
             materials.insert(draw.material_id.value());
             stats.total_vertices += draw.vertex_count;
-            stats.total_indices += draw.index_count;
+            stats.total_indices +=
+                static_cast<std::size_t>(draw.index_count) * draw.instance_count;
         }
 
         stats.material_count = materials.size();

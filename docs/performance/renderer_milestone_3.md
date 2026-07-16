@@ -74,7 +74,9 @@ Terrain uses integer coordinate hashes and an explicit seed. Dynamic edits, chur
 and resize phases are indexed by simulation frame. Initial chunks settle to resident meshes before
 warm-up begins. The flythrough follows a triangular high-speed path bounded by the loaded terrain
 footprint, so long measurements continue to cull and draw geometry instead of flying into an empty
-world. Rendering is uncapped when `--frame-cap` is zero, which is the default.
+world. The forest workload also retains 64 colored static props sharing one fallback mesh so its
+record includes a deterministic one-draw instancing baseline. Rendering is uncapped when
+`--frame-cap` is zero, which is the default.
 
 JSON uses schema `heartstead.renderer_benchmark.v1`. Both export formats record the scene, seed,
 backend, mesher, initial resolution, radius, warm-up/measured frame counts, frame cap, and validation

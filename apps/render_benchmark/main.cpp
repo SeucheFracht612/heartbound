@@ -48,6 +48,39 @@ struct Options {
     return 1;
 }
 
+[[nodiscard]] core::Status populate_instanced_forest_props(renderer::Renderer& active_renderer,
+                                                            const renderer::RenderCamera& camera) {
+    auto anchor = world::WorldPosition::from_anchor(camera.floating_origin.block, {});
+    if (!anchor) {
+        return core::Status::failure(anchor.error().code, anchor.error().message);
+    }
+    const auto center = camera.local_position + camera.forward() * 24.0F;
+    const auto right = camera.right();
+    for (std::uint32_t row = 0; row < 8; ++row) {
+        for (std::uint32_t column = 0; column < 8; ++column) {
+            renderer::RenderObjectProxy object;
+            object.anchor = anchor.value();
+            object.previous_transform.position =
+                center + right * ((static_cast<float>(column) - 3.5F) * 2.0F) +
+                math::Vec3f{0.0F, (static_cast<float>(row) - 3.5F) * 1.25F, 0.0F};
+            object.current_transform = object.previous_transform;
+            object.current_transform.rotation_degrees.y = static_cast<float>(column) * 11.25F;
+            object.previous_transform.rotation_degrees =
+                object.current_transform.rotation_degrees;
+            object.mesh = active_renderer.fallback_mesh();
+            object.material = {1, 1};
+            object.local_bounds = {{-0.5F, -0.5F, -0.5F}, {0.5F, 0.5F, 0.5F}};
+            object.color = {0.18F + static_cast<float>(row) * 0.035F, 0.58F,
+                            0.22F + static_cast<float>(column) * 0.025F, 1.0F};
+            auto created = active_renderer.create_object(std::move(object));
+            if (!created) {
+                return core::Status::failure(created.error().code, created.error().message);
+            }
+        }
+    }
+    return core::Status::ok();
+}
+
 void print_usage() {
     std::cout << "Usage: heartstead_render_benchmark [options]\n"
                  "  --scene NAME       flat, mountains, caves, checkerboard, forest, rapid-edits,\n"
@@ -296,25 +329,41 @@ int main(int argc, char** argv) {
 
     std::vector<std::uint32_t> vertex_spirv;
     std::vector<std::uint32_t> fragment_spirv;
+    std::vector<std::uint32_t> static_vertex_spirv;
+    std::vector<std::uint32_t> static_fragment_spirv;
     if (options.backend == renderer::rhi::RenderBackend::vulkan) {
         const auto shader_root =
             std::filesystem::path{HEARTSTEAD_RENDER_BENCHMARK_ASSET_DIR} / "shaders";
         auto vertex = renderer::shaders::load_spirv_file(shader_root / "terrain.vert.spv");
         auto fragment = renderer::shaders::load_spirv_file(shader_root / "terrain.frag.spv");
-        if (!vertex || !fragment) {
-            return fail(!vertex ? vertex.error().message : fragment.error().message);
+        auto static_vertex =
+            renderer::shaders::load_spirv_file(shader_root / "static_mesh.vert.spv");
+        auto static_fragment =
+            renderer::shaders::load_spirv_file(shader_root / "static_mesh.frag.spv");
+        if (!vertex || !fragment || !static_vertex || !static_fragment) {
+            const auto& error = !vertex          ? vertex.error()
+                                : !fragment      ? fragment.error()
+                                : !static_vertex ? static_vertex.error()
+                                                 : static_fragment.error();
+            return fail(error.message);
         }
         vertex_spirv = std::move(vertex).value();
         fragment_spirv = std::move(fragment).value();
+        static_vertex_spirv = std::move(static_vertex).value();
+        static_fragment_spirv = std::move(static_fragment).value();
     } else {
         vertex_spirv = {0x07230203, 0x00010000, 0, 1, 0};
         fragment_spirv = vertex_spirv;
+        static_vertex_spirv = vertex_spirv;
+        static_fragment_spirv = vertex_spirv;
     }
 
     renderer::RendererInitDesc renderer_init;
     renderer_init.device = std::move(device).value();
     renderer_init.terrain_vertex_spirv = std::move(vertex_spirv);
     renderer_init.terrain_fragment_spirv = std::move(fragment_spirv);
+    renderer_init.static_mesh_vertex_spirv = std::move(static_vertex_spirv);
+    renderer_init.static_mesh_fragment_spirv = std::move(static_fragment_spirv);
     renderer_init.voxel_palette = &scene.value()->palette();
     renderer_init.chunk_config.max_chunks_meshed_per_frame = 64;
     renderer_init.chunk_config.max_bytes_uploaded_per_frame = 512U * 1024U * 1024U;
@@ -325,6 +374,12 @@ int main(int argc, char** argv) {
     auto status = active_renderer.initialize(std::move(renderer_init));
     if (!status) {
         return fail(status.error().message);
+    }
+    if (options.scene == renderer::benchmark::BenchmarkSceneKind::forest_cross_planes) {
+        status = populate_instanced_forest_props(active_renderer, scene.value()->camera());
+        if (!status) {
+            return fail(status.error().message);
+        }
     }
 
     const auto initial_chunk_count = scene.value()->world().chunks().identities().size();

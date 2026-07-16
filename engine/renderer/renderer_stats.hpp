@@ -52,11 +52,21 @@ struct RendererStats {
     std::uint32_t resident_textures = 0;
     std::uint32_t runtime_materials = 0;
     std::uint32_t resident_pipelines = 0;
+    std::uint32_t retained_objects = 0;
+    std::uint32_t visible_objects = 0;
+    std::uint32_t culled_objects = 0;
+    std::uint32_t instance_batches = 0;
+    std::uint32_t submitted_instances = 0;
+    std::uint32_t instance_draw_calls = 0;
+    std::uint32_t dropped_instances = 0;
+    std::uint32_t resident_static_meshes = 0;
 
     std::uint64_t vertices = 0;
     std::uint64_t triangles = 0;
     std::uint64_t resident_texture_bytes = 0;
     std::uint64_t resident_mesh_bytes = 0;
+    std::uint64_t resident_static_mesh_bytes = 0;
+    std::uint64_t uploaded_instance_bytes = 0;
     std::uint64_t gpu_terrain_budget_bytes = 0;
     std::uint64_t distance_evicted_meshes = 0;
     std::uint64_t memory_pressure_evicted_meshes = 0;
