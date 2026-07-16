@@ -286,6 +286,8 @@ The summary aggregates every CPU and GPU interval independently and preserves th
 subsystem breakdown for the slowest frame, while the frame records retain delayed GPU source-frame
 and upload-submission identities. A spike can therefore be attributed without aligning asynchronous
 GPU results to the wrong CPU frame.
+The timing definitions, workload catalog, and native/headless verification record are maintained in
+`docs/performance/renderer_milestone_3.md`.
 Rendering is uncapped unless a frame cap is explicitly requested. Headless is the automation
 default; Vulkan mode opens a native window and adds GPU pass timings. Before warm-up and measured
 simulation begin, the benchmark settles all initially loaded chunks to resident meshes. Streaming

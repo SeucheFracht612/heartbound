@@ -157,6 +157,8 @@ meshing, upload, and GPU-wait times. It also reports mean extraction, synchroniz
 draw-list, command-build, command-recording, snapshot, upload-preparation, and GPU pass intervals,
 plus the full CPU timing breakdown of the slowest measured frame. Vulkan validation is requested by
 default and remains optional when the Khronos layer is not installed.
+The measurement semantics and latest verification matrix are recorded in
+`docs/performance/renderer_milestone_3.md`.
 
 Run mod/prototype validation tools:
 
