@@ -10,8 +10,10 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <ranges>
+#include <thread>
 
 namespace {
 
@@ -157,12 +159,20 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     camera.far_plane = 256.0F;
     assert(camera.update_matrices());
 
-    for (std::size_t frame = 0; frame < 8 && (chunks.stats().cache.resident_chunk_count < 3 ||
-                                              chunks.stats().pending_mesh_count != 0 ||
-                                              chunks.stats().pending_upload_count != 0);
-         ++frame) {
-        assert(chunks.synchronize(world, camera));
-    }
+    const auto synchronize_until = [&](const auto& predicate) {
+        for (std::size_t attempt = 0; attempt < 5'000; ++attempt) {
+            assert(chunks.synchronize(world, camera));
+            if (predicate()) {
+                return;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(false && "asynchronous chunk renderer did not reach the expected state");
+    };
+    synchronize_until([&] {
+        return chunks.stats().cache.resident_chunk_count == 3 &&
+               chunks.stats().pending_mesh_count == 0 && chunks.stats().pending_upload_count == 0;
+    });
     assert(cache.stats().resident_chunk_count == 3);
     assert(cache.stats().resident_buffer_count == 6);
     assert(device.value()->live_resource_count() == baseline_resources + 6);
@@ -192,15 +202,12 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     assert(world.chunks().set(origin_coord, {31, 8, 31}, world::VoxelCell{2, 220},
                               world.dirty_regions()));
     assert(chunks.synchronize(world, camera));
-    assert(chunks.stats().pending_upload_count == 1);
     assert(chunks.build_draw_list(camera).draws.size() == 2);
-    for (std::size_t frame = 0;
-         frame < 6 &&
-         (world.chunks().find(origin_coord)->dirty().contains(world::ChunkDirtyFlag::mesh) ||
-          world.chunks().find(neighbor_coord)->dirty().contains(world::ChunkDirtyFlag::mesh));
-         ++frame) {
-        assert(chunks.synchronize(world, camera));
-    }
+    assert(cache.find(origin_identity)->vertex_buffer.value == old_origin_vertex);
+    synchronize_until([&] {
+        return !world.chunks().find(origin_coord)->dirty().contains(world::ChunkDirtyFlag::mesh) &&
+               !world.chunks().find(neighbor_coord)->dirty().contains(world::ChunkDirtyFlag::mesh);
+    });
     assert(cache.find(origin_identity)->vertex_buffer.value != old_origin_vertex);
     assert(cache.find(neighbor_identity)->vertex_buffer.value != old_neighbor_vertex);
     assert(cache.find(origin_identity)->resident_content_revision ==
@@ -210,13 +217,32 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     assert(!world.chunks().find(neighbor_coord)->dirty().contains(world::ChunkDirtyFlag::mesh));
     assert(device.value()->live_resource_count() == baseline_resources + 6);
 
+    const auto intermediate_revision_before = world.chunks().find(origin_coord)->content_revision();
+    assert(world.chunks().set(origin_coord, {30, 8, 31}, world::VoxelCell{1, 220},
+                              world.dirty_regions()));
+    const auto intermediate_revision = world.chunks().find(origin_coord)->content_revision();
+    assert(intermediate_revision > intermediate_revision_before);
+    assert(chunks.synchronize(world, camera)); // Queues the intermediate revision.
+    assert(cache.find(origin_identity)->resident_content_revision != intermediate_revision);
+    assert(world.chunks().set(origin_coord, {30, 8, 31}, world::VoxelCell{2, 220},
+                              world.dirty_regions()));
+    const auto newest_revision = world.chunks().find(origin_coord)->content_revision();
+    assert(newest_revision > intermediate_revision);
+    synchronize_until([&] {
+        const auto* entry = cache.find(origin_identity);
+        assert(entry != nullptr);
+        assert(entry->resident_content_revision != intermediate_revision);
+        return entry->resident_content_revision == newest_revision &&
+               !world.chunks().find(origin_coord)->dirty().contains(world::ChunkDirtyFlag::mesh);
+    });
+
     const world::ChunkCoord empty_coord{far, 3, -far};
     auto& empty = world.chunks().get_or_create(empty_coord);
     const auto empty_identity = empty.identity();
-    for (std::size_t frame = 0; frame < 4 && !cache.contains(empty_identity); ++frame) {
-        assert(chunks.synchronize(world, camera));
-    }
-    assert(chunks.synchronize(world, camera));
+    synchronize_until([&] {
+        const auto* entry = cache.find(empty_identity);
+        return entry != nullptr && entry->state == renderer::ChunkGpuState::resident;
+    });
     assert(cache.find(empty_identity) != nullptr);
     assert(cache.find(empty_identity)->state == renderer::ChunkGpuState::resident);
     assert(!cache.find(empty_identity)->has_drawable_mesh());
@@ -229,6 +255,9 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     assert(!cache.contains(behind_identity));
     assert(device.value()->live_resource_count() == baseline_resources + 4);
 
+    assert(world.chunks().set(empty_coord, {2, 2, 2}, world::VoxelCell{1, 255},
+                              world.dirty_regions()));
+    assert(chunks.synchronize(world, camera)); // Leaves work for the old generation in flight.
     assert(world.chunks().erase(empty_coord));
     auto& reloaded = world.chunks().get_or_create(empty_coord);
     assert(reloaded.set({1, 1, 1}, world::VoxelCell{3, 255}));
@@ -236,6 +265,12 @@ void test_chunk_render_system_retains_rebuilds_and_culls() {
     assert(chunks.synchronize(world, camera));
     assert(!cache.contains(empty_identity));
     assert(cache.contains(reloaded.identity()));
+    synchronize_until([&] {
+        const auto* entry = cache.find(reloaded.identity());
+        return entry != nullptr && entry->state == renderer::ChunkGpuState::resident &&
+               entry->resident_content_revision == reloaded.content_revision();
+    });
+    assert(!cache.contains(empty_identity));
 
     assert(cache.clear());
     assert(device.value()->live_resource_count() == baseline_resources);
@@ -278,7 +313,12 @@ void test_renderer_frontend_submits_headless_frames() {
     camera.floating_origin.block = {16, 16, 64};
     assert(camera.set_aspect_ratio(640.0F / 360.0F));
 
-    assert(retained_renderer.synchronize_chunks(world, camera));
+    for (std::size_t attempt = 0;
+         attempt < 5'000 && retained_renderer.chunk_stats().cache.resident_chunk_count != 1;
+         ++attempt) {
+        assert(retained_renderer.synchronize_chunks(world, camera));
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     assert(retained_renderer.chunk_stats().cache.resident_chunk_count == 1);
     assert(retained_renderer.chunk_stats().cache.resident_buffer_count == 2);
     assert(retained_renderer.device()->live_resource_count() == initialized_resource_count + 2);

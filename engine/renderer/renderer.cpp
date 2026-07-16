@@ -45,6 +45,12 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
     chunk_cache_ = std::make_unique<ChunkGpuCache>(*device_);
     chunk_system_ = std::make_unique<ChunkRenderSystem>(*chunk_cache_, terrain_pipeline_,
                                                         desc.voxel_palette, desc.chunk_config);
+    auto chunk_system_status = chunk_system_->initialize();
+    if (!chunk_system_status) {
+        const auto error = chunk_system_status.error();
+        (void)shutdown();
+        return core::Status::failure(error.code, error.message);
+    }
     frame_builder_ = std::make_unique<FrameBuilder>(device_->current_extent(), desc.clear_color);
     return core::Status::ok();
 }

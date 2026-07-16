@@ -69,6 +69,7 @@ target_sources(
     renderer/materials/material_prototype_loader.cpp
     renderer/camera/frustum.cpp
     renderer/chunks/chunk_gpu_cache.cpp
+    renderer/chunks/chunk_mesh_scheduler.cpp
     renderer/chunks/chunk_render_system.cpp
     renderer/frame/frame_builder.cpp
     renderer/renderer.cpp
@@ -206,6 +207,7 @@ target_sources(
       renderer/materials/material_prototype_loader.hpp
       renderer/camera/frustum.hpp
       renderer/chunks/chunk_gpu_cache.hpp
+      renderer/chunks/chunk_mesh_scheduler.hpp
       renderer/chunks/chunk_render_system.hpp
       renderer/frame/frame_builder.hpp
       renderer/frame/render_commands.hpp

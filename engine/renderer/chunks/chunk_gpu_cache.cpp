@@ -127,7 +127,9 @@ void ChunkGpuCache::mark_failed(world::ChunkIdentity identity) noexcept {
 
 core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
     world::ChunkIdentity identity, std::uint64_t content_revision, math::Bounds3f local_bounds,
-    std::span<const terrain::GpuChunkVertex> vertices, std::span<const std::uint32_t> indices) {
+    std::span<const terrain::GpuChunkVertex> vertices, std::span<const std::uint32_t> indices,
+    std::uint64_t render_table_revision,
+    std::span<const world::ChunkDependencyRevision> dependency_revisions) {
     auto* entry = find(identity);
     if (entry == nullptr) {
         return core::Result<ChunkGpuUploadResult>::failure(
@@ -137,6 +139,11 @@ core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
         return core::Result<ChunkGpuUploadResult>::failure(
             "chunk_gpu_cache.invalid_content_revision",
             "chunk GPU uploads require a nonzero content revision");
+    }
+    if (render_table_revision == 0) {
+        return core::Result<ChunkGpuUploadResult>::failure(
+            "chunk_gpu_cache.invalid_render_table_revision",
+            "chunk GPU uploads require a nonzero block-render table revision");
     }
     if (vertices.empty() != indices.empty()) {
         return core::Result<ChunkGpuUploadResult>::failure(
@@ -183,6 +190,9 @@ core::Result<ChunkGpuUploadResult> ChunkGpuCache::replace_mesh(
 
     const auto old_entry = *entry;
     entry->resident_content_revision = content_revision;
+    entry->resident_render_table_revision = render_table_revision;
+    entry->resident_dependency_revisions.assign(dependency_revisions.begin(),
+                                                dependency_revisions.end());
     entry->vertex_buffer = new_vertex;
     entry->index_buffer = new_index;
     entry->vertex_count = static_cast<std::uint32_t>(vertices.size());

@@ -88,15 +88,18 @@ Implemented foundation:
     `ChunkRenderSystem`, and `FrameBuilder`; `WorldState` remains owned by its caller
   - initial synchronization discovers chunks that predate renderer startup, while explicit
     `ChunkStreamer` load and generation-aware eviction reports can be forwarded without an event bus
-  - each `ChunkGpuEntry` records its exact `ChunkIdentity`, resident content revision, buffers,
-    counts, local render bounds, state, and resident bytes
-  - synchronous meshing and upload queues retain work across frames, prioritize visible/nearby
-    chunks, and enforce per-frame mesh and byte budgets
+  - each `ChunkGpuEntry` records its exact `ChunkIdentity`, resident content and block-render-table
+    revisions, complete neighbor dependency stamps, buffers, counts, local render bounds, state,
+    and resident bytes
+  - immutable snapshot, asynchronous mesh-result, and owner-thread upload queues retain work across
+    frames, prioritize visible/missing/nearby chunks, and enforce per-frame snapshot, scheduling,
+    result-drain, and upload-byte budgets
   - replacement buffers become resident only after both uploads succeed; the prior mesh remains
     drawable while a rebuild is queued or an upload fails
   - empty chunks become valid resident entries without allocating vertex or index buffers
   - mesh dirty regions have one renderer consumer; mesh dirtiness clears only after the requested
-    identity and content revision are still current following a successful upload
+    identity, content revision, render-table revision, and all neighbor dependencies remain current
+    following a successful upload
   - six Vulkan-depth frustum planes cull camera-relative chunk AABBs, including rich-model bounds,
     before opaque terrain commands are built
   - debug statistics expose resident/empty counts and bytes, pending mesh/upload work, per-frame
@@ -233,11 +236,20 @@ statistics, computes median/p95/p99/max frame time and 1%/0.1% low FPS, and expo
 Rendering is uncapped unless a frame cap is explicitly requested. Headless is the automation
 default; Vulkan mode opens a native window and adds GPU pass timings.
 
+Production asynchronous chunk meshing is owned by `ChunkRenderSystem`. The renderer-owner thread
+copies a bounded center-plus-halo neighborhood and compact block render table before submitting a
+job. Workers only receive immutable snapshots; they never query `WorldState`, `ChunkDatabase`,
+`VoxelChunk`, or the prototype registry. A fixed worker pool publishes typed results through a
+thread-safe mailbox. The owner thread rejects results from stale content, changed neighbors,
+superseded load generations, or obsolete render tables both before upload preparation and again
+before upload. Rebuilds keep the prior resident mesh visible, and rapid requests are coalesced or
+cancelled before expensive work when possible.
+
 The backend intentionally remains a one-frame-in-flight MVP and currently supports one
 draw-producing Vulkan pass per unified submission. General multi-pass Vulkan execution, staged
-device-local mesh uploads, asynchronous immutable meshing snapshots, chunk material sections,
-descriptor lifetime policy for textured materials, compressed texture/KTX2 handling, and RenderDoc
-capture workflow belong to later integration slices.
+device-local mesh uploads, chunk material sections, descriptor lifetime policy for textured
+materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to later
+integration slices.
 
 The current shader compiler has development validators plus a production SPIR-V passthrough
 profile. Development preserves source bytes behind explicit compiled-shader metadata and rejects

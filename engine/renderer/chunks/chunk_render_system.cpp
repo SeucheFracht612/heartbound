@@ -1,7 +1,7 @@
 #include "engine/renderer/chunks/chunk_render_system.hpp"
 
+#include "engine/core/logging.hpp"
 #include "engine/world/blocks/block_model.hpp"
-#include "engine/world/meshing/chunk_mesher.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -43,6 +43,29 @@ core::Status ChunkRenderConfig::validate() const {
         return core::Status::failure("renderer.invalid_chunk_upload_budget",
                                      "chunk upload budget must allow at least one byte");
     }
+    constexpr auto maximum_snapshot_side =
+        static_cast<std::size_t>(world::VoxelChunk::edge_length) +
+        static_cast<std::size_t>(world::BlockModelDefinition::max_dependency_radius) * 2;
+    constexpr auto maximum_snapshot_cells =
+        maximum_snapshot_side * maximum_snapshot_side * maximum_snapshot_side;
+    if (max_snapshot_cells_per_frame < maximum_snapshot_cells) {
+        return core::Status::failure(
+            "renderer.invalid_chunk_snapshot_budget",
+            "chunk snapshot budget must fit one maximum-halo neighborhood");
+    }
+    ChunkMeshSchedulerConfig scheduler_config;
+    scheduler_config.worker_count = mesh_worker_count;
+    scheduler_config.max_concurrent_jobs = max_concurrent_mesh_jobs;
+    scheduler_config.max_completed_results = max_completed_mesh_results_per_frame * 4;
+    scheduler_config.max_cached_snapshot_buffers = max_cached_snapshot_buffers;
+    auto scheduler_status = scheduler_config.validate();
+    if (!scheduler_status) {
+        return scheduler_status;
+    }
+    if (max_completed_mesh_results_per_frame == 0) {
+        return core::Status::failure("renderer.invalid_completed_mesh_budget",
+                                     "completed mesh drain budget must be nonzero");
+    }
     return core::Status::ok();
 }
 
@@ -56,6 +79,45 @@ ChunkRenderSystem::ChunkRenderSystem(ChunkGpuCache& cache,
                                      const world::VoxelPalette* palette, ChunkRenderConfig config)
     : cache_(&cache), terrain_pipeline_(terrain_pipeline), palette_(palette), config_(config) {}
 
+ChunkRenderSystem::~ChunkRenderSystem() {
+    shutdown();
+}
+
+core::Status ChunkRenderSystem::initialize() {
+    auto status = config_.validate();
+    if (!status) {
+        return status;
+    }
+    auto table = world::build_block_render_table_snapshot(palette_);
+    if (!table) {
+        return core::Status::failure(table.error().code, table.error().message);
+    }
+    render_table_ =
+        std::make_shared<const world::BlockRenderTableSnapshot>(std::move(table).value());
+    ChunkMeshSchedulerConfig scheduler_config;
+    scheduler_config.worker_count = config_.mesh_worker_count;
+    scheduler_config.max_concurrent_jobs = config_.max_concurrent_mesh_jobs;
+    scheduler_config.max_completed_results = config_.max_completed_mesh_results_per_frame * 4;
+    scheduler_config.max_cached_snapshot_buffers = config_.max_cached_snapshot_buffers;
+    auto scheduler = ChunkMeshScheduler::create(scheduler_config);
+    if (!scheduler) {
+        render_table_.reset();
+        return core::Status::failure(scheduler.error().code, scheduler.error().message);
+    }
+    mesh_scheduler_ = std::move(scheduler).value();
+    return core::Status::ok();
+}
+
+void ChunkRenderSystem::shutdown() noexcept {
+    if (mesh_scheduler_ != nullptr) {
+        mesh_scheduler_->shutdown();
+        mesh_scheduler_.reset();
+    }
+    pending_meshes_.clear();
+    pending_uploads_.clear();
+    render_table_.reset();
+}
+
 core::Status
 ChunkRenderSystem::process_chunk_loads(std::span<const world::ChunkStreamLoadReport> loads) {
     for (const auto& load : loads) {
@@ -67,6 +129,9 @@ ChunkRenderSystem::process_chunk_loads(std::span<const world::ChunkStreamLoadRep
             const auto* old_entry = cache_->find_by_coordinate(load.identity.coordinate);
             if (old_entry != nullptr) {
                 const auto old_identity = old_entry->identity;
+                if (mesh_scheduler_ != nullptr) {
+                    mesh_scheduler_->cancel(old_identity);
+                }
                 remove_pending(old_identity);
                 auto erase_status = cache_->erase(old_identity);
                 if (!erase_status) {
@@ -88,6 +153,9 @@ core::Status
 ChunkRenderSystem::process_chunk_evictions(std::span<const world::ChunkIdentity> evictions) {
     core::Status first_failure = core::Status::ok();
     for (const auto identity : evictions) {
+        if (mesh_scheduler_ != nullptr) {
+            mesh_scheduler_->cancel(identity);
+        }
         remove_pending(identity);
         if (!cache_->contains(identity)) {
             // A stale eviction must never remove a newer generation at the same coordinate.
@@ -112,28 +180,46 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
     if (!status) {
         return status;
     }
+    if (mesh_scheduler_ == nullptr || render_table_ == nullptr) {
+        status = initialize();
+        if (!status) {
+            return status;
+        }
+    }
     if (!terrain_pipeline_.is_valid()) {
         return core::Status::failure("renderer.invalid_terrain_pipeline",
                                      "chunk render system requires a terrain pipeline");
     }
-
     stats_.meshed_chunk_count = 0;
     stats_.uploaded_chunk_count = 0;
     stats_.uploaded_bytes = 0;
     stats_.failed_mesh_count = 0;
     stats_.failed_upload_count = 0;
+    stats_.scheduled_mesh_count = 0;
+    stats_.cancelled_mesh_count = 0;
+    stats_.stale_mesh_result_count = 0;
+    stats_.snapshot_cells_copied = 0;
+    stats_.meshing_ms = 0.0;
     timings_.reset();
 
+    status = refresh_render_table(world);
+    if (!status) {
+        return status;
+    }
     status = reconcile_loaded_chunks(world);
     if (!status) {
         return status;
     }
     consume_dirty_regions(world);
 
-    core::Status first_failure = process_mesh_queue(world, camera);
+    core::Status first_failure = process_completed_meshes(world);
     auto upload_status = process_upload_queue(world, camera);
     if (!upload_status && first_failure) {
         first_failure = upload_status;
+    }
+    auto scheduling_status = schedule_mesh_jobs(world, camera);
+    if (!scheduling_status && first_failure) {
+        first_failure = scheduling_status;
     }
     stats_.cache = cache_->stats();
     refresh_queue_stats();
@@ -229,6 +315,7 @@ core::Status ChunkRenderSystem::reconcile_loaded_chunks(world::WorldState& world
         const auto* existing = cache_->find_by_coordinate(identity.coordinate);
         if (existing != nullptr && existing->identity != identity) {
             const auto old_identity = existing->identity;
+            mesh_scheduler_->cancel(old_identity);
             remove_pending(old_identity);
             auto erase_status = cache_->erase(old_identity);
             if (!erase_status) {
@@ -254,10 +341,19 @@ core::Status ChunkRenderSystem::reconcile_loaded_chunks(world::WorldState& world
             });
         const bool newest_revision_awaits_upload =
             queued_upload != pending_uploads_.end() &&
-            queued_upload->content_revision == chunk->content_revision();
-        const bool stale_revision = entry->state != ChunkGpuState::resident ||
-                                    entry->resident_content_revision != chunk->content_revision();
-        if (!newest_revision_awaits_upload &&
+            queued_upload->content_revision == chunk->content_revision() &&
+            queued_upload->render_table_revision == render_table_->revision;
+        const auto in_flight_revision = mesh_scheduler_->in_flight_revision(identity);
+        const bool newest_revision_in_flight =
+            in_flight_revision.has_value() && *in_flight_revision == chunk->content_revision();
+        if (in_flight_revision.has_value() && *in_flight_revision != chunk->content_revision()) {
+            mesh_scheduler_->cancel(identity);
+        }
+        const bool stale_revision =
+            entry->state != ChunkGpuState::resident ||
+            entry->resident_content_revision != chunk->content_revision() ||
+            entry->resident_render_table_revision != render_table_->revision;
+        if (!newest_revision_awaits_upload && !newest_revision_in_flight &&
             (stale_revision || chunk->dirty().contains(world::ChunkDirtyFlag::mesh))) {
             enqueue_mesh(identity, chunk->dirty().contains(world::ChunkDirtyFlag::mesh));
         }
@@ -286,14 +382,135 @@ void ChunkRenderSystem::consume_dirty_regions(world::WorldState& world) {
     }
 }
 
-core::Status ChunkRenderSystem::process_mesh_queue(world::WorldState& world,
+core::Status ChunkRenderSystem::refresh_render_table(world::WorldState& world) {
+    const auto current_revision =
+        palette_ == nullptr ? std::uint64_t{1} : palette_->render_revision();
+    if (render_table_ != nullptr && render_table_->revision == current_revision) {
+        return core::Status::ok();
+    }
+    auto rebuilt = world::build_block_render_table_snapshot(palette_);
+    if (!rebuilt) {
+        return core::Status::failure(rebuilt.error().code, rebuilt.error().message);
+    }
+    mesh_scheduler_->cancel_all();
+    pending_uploads_.clear();
+    render_table_ =
+        std::make_shared<const world::BlockRenderTableSnapshot>(std::move(rebuilt).value());
+    for (const auto identity : world.chunks().identities()) {
+        enqueue_mesh(identity, true);
+    }
+    return core::Status::ok();
+}
+
+bool ChunkRenderSystem::mesh_result_is_current(const ChunkMeshResult& result,
+                                               const world::WorldState& world) const {
+    if (render_table_ == nullptr || result.block_render_table_revision != render_table_->revision ||
+        !cache_->contains(result.identity)) {
+        return false;
+    }
+    const auto* chunk = world.chunks().find(result.identity.coordinate);
+    if (chunk == nullptr || chunk->identity() != result.identity ||
+        chunk->content_revision() != result.center_revision ||
+        !world::dependency_revisions_match(world.chunks(), result.dependency_revisions)) {
+        return false;
+    }
+    const auto* entry = cache_->find(result.identity);
+    if (entry == nullptr) {
+        return false;
+    }
+    const bool exact_mesh_is_resident =
+        entry->state == ChunkGpuState::resident &&
+        entry->resident_content_revision == result.center_revision &&
+        entry->resident_render_table_revision == result.block_render_table_revision &&
+        std::ranges::equal(entry->resident_dependency_revisions, result.dependency_revisions);
+    return !exact_mesh_is_resident;
+}
+
+bool ChunkRenderSystem::pending_upload_is_current(const PendingUpload& upload,
+                                                  const world::WorldState& world) const {
+    if (render_table_ == nullptr || upload.render_table_revision != render_table_->revision ||
+        !cache_->contains(upload.identity)) {
+        return false;
+    }
+    const auto* chunk = world.chunks().find(upload.identity.coordinate);
+    return chunk != nullptr && chunk->identity() == upload.identity &&
+           chunk->content_revision() == upload.content_revision &&
+           world::dependency_revisions_match(world.chunks(), upload.dependency_revisions);
+}
+
+core::Status ChunkRenderSystem::process_completed_meshes(world::WorldState& world) {
+    const auto requeue_latest = [this, &world](world::ChunkCoord coordinate) {
+        const auto* chunk = world.chunks().find(coordinate);
+        if (chunk != nullptr && cache_->contains(chunk->identity())) {
+            enqueue_mesh(chunk->identity(), true);
+        }
+    };
+    auto results = mesh_scheduler_->drain_completed(config_.max_completed_mesh_results_per_frame);
+    for (auto& result : results) {
+        stats_.meshing_ms += result.meshing_ms;
+        if (result.state == ChunkMeshResultState::cancelled) {
+            ++stats_.cancelled_mesh_count;
+            requeue_latest(result.identity.coordinate);
+            continue;
+        }
+        ++stats_.meshed_chunk_count;
+        if (result.state == ChunkMeshResultState::failed || !result.mesh.has_value()) {
+            ++stats_.failed_mesh_count;
+            cache_->mark_failed(result.identity);
+            requeue_latest(result.identity.coordinate);
+            core::log(core::LogLevel::warning, "Asynchronous chunk mesh failed: " +
+                                                   result.error_code + ": " + result.error_message);
+            continue;
+        }
+        if (!mesh_result_is_current(result, world)) {
+            ++stats_.stale_mesh_result_count;
+            requeue_latest(result.identity.coordinate);
+            continue;
+        }
+        const auto duplicate_upload =
+            std::ranges::find_if(pending_uploads_, [&result](const PendingUpload& upload) {
+                return upload.identity == result.identity &&
+                       upload.content_revision == result.center_revision &&
+                       upload.render_table_revision == result.block_render_table_revision &&
+                       std::ranges::equal(upload.dependency_revisions, result.dependency_revisions);
+            });
+        if (duplicate_upload != pending_uploads_.end()) {
+            continue;
+        }
+
+        std::erase_if(pending_uploads_, [&result](const PendingUpload& upload) {
+            return upload.identity == result.identity;
+        });
+        {
+            profiling::ScopedCpuTimingZone preparation_zone(
+                timings_, profiling::CpuTimingZone::upload_preparation);
+            auto built_mesh = std::move(*result.mesh);
+            PendingUpload upload;
+            upload.identity = result.identity;
+            upload.content_revision = result.center_revision;
+            upload.render_table_revision = result.block_render_table_revision;
+            upload.dependency_revisions = std::move(result.dependency_revisions);
+            upload.local_bounds = built_mesh.local_bounds;
+            upload.vertices = terrain::make_gpu_chunk_vertices(built_mesh.vertices);
+            upload.indices = std::move(built_mesh.indices);
+            upload.sequence = result.priority.sequence;
+            pending_uploads_.push_back(std::move(upload));
+        }
+        cache_->mark_cpu_mesh_ready(result.identity);
+        cache_->mark_upload_pending(result.identity);
+    }
+    return core::Status::ok();
+}
+
+core::Status ChunkRenderSystem::schedule_mesh_jobs(world::WorldState& world,
                                                    const RenderCamera& camera) {
     prioritize_mesh_queue(world, camera);
     core::Status first_failure = core::Status::ok();
     const auto available_at_start = pending_meshes_.size();
     std::size_t attempted = 0;
     while (!pending_meshes_.empty() && attempted < available_at_start &&
-           stats_.meshed_chunk_count < config_.max_chunks_meshed_per_frame) {
+           stats_.scheduled_mesh_count < config_.max_chunks_meshed_per_frame &&
+           mesh_scheduler_->has_capacity()) {
         auto pending = pending_meshes_.front();
         pending_meshes_.erase(pending_meshes_.begin());
         ++attempted;
@@ -303,61 +520,83 @@ core::Status ChunkRenderSystem::process_mesh_queue(world::WorldState& world,
             !cache_->contains(pending.identity)) {
             continue;
         }
-        std::uint64_t requested_revision = 0;
-        {
-            profiling::ScopedCpuTimingZone snapshot_zone(timings_,
-                                                         profiling::CpuTimingZone::chunk_snapshot);
-            // Milestone 2 still meshes synchronously from live storage. This zone measures the
-            // identity/revision capture and becomes the immutable snapshot copy zone before jobs.
-            requested_revision = chunk->content_revision();
+        if (mesh_scheduler_->has_in_flight(pending.identity)) {
+            const auto active_revision = mesh_scheduler_->in_flight_revision(pending.identity);
+            if (active_revision.has_value() && *active_revision != chunk->content_revision()) {
+                mesh_scheduler_->cancel(pending.identity);
+            }
+            pending_meshes_.push_back(pending);
+            continue;
         }
-        world::ChunkMeshingContext context{
-            *chunk,
-            palette_,
-            &world.chunks(),
-            world::BlockModelDefinition::max_dependency_radius,
-        };
-        auto mesh = [&]() {
-            profiling::ScopedCpuTimingZone meshing_zone(timings_,
-                                                        profiling::CpuTimingZone::meshing);
-            return world::ChunkMesher::build_surface_mesh(context);
-        }();
-        ++stats_.meshed_chunk_count;
-        if (!mesh) {
+
+        const auto halo = world::required_chunk_halo(chunk->cells(), *render_table_);
+        if (!halo) {
             ++stats_.failed_mesh_count;
             cache_->mark_failed(pending.identity);
             pending.sequence = next_sequence_++;
             pending_meshes_.push_back(pending);
             if (first_failure) {
-                first_failure = core::Status::failure(mesh.error().code, mesh.error().message);
+                first_failure = core::Status::failure(halo.error().code, halo.error().message);
             }
             continue;
         }
-        if (chunk->content_revision() != requested_revision ||
-            chunk->identity() != pending.identity) {
-            enqueue_mesh(pending.identity, true);
-            continue;
+        const auto side = static_cast<std::size_t>(world::VoxelChunk::edge_length) +
+                          static_cast<std::size_t>(halo.value()) * 2;
+        const auto snapshot_cells = side * side * side;
+        if (stats_.snapshot_cells_copied + snapshot_cells > config_.max_snapshot_cells_per_frame) {
+            pending_meshes_.insert(pending_meshes_.begin(), pending);
+            break;
         }
 
-        std::erase_if(pending_uploads_, [&pending](const PendingUpload& upload) {
-            return upload.identity == pending.identity;
-        });
-        {
+        auto storage = mesh_scheduler_->acquire_snapshot_cells(snapshot_cells);
+        auto snapshot = [&]() {
             profiling::ScopedCpuTimingZone preparation_zone(
-                timings_, profiling::CpuTimingZone::upload_preparation);
-            auto built_mesh = std::move(mesh).value();
-            PendingUpload upload;
-            upload.identity = pending.identity;
-            upload.content_revision = requested_revision;
-            upload.local_bounds = built_mesh.local_bounds;
-            upload.vertices = terrain::make_gpu_chunk_vertices(built_mesh.vertices);
-            upload.indices = std::move(built_mesh.indices);
-            upload.forced = pending.forced;
-            upload.sequence = pending.sequence;
-            pending_uploads_.push_back(std::move(upload));
+                timings_, profiling::CpuTimingZone::chunk_snapshot);
+            return world::build_chunk_neighborhood_snapshot(world.chunks(), pending.identity,
+                                                            *render_table_, std::move(storage));
+        }();
+        if (!snapshot) {
+            ++stats_.failed_mesh_count;
+            cache_->mark_failed(pending.identity);
+            pending.sequence = next_sequence_++;
+            pending_meshes_.push_back(pending);
+            if (first_failure) {
+                first_failure =
+                    core::Status::failure(snapshot.error().code, snapshot.error().message);
+            }
+            continue;
         }
-        cache_->mark_cpu_mesh_ready(pending.identity);
-        cache_->mark_upload_pending(pending.identity);
+        stats_.snapshot_cells_copied += snapshot.value().cell_count();
+
+        const auto* entry = cache_->find(pending.identity);
+        const auto bounds = entry != nullptr && entry->local_bounds.is_valid()
+                                ? entry->local_bounds
+                                : default_chunk_bounds();
+        ChunkMeshRequest request;
+        request.identity = pending.identity;
+        request.center_revision = snapshot.value().center_revision;
+        request.block_render_table_revision = render_table_->revision;
+        request.neighborhood = std::move(snapshot).value();
+        request.render_table = render_table_;
+        request.priority.visible = is_visible(pending.identity.coordinate, bounds, camera);
+        request.priority.missing_resident_mesh =
+            entry == nullptr || entry->state != ChunkGpuState::resident;
+        request.priority.distance_squared =
+            distance_squared(pending.identity.coordinate, bounds, camera);
+        request.priority.sequence = pending.sequence;
+        auto submit_status = mesh_scheduler_->submit(std::move(request));
+        if (!submit_status) {
+            pending_meshes_.push_back(pending);
+            if (submit_status.error().code == "renderer.chunk_mesh_scheduler_full" ||
+                submit_status.error().code == "renderer.chunk_mesh_request_coalesced") {
+                break;
+            }
+            if (first_failure) {
+                first_failure = submit_status;
+            }
+            continue;
+        }
+        ++stats_.scheduled_mesh_count;
     }
     return first_failure;
 }
@@ -380,20 +619,19 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
         auto pending = std::move(pending_uploads_.front());
         pending_uploads_.erase(pending_uploads_.begin());
         ++attempted;
-        auto* chunk = world.chunks().find(pending.identity.coordinate);
-        if (chunk == nullptr || chunk->identity() != pending.identity ||
-            !cache_->contains(pending.identity)) {
-            continue;
-        }
-        if (chunk->content_revision() != pending.content_revision) {
-            enqueue_mesh(pending.identity, true);
+        if (!pending_upload_is_current(pending, world)) {
+            const auto* newest = world.chunks().find(pending.identity.coordinate);
+            if (newest != nullptr && cache_->contains(newest->identity())) {
+                enqueue_mesh(newest->identity(), true);
+            }
             continue;
         }
 
         auto upload = [&]() {
             profiling::ScopedCpuTimingZone upload_zone(timings_, profiling::CpuTimingZone::upload);
-            return cache_->replace_mesh(pending.identity, pending.content_revision,
-                                        pending.local_bounds, pending.vertices, pending.indices);
+            return cache_->replace_mesh(
+                pending.identity, pending.content_revision, pending.local_bounds, pending.vertices,
+                pending.indices, pending.render_table_revision, pending.dependency_revisions);
         }();
         if (!upload) {
             ++stats_.failed_upload_count;
@@ -407,11 +645,14 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
 
         ++stats_.uploaded_chunk_count;
         stats_.uploaded_bytes += upload.value().uploaded_bytes;
-        if (chunk->identity() == pending.identity &&
-            chunk->content_revision() == pending.content_revision) {
+        auto* chunk = world.chunks().find(pending.identity.coordinate);
+        if (chunk != nullptr && pending_upload_is_current(pending, world)) {
             chunk->clear_dirty(world::ChunkDirtyFlag::mesh);
         } else {
-            enqueue_mesh(pending.identity, true);
+            const auto* newest = world.chunks().find(pending.identity.coordinate);
+            if (newest != nullptr && cache_->contains(newest->identity())) {
+                enqueue_mesh(newest->identity(), true);
+            }
         }
     }
     return first_failure;
@@ -419,8 +660,8 @@ core::Status ChunkRenderSystem::process_upload_queue(world::WorldState& world,
 
 void ChunkRenderSystem::prioritize_mesh_queue(const world::WorldState& world,
                                               const RenderCamera& camera) {
-    std::ranges::stable_sort(pending_meshes_, [this, &world, &camera](const PendingMesh& left,
-                                                                      const PendingMesh& right) {
+    std::ranges::stable_sort(pending_meshes_, [this, &camera](const PendingMesh& left,
+                                                              const PendingMesh& right) {
         const auto* left_entry = cache_->find(left.identity);
         const auto* right_entry = cache_->find(right.identity);
         const auto left_bounds = left_entry != nullptr && left_entry->local_bounds.is_valid()
@@ -433,6 +674,13 @@ void ChunkRenderSystem::prioritize_mesh_queue(const world::WorldState& world,
         const bool right_visible = is_visible(right.identity.coordinate, right_bounds, camera);
         if (left_visible != right_visible) {
             return left_visible;
+        }
+        const bool left_missing =
+            left_entry == nullptr || left_entry->state != ChunkGpuState::resident;
+        const bool right_missing =
+            right_entry == nullptr || right_entry->state != ChunkGpuState::resident;
+        if (left_missing != right_missing) {
+            return left_missing;
         }
         const auto left_distance = distance_squared(left.identity.coordinate, left_bounds, camera);
         const auto right_distance =
@@ -501,7 +749,9 @@ ChunkRenderSystem::camera_relative_chunk_origin(world::ChunkCoord coord,
 
 void ChunkRenderSystem::refresh_queue_stats() noexcept {
     stats_.cache = cache_->stats();
-    stats_.pending_mesh_count = pending_meshes_.size();
+    stats_.in_flight_mesh_count =
+        mesh_scheduler_ == nullptr ? 0 : mesh_scheduler_->stats().in_flight_jobs;
+    stats_.pending_mesh_count = pending_meshes_.size() + stats_.in_flight_mesh_count;
     stats_.pending_upload_count = pending_uploads_.size();
     stats_.pending_upload_bytes = 0;
     for (const auto& upload : pending_uploads_) {
@@ -513,7 +763,6 @@ void ChunkRenderSystem::refresh_timing_stats() noexcept {
     stats_.culling_ms = timings_.milliseconds(profiling::CpuTimingZone::visibility_culling);
     stats_.draw_list_ms = timings_.milliseconds(profiling::CpuTimingZone::draw_list_construction);
     stats_.chunk_snapshot_ms = timings_.milliseconds(profiling::CpuTimingZone::chunk_snapshot);
-    stats_.meshing_ms = timings_.milliseconds(profiling::CpuTimingZone::meshing);
     stats_.upload_preparation_ms =
         timings_.milliseconds(profiling::CpuTimingZone::upload_preparation);
     stats_.upload_ms = timings_.milliseconds(profiling::CpuTimingZone::upload);

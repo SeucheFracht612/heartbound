@@ -35,6 +35,12 @@ priority, publishes structured success/failure records, and joins workers on shu
 Completed results are drained explicitly so callers can decide where authoritative
 world/save state is allowed to change.
 
+Chunk meshing layers a typed result mailbox over this generic execution API. Job closures capture
+only immutable neighborhood/render-table snapshots and a cancellation token. The mailbox owns
+`ChunkMeshResult` payloads until the renderer owner thread drains them; generic job results remain
+useful for lifecycle and failure accounting. Cancellation never grants a worker access to live
+world state and is checked before the expensive mesh build.
+
 Gameplay code should not own raw threads or platform-specific synchronization. Future
 parallel systems should submit work through engine-owned job APIs, keep save/world
 mutation on authoritative paths, and use explicit result handoff points.

@@ -5,6 +5,7 @@
 #include "engine/renderer/rhi/render_device.hpp"
 #include "engine/renderer/terrain/gpu_chunk_vertex.hpp"
 #include "engine/world/chunks/chunk_identity.hpp"
+#include "engine/world/meshing/chunk_mesh_snapshot.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -25,6 +26,8 @@ enum class ChunkGpuState {
 struct ChunkGpuEntry {
     world::ChunkIdentity identity;
     std::uint64_t resident_content_revision = 0;
+    std::uint64_t resident_render_table_revision = 0;
+    std::vector<world::ChunkDependencyRevision> resident_dependency_revisions;
 
     rhi::RenderResourceHandle vertex_buffer;
     rhi::RenderResourceHandle index_buffer;
@@ -82,7 +85,8 @@ class ChunkGpuCache {
     [[nodiscard]] core::Result<ChunkGpuUploadResult>
     replace_mesh(world::ChunkIdentity identity, std::uint64_t content_revision,
                  math::Bounds3f local_bounds, std::span<const terrain::GpuChunkVertex> vertices,
-                 std::span<const std::uint32_t> indices);
+                 std::span<const std::uint32_t> indices, std::uint64_t render_table_revision = 1,
+                 std::span<const world::ChunkDependencyRevision> dependency_revisions = {});
 
     [[nodiscard]] ChunkGpuCacheStats stats() const noexcept;
 
