@@ -40,7 +40,37 @@ core::Result<rhi::RenderFramePlan> FrameBuilder::build_plan() const {
         return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
     }
     status = builder.add_pass(
-        {"world", RenderPassKind::world, {}, {"output", "depth"}, clear_color_, false});
+        {"sky", RenderPassKind::clear, {}, {"output"}, clear_color_, false});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass({"opaque_terrain", RenderPassKind::world, {"output"},
+                               {"output", "depth"}, {}, false});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass({"alpha_tested_terrain", RenderPassKind::world,
+                               {"output", "depth"}, {"output", "depth"}, {}, false});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass({"rich_static_instances", RenderPassKind::world,
+                               {"output", "depth"}, {"output", "depth"}, {}, false});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass({"transparent_terrain", RenderPassKind::world,
+                               {"output", "depth"}, {"output", "depth"}, {}, false});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass(
+        {"debug", RenderPassKind::debug, {"output", "depth"}, {"output", "depth"}, {}, false});
+    if (!status) {
+        return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
+    }
+    status = builder.add_pass(
+        {"ui", RenderPassKind::ui, {"output"}, {"output"}, {}, false});
     if (!status) {
         return core::Result<RenderFramePlan>::failure(status.error().code, status.error().message);
     }
@@ -62,9 +92,18 @@ core::Result<rhi::RenderFrameSubmission> FrameBuilder::build(const RenderCamera&
     rhi::RenderFrameSubmission result;
     result.plan = std::move(plan).value();
     result.camera.view_projection = camera.view_projection;
-    if (!commands.world_draws.empty()) {
-        result.pass_commands.push_back({0, std::move(commands.world_draws)});
-    }
+    const auto append = [&result](std::size_t pass_index,
+                                  std::vector<rhi::RenderDrawCommand>& draws) {
+        if (!draws.empty()) {
+            result.pass_commands.push_back({pass_index, std::move(draws)});
+        }
+    };
+    append(1, commands.opaque_terrain_draws);
+    append(2, commands.alpha_tested_terrain_draws);
+    append(3, commands.rich_instance_draws);
+    append(4, commands.transparent_terrain_draws);
+    append(5, commands.debug_draws);
+    append(6, commands.ui_draws);
     auto status = rhi::validate_render_frame_submission_shape(result);
     if (!status) {
         return core::Result<rhi::RenderFrameSubmission>::failure(status.error().code,

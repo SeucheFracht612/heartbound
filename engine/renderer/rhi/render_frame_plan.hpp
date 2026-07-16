@@ -125,6 +125,8 @@ struct RenderDrawCommand {
 
     math::Vec3f camera_relative_origin{};
     RenderIndexType index_type = RenderIndexType::uint32;
+    // Renderer-side stable ordering metadata. Backends deliberately ignore this value.
+    float sort_depth = 0.0F;
 };
 
 struct RenderPassCommands {

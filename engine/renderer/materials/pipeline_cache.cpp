@@ -233,6 +233,8 @@ std::string_view render_phase_name(RenderPhase phase) noexcept {
         return "alpha_tested_terrain";
     case RenderPhase::transparent_terrain:
         return "transparent_terrain";
+    case RenderPhase::fluid_terrain:
+        return "fluid_terrain";
     case RenderPhase::static_instances:
         return "static_instances";
     case RenderPhase::debug:

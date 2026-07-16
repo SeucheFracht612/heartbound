@@ -93,9 +93,30 @@ struct ChunkDrawList {
     std::size_t index_count = 0;
 };
 
+struct TerrainPipelineSet {
+    rhi::RenderResourceHandle opaque;
+    rhi::RenderResourceHandle alpha_tested;
+    rhi::RenderResourceHandle transparent;
+    rhi::RenderResourceHandle fluid;
+
+    TerrainPipelineSet() = default;
+    constexpr TerrainPipelineSet(rhi::RenderResourceHandle opaque_pipeline,
+                                 rhi::RenderResourceHandle alpha_tested_pipeline,
+                                 rhi::RenderResourceHandle transparent_pipeline,
+                                 rhi::RenderResourceHandle fluid_pipeline) noexcept
+        : opaque(opaque_pipeline), alpha_tested(alpha_tested_pipeline),
+          transparent(transparent_pipeline), fluid(fluid_pipeline) {}
+
+    [[nodiscard]] bool is_valid() const noexcept;
+    [[nodiscard]] rhi::RenderResourceHandle
+    for_phase(world::MeshingRenderPhase phase) const noexcept;
+};
+
 class ChunkRenderSystem {
   public:
     ChunkRenderSystem(ChunkGpuCache& cache, rhi::RenderResourceHandle terrain_pipeline,
+                      const world::VoxelPalette* palette, ChunkRenderConfig config);
+    ChunkRenderSystem(ChunkGpuCache& cache, TerrainPipelineSet terrain_pipelines,
                       const world::VoxelPalette* palette, ChunkRenderConfig config);
     ~ChunkRenderSystem();
 
@@ -112,6 +133,7 @@ class ChunkRenderSystem {
     [[nodiscard]] core::Status synchronize(world::WorldState& world, const RenderCamera& camera);
     [[nodiscard]] core::Status
     set_terrain_pipeline(rhi::RenderResourceHandle terrain_pipeline) noexcept;
+    [[nodiscard]] core::Status set_terrain_pipelines(TerrainPipelineSet pipelines) noexcept;
     [[nodiscard]] ChunkDrawList build_draw_list(const RenderCamera& camera);
     [[nodiscard]] ChunkDrawList
     build_draw_list(const RenderCamera& camera,
@@ -186,7 +208,7 @@ class ChunkRenderSystem {
     void refresh_timing_stats() noexcept;
 
     ChunkGpuCache* cache_ = nullptr;
-    rhi::RenderResourceHandle terrain_pipeline_;
+    TerrainPipelineSet terrain_pipelines_;
     const world::VoxelPalette* palette_ = nullptr;
     ChunkRenderConfig config_{};
     std::vector<PendingMesh> pending_meshes_;

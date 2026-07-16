@@ -16,6 +16,7 @@
 #include "engine/world/world_state.hpp"
 
 #include <chrono>
+#include <array>
 #include <memory>
 #include <span>
 #include <vector>
@@ -74,8 +75,8 @@ class Renderer {
     void update_backend_stats(const rhi::RenderFrameStats& frame) noexcept;
 
     std::unique_ptr<rhi::IRenderDevice> device_;
-    rhi::RenderResourceHandle terrain_pipeline_;
-    GraphicsPipelineKey terrain_pipeline_key_{};
+    TerrainPipelineSet terrain_pipelines_{};
+    std::array<GraphicsPipelineKey, 4> terrain_pipeline_keys_{};
     ShaderProgramHandle terrain_shader_program_;
     TextureHandle terrain_texture_array_;
     rhi::RenderResourceHandle terrain_sampler_;
@@ -88,7 +89,8 @@ class Renderer {
     std::unique_ptr<ChunkRenderSystem> chunk_system_;
     std::unique_ptr<FrameBuilder> frame_builder_;
     profiling::CpuTimingRecorder cpu_timings_{};
-    std::vector<rhi::RenderDrawCommand> draw_command_scratch_;
+    std::vector<rhi::RenderDrawCommand> chunk_draw_scratch_;
+    RenderCommandLists draw_command_scratch_;
     RendererStats stats_{};
     std::chrono::steady_clock::time_point frame_started_at_{};
     bool frame_timing_active_ = false;

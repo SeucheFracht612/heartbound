@@ -136,10 +136,37 @@ std::size_t ChunkRenderSystem::PendingUpload::byte_size() const noexcept {
            mesh.indices.size() * sizeof(std::uint32_t);
 }
 
+bool TerrainPipelineSet::is_valid() const noexcept {
+    return opaque.is_valid() && alpha_tested.is_valid() && transparent.is_valid() &&
+           fluid.is_valid();
+}
+
+rhi::RenderResourceHandle
+TerrainPipelineSet::for_phase(world::MeshingRenderPhase phase) const noexcept {
+    switch (phase) {
+    case world::MeshingRenderPhase::opaque:
+        return opaque;
+    case world::MeshingRenderPhase::alpha_tested:
+        return alpha_tested;
+    case world::MeshingRenderPhase::transparent:
+        return transparent;
+    case world::MeshingRenderPhase::fluid:
+        return fluid;
+    }
+    return {};
+}
+
 ChunkRenderSystem::ChunkRenderSystem(ChunkGpuCache& cache,
                                      rhi::RenderResourceHandle terrain_pipeline,
                                      const world::VoxelPalette* palette, ChunkRenderConfig config)
-    : cache_(&cache), terrain_pipeline_(terrain_pipeline), palette_(palette), config_(config) {}
+    : ChunkRenderSystem(cache,
+                        TerrainPipelineSet{terrain_pipeline, terrain_pipeline, terrain_pipeline,
+                                           terrain_pipeline},
+                        palette, config) {}
+
+ChunkRenderSystem::ChunkRenderSystem(ChunkGpuCache& cache, TerrainPipelineSet terrain_pipelines,
+                                     const world::VoxelPalette* palette, ChunkRenderConfig config)
+    : cache_(&cache), terrain_pipelines_(terrain_pipelines), palette_(palette), config_(config) {}
 
 ChunkRenderSystem::~ChunkRenderSystem() {
     shutdown();
@@ -255,7 +282,7 @@ core::Status ChunkRenderSystem::synchronize(world::WorldState& world, const Rend
             return status;
         }
     }
-    if (!terrain_pipeline_.is_valid()) {
+    if (!terrain_pipelines_.is_valid()) {
         return core::Status::failure("renderer.invalid_terrain_pipeline",
                                      "chunk render system requires a terrain pipeline");
     }
@@ -312,7 +339,17 @@ ChunkRenderSystem::set_terrain_pipeline(rhi::RenderResourceHandle terrain_pipeli
         return core::Status::failure("chunk_render_system.invalid_terrain_pipeline",
                                      "terrain pipeline handle must be valid");
     }
-    terrain_pipeline_ = terrain_pipeline;
+    terrain_pipelines_ =
+        {terrain_pipeline, terrain_pipeline, terrain_pipeline, terrain_pipeline};
+    return core::Status::ok();
+}
+
+core::Status ChunkRenderSystem::set_terrain_pipelines(TerrainPipelineSet pipelines) noexcept {
+    if (!pipelines.is_valid()) {
+        return core::Status::failure("chunk_render_system.invalid_terrain_pipelines",
+                                     "all terrain phase pipeline handles must be valid");
+    }
+    terrain_pipelines_ = pipelines;
     return core::Status::ok();
 }
 
@@ -372,7 +409,7 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
                 rhi::render_index_type_size(visible.entry->mesh.index_type));
             for (const auto& section : visible.entry->mesh.sections) {
                 rhi::RenderDrawCommand draw;
-                draw.pipeline = terrain_pipeline_;
+                draw.pipeline = terrain_pipelines_.for_phase(section.render_phase);
                 draw.vertex_buffer = visible.entry->mesh.vertices.buffer;
                 draw.index_buffer = visible.entry->mesh.indices.buffer;
                 draw.index_count = section.index_count;
@@ -382,13 +419,35 @@ ChunkRenderSystem::build_draw_list(const RenderCamera& camera,
                 draw.instance_count = 1;
                 draw.camera_relative_origin = visible.origin;
                 draw.index_type = visible.entry->mesh.index_type;
+                const auto center = visible.origin +
+                                    (visible.entry->local_bounds.min +
+                                     visible.entry->local_bounds.max) *
+                                        0.5F;
+                draw.sort_depth = math::length_squared(center - camera.local_position);
                 result.draws.push_back(draw);
             }
             result.vertex_count += visible.entry->mesh.vertex_count;
             result.index_count += visible.entry->mesh.index_count;
         }
-        std::ranges::stable_sort(result.draws, [](const rhi::RenderDrawCommand& left,
-                                                  const rhi::RenderDrawCommand& right) {
+        const auto phase_rank = [this](rhi::RenderResourceHandle pipeline) {
+            if (pipeline == terrain_pipelines_.opaque) {
+                return 0;
+            }
+            if (pipeline == terrain_pipelines_.alpha_tested) {
+                return 1;
+            }
+            return 2;
+        };
+        std::ranges::stable_sort(result.draws, [&](const rhi::RenderDrawCommand& left,
+                                                   const rhi::RenderDrawCommand& right) {
+            const auto left_phase = phase_rank(left.pipeline);
+            const auto right_phase = phase_rank(right.pipeline);
+            if (left_phase != right_phase) {
+                return left_phase < right_phase;
+            }
+            if (left_phase == 2 && left.sort_depth != right.sort_depth) {
+                return left.sort_depth > right.sort_depth;
+            }
             return left.pipeline.value < right.pipeline.value;
         });
     }

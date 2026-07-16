@@ -518,6 +518,10 @@ core::Status validate_render_frame_submission_shape(const RenderFrameSubmission&
                 return core::Status::failure("renderer.draw_index_range_overflow",
                                              "render draw index range overflows uint32");
             }
+            if (!std::isfinite(draw.sort_depth)) {
+                return core::Status::failure("renderer.invalid_draw_sort_depth",
+                                             "render draw sort depth must be finite");
+            }
             if (draw.instance_count == 0) {
                 return core::Status::failure("renderer.invalid_instance_count",
                                              "render draw instance count must be non-zero");

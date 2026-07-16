@@ -160,6 +160,50 @@ void test_chunk_gpu_cache_lifecycle() {
     assert(device.value()->live_resource_count() == baseline_resources);
 }
 
+void test_chunk_draws_use_phase_pipelines_and_transparent_ordering() {
+    using namespace heartstead;
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+    renderer::ChunkGpuCache cache(*device.value());
+    assert(cache.initialize());
+
+    constexpr renderer::TerrainPipelineSet pipelines{{101}, {102}, {103}, {104}};
+    renderer::ChunkRenderConfig config;
+    renderer::ChunkRenderSystem chunks(cache, pipelines, nullptr, config);
+    assert(chunks.initialize());
+
+    const world::ChunkIdentity identity{{0, 0, 0}, 1};
+    assert(cache.insert(identity));
+    const std::array<renderer::terrain::GpuChunkVertex, 4> vertices{};
+    const std::array<std::uint32_t, 12> indices{0, 1, 2, 0, 2, 3, 0, 1, 2, 0, 2, 3};
+    const std::array<world::ChunkMeshSection, 4> sections{
+        world::ChunkMeshSection{1, world::MeshingRenderPhase::opaque, 0, 3},
+        world::ChunkMeshSection{2, world::MeshingRenderPhase::alpha_tested, 3, 3},
+        world::ChunkMeshSection{3, world::MeshingRenderPhase::transparent, 6, 3},
+        world::ChunkMeshSection{4, world::MeshingRenderPhase::fluid, 9, 3},
+    };
+    assert(cache.replace_mesh(identity, 1, {{0.0F, 0.0F, 0.0F}, {1.0F, 1.0F, 1.0F}},
+                              vertices, indices, 1, {}, sections));
+
+    renderer::RenderCamera camera;
+    camera.floating_origin.block = {16, 16, 64};
+    camera.aspect_ratio = 1.0F;
+    camera.far_plane = 256.0F;
+    assert(camera.update_matrices());
+    const auto draws = chunks.build_draw_list(camera);
+    assert(draws.draws.size() == 4);
+    assert(draws.draws[0].pipeline == pipelines.opaque);
+    assert(draws.draws[1].pipeline == pipelines.alpha_tested);
+    assert(draws.draws[2].pipeline == pipelines.transparent);
+    assert(draws.draws[3].pipeline == pipelines.fluid);
+    assert(draws.draws[2].sort_depth > 0.0F);
+    assert(draws.draws[3].sort_depth == draws.draws[2].sort_depth);
+
+    chunks.shutdown();
+    assert(cache.shutdown());
+}
+
 void test_chunk_render_distances_and_residency_hysteresis() {
     using namespace heartstead;
     renderer::rhi::RenderDeviceDesc device_desc;
@@ -569,9 +613,9 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(retained_renderer.is_initialized());
     assert(retained_renderer.device() != nullptr);
     const auto initialized_resource_count = retained_renderer.device()->live_resource_count();
-    // Two shader modules, one pipeline, four fallback textures, one terrain texture array,
+    // Two shader modules, four phase pipelines, four fallback textures, one terrain texture array,
     // one shared sampler, and one GPU material-table buffer.
-    assert(initialized_resource_count == 10);
+    assert(initialized_resource_count == 13);
 
     auto invalid_spirv = test_spirv;
     invalid_spirv[0] = 0;
@@ -605,6 +649,7 @@ void test_renderer_frontend_submits_headless_frames() {
     auto first_frame = retained_renderer.render(camera);
     assert(first_frame);
     assert(first_frame.value().draw_count == 1);
+    assert(first_frame.value().render_pass_count == 8);
     assert(first_frame.value().indexed_draw_count == 1);
     assert(first_frame.value().pipeline_bind_count == 1);
     assert(first_frame.value().total_indices > 0);
@@ -633,7 +678,7 @@ void test_renderer_frontend_submits_headless_frames() {
     assert(renderer_stats.pipeline_switches == 1);
     assert(renderer_stats.resident_textures == 5);
     assert(renderer_stats.runtime_materials == 255);
-    assert(renderer_stats.resident_pipelines == 1);
+    assert(renderer_stats.resident_pipelines == 4);
     assert(renderer_stats.resident_texture_bytes > 0);
     assert(renderer_stats.vertices > 0);
     assert(renderer_stats.triangles > 0);
@@ -675,6 +720,7 @@ int main() {
     test_scoped_cpu_timing_zones();
     test_frustum_aabb_culling();
     test_chunk_gpu_cache_lifecycle();
+    test_chunk_draws_use_phase_pipelines_and_transparent_ordering();
     test_chunk_gpu_cache_batches_device_local_arena_uploads();
     test_chunk_render_distances_and_residency_hysteresis();
     test_chunk_gpu_residency_budget_prefers_near_visible_meshes();

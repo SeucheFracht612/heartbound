@@ -121,7 +121,7 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
         (void)shutdown();
         return core::Status::failure(error.code, error.message);
     }
-    chunk_system_ = std::make_unique<ChunkRenderSystem>(*chunk_cache_, terrain_pipeline_,
+    chunk_system_ = std::make_unique<ChunkRenderSystem>(*chunk_cache_, terrain_pipelines_,
                                                         desc.voxel_palette, desc.chunk_config);
     auto chunk_system_status = chunk_system_->initialize();
     if (!chunk_system_status) {
@@ -135,7 +135,8 @@ core::Status Renderer::initialize(RendererInitDesc desc) {
 
 core::Status Renderer::shutdown() {
     core::Status first_failure = core::Status::ok();
-    draw_command_scratch_.clear();
+    chunk_draw_scratch_.clear();
+    draw_command_scratch_ = {};
     frame_builder_.reset();
     chunk_system_.reset();
     if (chunk_cache_ != nullptr) {
@@ -171,8 +172,8 @@ core::Status Renderer::shutdown() {
         remember_failure(shader_manager_->shutdown());
         shader_manager_.reset();
     }
-    terrain_pipeline_ = {};
-    terrain_pipeline_key_ = {};
+    terrain_pipelines_ = {};
+    terrain_pipeline_keys_ = {};
     terrain_shader_program_ = {};
     terrain_texture_array_ = {};
     terrain_sampler_ = {};
@@ -238,12 +239,27 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
     {
         profiling::ScopedCpuTimingZone extraction_zone(cpu_timings_,
                                                        profiling::CpuTimingZone::render_extraction);
-        draws = chunk_system_->build_draw_list(camera, std::move(draw_command_scratch_));
+        draws = chunk_system_->build_draw_list(camera, std::move(chunk_draw_scratch_));
     }
+    chunk_draw_scratch_ = std::move(draws.draws);
     RenderCommandLists command_lists;
-    command_lists.world_draws = std::move(draws.draws);
-    if (command_lists.world_draws.empty()) {
-        draw_command_scratch_ = std::move(command_lists.world_draws);
+    command_lists.opaque_terrain_draws =
+        std::move(draw_command_scratch_.opaque_terrain_draws);
+    command_lists.alpha_tested_terrain_draws =
+        std::move(draw_command_scratch_.alpha_tested_terrain_draws);
+    command_lists.transparent_terrain_draws =
+        std::move(draw_command_scratch_.transparent_terrain_draws);
+    command_lists.opaque_terrain_draws.clear();
+    command_lists.alpha_tested_terrain_draws.clear();
+    command_lists.transparent_terrain_draws.clear();
+    for (auto& draw : chunk_draw_scratch_) {
+        if (draw.pipeline == terrain_pipelines_.opaque) {
+            command_lists.opaque_terrain_draws.push_back(draw);
+        } else if (draw.pipeline == terrain_pipelines_.alpha_tested) {
+            command_lists.alpha_tested_terrain_draws.push_back(draw);
+        } else {
+            command_lists.transparent_terrain_draws.push_back(draw);
+        }
     }
     auto frame = [&]() {
         profiling::ScopedCpuTimingZone command_zone(cpu_timings_,
@@ -255,8 +271,30 @@ core::Result<rhi::RenderFrameStats> Renderer::render(const RenderCamera& camera)
                                                             frame.error().message);
     }
     auto executed = device_->execute_frame(frame.value());
-    if (!frame.value().pass_commands.empty()) {
-        draw_command_scratch_ = std::move(frame.value().pass_commands.front().draws);
+    draw_command_scratch_ = {};
+    for (auto& pass : frame.value().pass_commands) {
+        switch (pass.pass_index) {
+        case 1:
+            draw_command_scratch_.opaque_terrain_draws = std::move(pass.draws);
+            break;
+        case 2:
+            draw_command_scratch_.alpha_tested_terrain_draws = std::move(pass.draws);
+            break;
+        case 3:
+            draw_command_scratch_.rich_instance_draws = std::move(pass.draws);
+            break;
+        case 4:
+            draw_command_scratch_.transparent_terrain_draws = std::move(pass.draws);
+            break;
+        case 5:
+            draw_command_scratch_.debug_draws = std::move(pass.draws);
+            break;
+        case 6:
+            draw_command_scratch_.ui_draws = std::move(pass.draws);
+            break;
+        default:
+            break;
+        }
     }
     if (!executed) {
         frame_timing_active_ = false;
@@ -301,18 +339,22 @@ core::Status Renderer::reload_terrain_shaders(std::span<const std::uint32_t> ver
     if (!status) {
         return status;
     }
-    auto rebuilt = pipeline_cache_->find(terrain_pipeline_key_);
-    if (!rebuilt) {
-        return core::Status::failure(rebuilt.error().code, rebuilt.error().message);
+    std::array<rhi::RenderResourceHandle, 4> rebuilt{};
+    for (std::size_t index = 0; index < terrain_pipeline_keys_.size(); ++index) {
+        auto pipeline = pipeline_cache_->find(terrain_pipeline_keys_[index]);
+        if (!pipeline) {
+            return core::Status::failure(pipeline.error().code, pipeline.error().message);
+        }
+        rebuilt[index] = pipeline.value();
     }
-    terrain_pipeline_ = rebuilt.value();
-    return chunk_system_->set_terrain_pipeline(terrain_pipeline_);
+    terrain_pipelines_ = {rebuilt[0], rebuilt[1], rebuilt[2], rebuilt[3]};
+    return chunk_system_->set_terrain_pipelines(terrain_pipelines_);
 }
 
 bool Renderer::is_initialized() const noexcept {
     return device_ != nullptr && chunk_cache_ != nullptr && chunk_system_ != nullptr &&
            frame_builder_ != nullptr && shader_manager_ != nullptr && texture_manager_ != nullptr &&
-           material_cache_ != nullptr && pipeline_cache_ != nullptr && terrain_pipeline_.is_valid();
+           material_cache_ != nullptr && pipeline_cache_ != nullptr && terrain_pipelines_.is_valid();
 }
 
 const ChunkRenderStats& Renderer::chunk_stats() const noexcept {
@@ -497,6 +539,29 @@ core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> ve
         runtime_material.side_texture = 1U + (static_cast<std::uint32_t>(type) - 1U) % 6U;
         runtime_material.top_texture = runtime_material.side_texture;
         runtime_material.bottom_texture = runtime_material.side_texture;
+        if (voxel_palette != nullptr) {
+            const auto* definition = voxel_palette->find_by_type(type);
+            if (definition != nullptr) {
+                const auto& model = voxel_palette->model_for(*definition);
+                if (definition->logical_occupancy == world::BlockLogicalOccupancy::fluid) {
+                    runtime_material.flags =
+                        runtime_material.flags | VoxelMaterialFlags::translucent;
+                    runtime_material.base_color[3] = 0.68F;
+                    runtime_material.roughness = 0.2F;
+                }
+                if (model.kind == world::BlockModelKind::cross_plane) {
+                    runtime_material.flags =
+                        runtime_material.flags | VoxelMaterialFlags::alpha_tested |
+                        VoxelMaterialFlags::two_sided;
+                }
+                if (definition->light_emission > 0) {
+                    runtime_material.flags =
+                        runtime_material.flags | VoxelMaterialFlags::emissive;
+                    runtime_material.emissive_strength =
+                        static_cast<float>(definition->light_emission) / 255.0F;
+                }
+            }
+        }
         auto inserted = material_cache_->upsert(std::move(runtime_material));
         if (!inserted) {
             return core::Status::failure(inserted.error().code, inserted.error().message);
@@ -527,7 +592,7 @@ core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> ve
 
     rhi::RenderGraphicsPipelineDesc pipeline;
     pipeline.material_id = material.value();
-    pipeline.debug_name = "terrain_pipeline";
+    pipeline.debug_name = "opaque_terrain_pipeline";
     pipeline.vertex_stride = sizeof(terrain::GpuChunkVertex);
     pipeline.vertex_attributes.assign(terrain::gpu_chunk_vertex_attributes.begin(),
                                       terrain::gpu_chunk_vertex_attributes.end());
@@ -541,15 +606,56 @@ core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> ve
     pipeline.blend_mode = rhi::RenderBlendMode::disabled;
     pipeline.color_target_format = rhi::RenderImageFormat::rgba8_unorm;
     pipeline.depth_target_format = rhi::RenderImageFormat::d32_sfloat;
-    terrain_pipeline_key_ = {};
-    terrain_pipeline_key_.shader_program = terrain_shader_program_;
-    terrain_pipeline_key_.vertex_layout =
+    const auto vertex_layout =
         hash_vertex_layout(pipeline.vertex_stride, pipeline.vertex_attributes);
-    auto pipeline_result = pipeline_cache_->prewarm(terrain_pipeline_key_, layout, pipeline);
-    if (!pipeline_result) {
-        return core::Status::failure(pipeline_result.error().code, pipeline_result.error().message);
+    const auto prewarm = [&](std::size_t index, RenderPhase phase,
+                             rhi::RenderGraphicsPipelineDesc phase_pipeline)
+        -> core::Result<rhi::RenderResourceHandle> {
+        GraphicsPipelineKey key;
+        key.shader_program = terrain_shader_program_;
+        key.vertex_layout = vertex_layout;
+        key.render_phase = phase;
+        key.color_format = phase_pipeline.color_target_format;
+        key.depth_format = phase_pipeline.depth_target_format;
+        key.cull_mode = phase_pipeline.cull_mode;
+        key.front_face = phase_pipeline.front_face;
+        key.depth_test = phase_pipeline.depth_test_enable;
+        key.depth_write = phase_pipeline.depth_write_enable;
+        key.depth_compare = phase_pipeline.depth_compare;
+        key.blend_mode = phase_pipeline.blend_mode;
+        terrain_pipeline_keys_[index] = key;
+        return pipeline_cache_->prewarm(key, layout, std::move(phase_pipeline));
+    };
+
+    auto opaque = prewarm(0, RenderPhase::opaque_terrain, pipeline);
+    if (!opaque) {
+        return core::Status::failure(opaque.error().code, opaque.error().message);
     }
-    terrain_pipeline_ = pipeline_result.value();
+    auto alpha_pipeline = pipeline;
+    alpha_pipeline.debug_name = "alpha_tested_terrain_pipeline";
+    alpha_pipeline.cull_mode = rhi::RenderCullMode::none;
+    auto alpha = prewarm(1, RenderPhase::alpha_tested_terrain, std::move(alpha_pipeline));
+    if (!alpha) {
+        return core::Status::failure(alpha.error().code, alpha.error().message);
+    }
+    auto transparent_pipeline = pipeline;
+    transparent_pipeline.debug_name = "transparent_terrain_pipeline";
+    transparent_pipeline.depth_write_enable = false;
+    transparent_pipeline.blend_mode = rhi::RenderBlendMode::alpha;
+    auto transparent =
+        prewarm(2, RenderPhase::transparent_terrain, std::move(transparent_pipeline));
+    if (!transparent) {
+        return core::Status::failure(transparent.error().code, transparent.error().message);
+    }
+    auto fluid_pipeline = pipeline;
+    fluid_pipeline.debug_name = "fluid_terrain_pipeline";
+    fluid_pipeline.depth_write_enable = false;
+    fluid_pipeline.blend_mode = rhi::RenderBlendMode::alpha;
+    auto fluid = prewarm(3, RenderPhase::fluid_terrain, std::move(fluid_pipeline));
+    if (!fluid) {
+        return core::Status::failure(fluid.error().code, fluid.error().message);
+    }
+    terrain_pipelines_ = {opaque.value(), alpha.value(), transparent.value(), fluid.value()};
 
     const rhi::RenderDescriptorWrite texture_write{
         material.value(), "terrain_textures", texture_view->image, 0, 0, terrain_sampler_};

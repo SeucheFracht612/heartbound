@@ -16,6 +16,7 @@ enum class RenderPhase : std::uint8_t {
     opaque_terrain,
     alpha_tested_terrain,
     transparent_terrain,
+    fluid_terrain,
     static_instances,
     debug,
     ui,
