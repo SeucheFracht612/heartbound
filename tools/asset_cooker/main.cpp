@@ -5,6 +5,7 @@
 #include "engine/assets/resource_pack.hpp"
 #include "engine/assets/virtual_file_system.hpp"
 #include "engine/core/logging.hpp"
+#include "engine/core/process_entry.hpp"
 #include "engine/debug/inspection.hpp"
 #include "engine/modding/mod_discovery.hpp"
 
@@ -39,10 +40,10 @@ bool parse_backend(std::string_view value, heartstead::assets::AssetCookBackend&
     return false;
 }
 
-void print_usage(const char* executable) {
-    std::cerr << "usage: " << executable
-              << " [source_root] [asset_manifest_path] [development|production] [--inspect]\n"
-              << "       " << executable << " --inspect-store <cooked_root> [asset_manifest.txt]\n";
+void print_usage(const char* executable, std::ostream& output) {
+    output << "usage: " << executable
+           << " [source_root] [asset_manifest_path] [development|production] [--inspect]\n"
+           << "       " << executable << " --inspect-store <cooked_root> [asset_manifest.txt]\n";
 }
 
 int inspect_store(const std::filesystem::path& root,
@@ -61,151 +62,162 @@ int inspect_store(const std::filesystem::path& root,
 } // namespace
 
 int main(int argc, char** argv) {
-    using namespace heartstead;
+    return heartstead::core::run_process_entry(argv[0], [argc, argv] {
+        using namespace heartstead;
 
-    if (argc >= 2 && std::string_view(argv[1]) == "--inspect-store") {
-        if (argc < 3 || argc > 4) {
-            print_usage(argv[0]);
-            return 2;
+        if (argc == 2 &&
+            (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
+            print_usage(argv[0], std::cout);
+            return 0;
         }
-        const std::filesystem::path manifest_relative_path =
-            argc >= 4 ? std::filesystem::path(argv[3])
-                      : std::filesystem::path("asset_manifest.txt");
-        return inspect_store(argv[2], manifest_relative_path);
-    }
-
-    auto source_root = std::filesystem::path(HEARTSTEAD_SOURCE_ROOT);
-    std::filesystem::path output_path;
-    assets::AssetCookBackend cook_backend = assets::AssetCookBackend::development_passthrough;
-    bool inspect_after_cook = false;
-    auto positional_count = 0;
-    for (int index = 1; index < argc; ++index) {
-        const auto argument = std::string_view(argv[index]);
-        if (argument == "--inspect") {
-            inspect_after_cook = true;
-            continue;
-        }
-        if (argument.starts_with("--")) {
-            print_usage(argv[0]);
-            return 2;
+        if (argc >= 2 && std::string_view(argv[1]) == "--inspect-store") {
+            if (argc < 3 || argc > 4) {
+                print_usage(argv[0], std::cerr);
+                return 2;
+            }
+            const std::filesystem::path manifest_relative_path =
+                argc >= 4 ? std::filesystem::path(argv[3])
+                          : std::filesystem::path("asset_manifest.txt");
+            return inspect_store(argv[2], manifest_relative_path);
         }
 
-        switch (positional_count) {
-        case 0:
-            source_root = std::filesystem::path(argv[index]);
-            break;
-        case 1:
-            output_path = std::filesystem::path(argv[index]);
-            break;
-        case 2:
-            if (!parse_backend(argument, cook_backend)) {
-                core::log(core::LogLevel::error,
-                          "unknown asset cook backend: " + std::string(argument) +
-                              " (expected development or production)");
+        auto source_root = std::filesystem::path(HEARTSTEAD_SOURCE_ROOT);
+        std::filesystem::path output_path;
+        assets::AssetCookBackend cook_backend = assets::AssetCookBackend::development_passthrough;
+        bool inspect_after_cook = false;
+        auto positional_count = 0;
+        for (int index = 1; index < argc; ++index) {
+            const auto argument = std::string_view(argv[index]);
+            if (argument == "--inspect") {
+                inspect_after_cook = true;
+                continue;
+            }
+            if (argument.starts_with("--")) {
+                print_usage(argv[0], std::cerr);
+                return 2;
+            }
+
+            switch (positional_count) {
+            case 0:
+                source_root = std::filesystem::path(argv[index]);
+                break;
+            case 1:
+                output_path = std::filesystem::path(argv[index]);
+                break;
+            case 2:
+                if (!parse_backend(argument, cook_backend)) {
+                    core::log(core::LogLevel::error,
+                              "unknown asset cook backend: " + std::string(argument) +
+                                  " (expected development or production)");
+                    return 2;
+                }
+                break;
+            default:
+                print_usage(argv[0], std::cerr);
+                return 2;
+            }
+            ++positional_count;
+        }
+        if (output_path.empty()) {
+            output_path = source_root / "build" / "cooked_assets" / "asset_manifest.txt";
+        }
+
+        const auto mods_root = source_root / "mods";
+        const auto resource_packs_root = source_root / "resource_packs";
+
+        assets::AssetCatalog catalog;
+
+        modding::ModDiscoverer mod_discoverer;
+        auto mods = mod_discoverer.discover(mods_root);
+        for (const auto& diagnostic : mods.diagnostics) {
+            log_diagnostic(diagnostic);
+        }
+        if (mods.has_errors()) {
+            return 1;
+        }
+
+        for (const auto& mod : mods.mods) {
+            const auto assets_root = mod.root / "assets";
+            auto indexed = assets::AssetCatalogBuilder::index_directory(
+                catalog, assets_root, mod.id, assets::AssetSourceKind::mod, mod.id, 0);
+            for (const auto& diagnostic : indexed.diagnostics) {
+                log_diagnostic(diagnostic);
+            }
+            if (indexed.has_errors()) {
                 return 1;
             }
-            break;
-        default:
-            print_usage(argv[0]);
-            return 2;
         }
-        ++positional_count;
-    }
-    if (output_path.empty()) {
-        output_path = source_root / "build" / "cooked_assets" / "asset_manifest.txt";
-    }
 
-    const auto mods_root = source_root / "mods";
-    const auto resource_packs_root = source_root / "resource_packs";
-
-    assets::AssetCatalog catalog;
-
-    modding::ModDiscoverer mod_discoverer;
-    auto mods = mod_discoverer.discover(mods_root);
-    for (const auto& diagnostic : mods.diagnostics) {
-        log_diagnostic(diagnostic);
-    }
-    if (mods.has_errors()) {
-        return 1;
-    }
-
-    for (const auto& mod : mods.mods) {
-        const auto assets_root = mod.root / "assets";
-        auto indexed = assets::AssetCatalogBuilder::index_directory(
-            catalog, assets_root, mod.id, assets::AssetSourceKind::mod, mod.id, 0);
-        for (const auto& diagnostic : indexed.diagnostics) {
+        assets::ResourcePackDiscoverer pack_discoverer;
+        auto packs = pack_discoverer.discover(resource_packs_root);
+        for (const auto& diagnostic : packs.diagnostics) {
             log_diagnostic(diagnostic);
         }
-        if (indexed.has_errors()) {
+        if (packs.has_errors()) {
             return 1;
         }
-    }
 
-    assets::ResourcePackDiscoverer pack_discoverer;
-    auto packs = pack_discoverer.discover(resource_packs_root);
-    for (const auto& diagnostic : packs.diagnostics) {
-        log_diagnostic(diagnostic);
-    }
-    if (packs.has_errors()) {
-        return 1;
-    }
-
-    auto pack_plan = assets::ResourcePackLoadPlanner::plan(packs.packs);
-    if (!pack_plan) {
-        core::log(core::LogLevel::error, pack_plan.error().message);
-        return 1;
-    }
-
-    for (const auto& entry : pack_plan.value().entries) {
-        const auto assets_root = entry.manifest.root / "assets";
-        auto indexed = assets::AssetCatalogBuilder::index_directory(
-            catalog, assets_root, entry.manifest.target_namespace,
-            assets::AssetSourceKind::resource_pack, entry.manifest.id, entry.asset_priority);
-        for (const auto& diagnostic : indexed.diagnostics) {
-            log_diagnostic(diagnostic);
-        }
-        if (indexed.has_errors()) {
+        auto pack_plan = assets::ResourcePackLoadPlanner::plan(packs.packs);
+        if (!pack_plan) {
+            core::log(core::LogLevel::error, pack_plan.error().message);
             return 1;
         }
-    }
 
-    assets::AssetCookConfig cook_config;
-    cook_config.backend = cook_backend;
-    cook_config.output_root = output_path.parent_path();
-    cook_config.manifest_relative_path = output_path.filename();
-    const auto backend_info = assets::asset_cook_backend_info(cook_config.backend);
-    core::log(core::LogLevel::info, "Asset cook backend: " + std::string(backend_info.name) + " (" +
-                                        std::string(backend_info.status) + ")");
+        for (const auto& entry : pack_plan.value().entries) {
+            const auto assets_root = entry.manifest.root / "assets";
+            auto indexed = assets::AssetCatalogBuilder::index_directory(
+                catalog, assets_root, entry.manifest.target_namespace,
+                assets::AssetSourceKind::resource_pack, entry.manifest.id, entry.asset_priority);
+            for (const auto& diagnostic : indexed.diagnostics) {
+                log_diagnostic(diagnostic);
+            }
+            if (indexed.has_errors()) {
+                return 1;
+            }
+        }
 
-    auto cooked = assets::AssetCooker::cook(catalog, cook_config);
-    if (!cooked) {
-        core::log(core::LogLevel::error, cooked.error().message);
-        return 1;
-    }
-    auto store =
-        assets::CookedAssetStore::load(cook_config.output_root, cook_config.manifest_relative_path);
-    if (!store) {
-        core::log(core::LogLevel::error, store.error().message);
-        return 1;
-    }
+        assets::AssetCookConfig cook_config;
+        cook_config.backend = cook_backend;
+        cook_config.output_root = output_path.parent_path();
+        if (cook_config.output_root.empty()) {
+            cook_config.output_root = ".";
+        }
+        cook_config.manifest_relative_path = output_path.filename();
+        const auto backend_info = assets::asset_cook_backend_info(cook_config.backend);
+        core::log(core::LogLevel::info, "Asset cook backend: " + std::string(backend_info.name) +
+                                            " (" + std::string(backend_info.status) + ")");
 
-    core::log(core::LogLevel::info,
-              "Cooked assets: " + std::to_string(cooked.value().cooked_file_count) + " files, " +
-                  std::to_string(cooked.value().cooked_payload_bytes) + " source bytes");
-    core::log(core::LogLevel::info,
-              "Cooked asset manifest: " + std::to_string(cooked.value().manifest.records.size()) +
-                  " records, " + std::to_string(cooked.value().manifest.active_count()) +
-                  " active");
-    core::log(core::LogLevel::info, "Verified cooked asset store: " +
-                                        std::to_string(store.value().manifest().records.size()) +
-                                        " records");
-    if (inspect_after_cook) {
-        const auto inspection = debug::Inspector::inspect(store.value());
-        std::cout << debug::Inspector::render_text(inspection);
-        if (inspection.has_errors()) {
+        auto cooked = assets::AssetCooker::cook(catalog, cook_config);
+        if (!cooked) {
+            core::log(core::LogLevel::error, cooked.error().message);
             return 1;
         }
-    }
-    core::log(core::LogLevel::info, "Wrote " + cooked.value().manifest_path.string());
-    return 0;
+        auto store = assets::CookedAssetStore::load(cook_config.output_root,
+                                                    cook_config.manifest_relative_path);
+        if (!store) {
+            core::log(core::LogLevel::error, store.error().message);
+            return 1;
+        }
+
+        core::log(core::LogLevel::info,
+                  "Cooked assets: " + std::to_string(cooked.value().cooked_file_count) +
+                      " files, " + std::to_string(cooked.value().cooked_payload_bytes) +
+                      " source bytes");
+        core::log(
+            core::LogLevel::info,
+            "Cooked asset manifest: " + std::to_string(cooked.value().manifest.records.size()) +
+                " records, " + std::to_string(cooked.value().manifest.active_count()) + " active");
+        core::log(core::LogLevel::info,
+                  "Verified cooked asset store: " +
+                      std::to_string(store.value().manifest().records.size()) + " records");
+        if (inspect_after_cook) {
+            const auto inspection = debug::Inspector::inspect(store.value());
+            std::cout << debug::Inspector::render_text(inspection);
+            if (inspection.has_errors()) {
+                return 1;
+            }
+        }
+        core::log(core::LogLevel::info, "Wrote " + cooked.value().manifest_path.string());
+        return 0;
+    });
 }
