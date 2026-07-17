@@ -6,10 +6,13 @@ Implemented foundation:
 
 - `DirtyRegionTracker`
   - records spatial regions that need derived-system rebuild work
-  - merges overlapping or touching regions of the same kind
+  - transitively merges overlapping or one-cell-touching regions of the same kind on all axes,
+    with saturated arithmetic at signed 64-bit coordinate limits
   - supports consuming regions by kind or all at once
   - exposes structured inspection fields for total regions, sequence span, first region, and
     per-kind rebuild counts
+  - preserves the earliest merged region's sequence and first available reason; a merge does not
+    allocate a new sequence or spatially sort the queue
 
 - `DirtyRegionKind`
   - chunk mesh, collision, and lighting rebuilds
@@ -31,7 +34,9 @@ Implemented foundation:
 
 Dirty regions are scheduling metadata. They are not authoritative save data. Chunks,
 build pieces, networks, rooms, and other systems remain separate representations; dirty
-regions only describe which derived outputs need to be rebuilt after mutations.
+regions only describe which derived outputs need to be rebuilt after mutations. Marking a region
+does not execute a rebuild, retry failed work, or deduplicate anything beyond same-kind spatial
+merging. Consumers own those policies.
 
 `WorldState` inspection includes per-kind dirty-region counts so tools can show whether
 chunks, rooms, or specific network graphs need rebuilding without inspecting every system
