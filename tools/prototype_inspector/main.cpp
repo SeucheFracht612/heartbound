@@ -133,12 +133,16 @@ int main(int argc, char** argv) {
         log_kind_summary(report, modding::PrototypeKinds::material);
         log_kind_summary(report, modding::PrototypeKinds::scenario);
 
-        auto prototypes = report.prototypes;
-        std::ranges::sort(prototypes, {}, [](const modding::GenericPrototype& prototype) {
-            return prototype.id.value();
+        std::vector<const modding::GenericPrototype*> prototypes;
+        prototypes.reserve(report.prototypes.size());
+        for (const auto& prototype : report.prototypes) {
+            prototypes.push_back(&prototype);
+        }
+        std::ranges::sort(prototypes, {}, [](const modding::GenericPrototype* prototype) {
+            return prototype->id.value();
         });
-        for (const auto& prototype : prototypes) {
-            core::log(core::LogLevel::info, prototype.id.value() + " [" + prototype.kind + "]");
+        for (const auto* prototype : prototypes) {
+            core::log(core::LogLevel::info, prototype->id.value() + " [" + prototype->kind + "]");
         }
 
         return 0;
