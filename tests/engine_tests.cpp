@@ -6147,6 +6147,30 @@ void test_file_save_database() {
     assert(deltas.value().front().coord.x == far_chunk_coord + 4);
     assert(deltas.value().front().encoded_edit_delta == "only");
 
+    const std::vector<heartstead::save::ChunkEditSaveRecord> invalid_replacement{
+        {{far_chunk_coord + 5, 0, 0}, "would-replace"}, {{far_chunk_coord + 6, 0, 0}, ""}};
+    status = database.write_chunk_deltas(invalid_replacement);
+    assert(!status && status.error().code == "save_database.empty_chunk_delta");
+    deltas = database.read_chunk_deltas();
+    assert(deltas && deltas.value().size() == 1);
+    assert(deltas.value().front().coord.x == far_chunk_coord + 4);
+    assert(deltas.value().front().encoded_edit_delta == "only");
+
+    const std::vector<heartstead::save::ChunkEditSaveRecord> duplicate_replacement{
+        {{far_chunk_coord + 5, 0, 0}, "first"}, {{far_chunk_coord + 5, 0, 0}, "second"}};
+    status = database.write_chunk_deltas(duplicate_replacement);
+    assert(!status && status.error().code == "save_database.duplicate_chunk_delta");
+    deltas = database.read_chunk_deltas();
+    assert(deltas && deltas.value().size() == 1);
+    assert(deltas.value().front().coord.x == far_chunk_coord + 4);
+
+    status = database.write_chunk_deltas({});
+    assert(status);
+    deltas = database.read_chunk_deltas();
+    assert(deltas && deltas.value().empty());
+    loaded = database.read_snapshot();
+    assert(loaded && loaded.value().chunk_edits.empty());
+
     auto missing = database.read_chunk_delta({99, 0, 0});
     assert(!missing);
     assert(!database.write_chunk_delta({{0, 0, 0}, ""}));

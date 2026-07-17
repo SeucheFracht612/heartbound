@@ -61,6 +61,14 @@ struct StagedGenerationEntry {
     return chunk_directory(root) / "index.txt";
 }
 
+[[nodiscard]] std::filesystem::path staged_chunk_directory(const std::filesystem::path& root) {
+    return root / "chunks.tmp";
+}
+
+[[nodiscard]] std::filesystem::path backup_chunk_directory(const std::filesystem::path& root) {
+    return root / "chunks.backup";
+}
+
 [[nodiscard]] std::string chunk_filename(world::ChunkCoord coord) {
     return "c_" + std::to_string(coord.x) + "_" + std::to_string(coord.y) + "_" +
            std::to_string(coord.z) + ".delta";
@@ -311,8 +319,9 @@ read_chunk_index(const std::filesystem::path& root) {
     return core::Result<std::vector<ChunkIndexEntry>>::success(std::move(entries));
 }
 
-[[nodiscard]] core::Status write_chunk_index(const std::filesystem::path& root,
-                                             const std::vector<ChunkIndexEntry>& entries) {
+[[nodiscard]] core::Status
+write_chunk_index_to_directory(const std::filesystem::path& directory,
+                               const std::vector<ChunkIndexEntry>& entries) {
     std::ostringstream output;
     output << chunk_index_magic << '\n';
     for (const auto& entry : entries) {
@@ -320,7 +329,21 @@ read_chunk_index(const std::filesystem::path& root) {
                << entry.filename << '\n';
     }
     output << "end\n";
-    return write_text_atomic(chunk_index_path(root), output.str());
+    return write_text_atomic(directory / "index.txt", output.str());
+}
+
+[[nodiscard]] core::Status write_chunk_index(const std::filesystem::path& root,
+                                             const std::vector<ChunkIndexEntry>& entries) {
+    return write_chunk_index_to_directory(chunk_directory(root), entries);
+}
+
+[[nodiscard]] core::Result<bool> has_external_chunk_table(const std::filesystem::path& root) {
+    std::error_code error;
+    const bool exists = std::filesystem::exists(chunk_index_path(root), error);
+    if (error) {
+        return core::Result<bool>::failure("save_database.read_failed", error.message());
+    }
+    return core::Result<bool>::success(exists);
 }
 
 [[nodiscard]] core::Status write_current_generation(const std::filesystem::path& root,
@@ -648,33 +671,22 @@ write_chunk_deltas_to_root(const std::filesystem::path& save_root,
     std::vector<ChunkIndexEntry> entries;
     entries.reserve(chunk_deltas.size());
 
-    auto status =
-        remove_tree(chunk_directory(save_root), "save_database.remove_chunk_table_failed");
-    if (!status) {
-        return status;
-    }
-
     for (const auto& chunk_delta : chunk_deltas) {
         if (chunk_delta.encoded_edit_delta.empty()) {
             return core::Status::failure("save_database.empty_chunk_delta",
                                          "chunk delta payload must not be empty");
         }
         const auto filename = chunk_filename(chunk_delta.coord);
-        status = write_chunk_delta_payload(chunk_directory(save_root) / filename,
-                                           chunk_delta.encoded_edit_delta);
-        if (!status) {
-            return status;
-        }
-
         const auto found =
             std::ranges::find_if(entries, [&chunk_delta](const ChunkIndexEntry& entry) {
                 return same_coord(entry.coord, chunk_delta.coord);
             });
-        if (found == entries.end()) {
-            entries.push_back({chunk_delta.coord, filename});
-        } else {
-            found->filename = filename;
+        if (found != entries.end()) {
+            return core::Status::failure(
+                "save_database.duplicate_chunk_delta",
+                "bulk chunk delta replacement contains a duplicate chunk coordinate");
         }
+        entries.push_back({chunk_delta.coord, filename});
     }
 
     std::ranges::sort(entries, [](const ChunkIndexEntry& left, const ChunkIndexEntry& right) {
@@ -687,7 +699,83 @@ write_chunk_deltas_to_root(const std::filesystem::path& save_root,
         return left.coord.z < right.coord.z;
     });
 
-    return write_chunk_index(save_root, entries);
+    const auto target = chunk_directory(save_root);
+    const auto staged = staged_chunk_directory(save_root);
+    const auto backup = backup_chunk_directory(save_root);
+
+    auto status = remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+    if (!status) {
+        return status;
+    }
+
+    for (const auto& chunk_delta : chunk_deltas) {
+        status = write_chunk_delta_payload(staged / chunk_filename(chunk_delta.coord),
+                                           chunk_delta.encoded_edit_delta);
+        if (!status) {
+            (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+            return status;
+        }
+    }
+    status = write_chunk_index_to_directory(staged, entries);
+    if (!status) {
+        (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+        return status;
+    }
+
+    std::error_code error;
+    bool has_target = std::filesystem::exists(target, error);
+    if (error) {
+        (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+        return filesystem_failure("save_database.commit_chunk_table_failed", error);
+    }
+    const bool has_backup = std::filesystem::exists(backup, error);
+    if (error) {
+        (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+        return filesystem_failure("save_database.commit_chunk_table_failed", error);
+    }
+
+    if (!has_target && has_backup) {
+        status = rename_path(backup, target, "save_database.recover_chunk_table_failed");
+        if (!status) {
+            (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+            return status;
+        }
+        has_target = true;
+    } else if (has_backup) {
+        status = remove_tree(backup, "save_database.remove_chunk_table_backup_failed");
+        if (!status) {
+            (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+            return status;
+        }
+    }
+
+    if (has_target) {
+        status = rename_path(target, backup, "save_database.stage_chunk_table_backup_failed");
+        if (!status) {
+            (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+            return status;
+        }
+    }
+
+    status = rename_path(staged, target, "save_database.commit_chunk_table_failed");
+    if (!status) {
+        if (has_target) {
+            const auto rollback =
+                rename_path(backup, target, "save_database.rollback_chunk_table_failed");
+            if (!rollback) {
+                return core::Status::failure(rollback.error().code,
+                                             status.error().message +
+                                                 "; rollback failed: " + rollback.error().message);
+            }
+        }
+        (void)remove_tree(staged, "save_database.remove_staged_chunk_table_failed");
+        return status;
+    }
+
+    if (has_target) {
+        (void)remove_tree(backup, "save_database.remove_chunk_table_backup_failed");
+    }
+    return core::Status::ok();
 }
 
 } // namespace
@@ -760,12 +848,17 @@ core::Result<SaveSnapshot> FileSaveDatabase::read_snapshot() const {
         return core::Result<SaveSnapshot>::failure(snapshot.error().code, snapshot.error().message);
     }
 
+    auto has_chunk_table = has_external_chunk_table(save_root.value());
+    if (!has_chunk_table) {
+        return core::Result<SaveSnapshot>::failure(has_chunk_table.error().code,
+                                                   has_chunk_table.error().message);
+    }
     auto chunk_deltas = read_chunk_deltas_from_root(save_root.value());
     if (!chunk_deltas) {
         return core::Result<SaveSnapshot>::failure(chunk_deltas.error().code,
                                                    chunk_deltas.error().message);
     }
-    if (!chunk_deltas.value().empty()) {
+    if (has_chunk_table.value()) {
         snapshot.value().chunk_edits = std::move(chunk_deltas).value();
     }
 
