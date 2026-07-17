@@ -218,6 +218,8 @@ core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, 
 
     if (!has_retained_edit) {
         edit_log_.push_back(VoxelEditRecord{chunk_coord, voxel_coord, previous, cell});
+    } else if (retained_edit->previous == cell) {
+        edit_log_.erase(retained_edit);
     } else {
         retained_edit->next = cell;
     }
@@ -454,6 +456,11 @@ core::Status ChunkDatabase::apply_saved_edits_impl(std::span<const VoxelEditReco
 
     const auto canonical_edits = canonicalize_saved_edits(edits);
     auto staged = *this;
+    std::optional<dirty::DirtyRegionTracker> staged_dirty_regions;
+    if (dirty_regions != nullptr) {
+        staged_dirty_regions.emplace(*dirty_regions);
+    }
+    auto* staged_dirty = staged_dirty_regions ? &*staged_dirty_regions : nullptr;
     auto staged_edit_log = staged.build_replaced_saved_edit_history(edits, canonical_edits);
     for (const auto& edit : canonical_edits) {
         auto& chunk = staged.get_or_create(edit.chunk_coord);
@@ -462,14 +469,18 @@ core::Status ChunkDatabase::apply_saved_edits_impl(std::span<const VoxelEditReco
             return status;
         }
 
-        if (dirty_regions != nullptr) {
-            status = staged.mark_chunk_rebuild_regions(*dirty_regions, edit.chunk_coord,
+        if (staged_dirty != nullptr) {
+            status = staged.mark_chunk_rebuild_regions(*staged_dirty, edit.chunk_coord,
                                                        "saved voxel edit delta");
             if (!status) {
                 return status;
             }
         }
-        staged.mark_neighbor_dirty_if_boundary(edit.chunk_coord, edit.voxel_coord, dirty_regions);
+        status =
+            staged.mark_neighbor_dirty_if_boundary(edit.chunk_coord, edit.voxel_coord, staged_dirty);
+        if (!status) {
+            return status;
+        }
     }
 
     // A persisted batch is the canonical full delta for every chunk it names. Replace any
@@ -477,6 +488,9 @@ core::Status ChunkDatabase::apply_saved_edits_impl(std::span<const VoxelEditReco
     staged.edit_log_.swap(staged_edit_log);
     chunks_.swap(staged.chunks_);
     edit_log_.swap(staged.edit_log_);
+    if (staged_dirty_regions) {
+        *dirty_regions = std::move(*staged_dirty_regions);
+    }
     return core::Status::ok();
 }
 
@@ -532,8 +546,9 @@ std::vector<VoxelEditRecord> ChunkDatabase::build_replaced_saved_edit_history(
     return result;
 }
 
-void ChunkDatabase::mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
-                                                    dirty::DirtyRegionTracker* dirty_regions) {
+core::Status
+ChunkDatabase::mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
+                                               dirty::DirtyRegionTracker* dirty_regions) {
     for (const auto neighbor : boundary_neighbors(chunk_coord, voxel_coord)) {
         auto* chunk = find(neighbor);
         if (chunk != nullptr) {
@@ -541,10 +556,15 @@ void ChunkDatabase::mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, Voxe
             chunk->mark_dirty(ChunkDirtyFlag::collision);
             chunk->mark_dirty(ChunkDirtyFlag::lighting);
             if (dirty_regions != nullptr) {
-                (void)mark_chunk_rebuild_regions(*dirty_regions, neighbor, "boundary voxel edit");
+                auto status =
+                    mark_chunk_rebuild_regions(*dirty_regions, neighbor, "boundary voxel edit");
+                if (!status) {
+                    return status;
+                }
             }
         }
     }
+    return core::Status::ok();
 }
 
 std::vector<ChunkCoord>

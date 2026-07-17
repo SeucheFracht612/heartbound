@@ -255,8 +255,7 @@ void test_chunk_mutations_preflight_and_compact_edit_history() {
     assert(chunks.edit_log().front().previous == world::VoxelCell::air());
     assert(chunks.edit_log().front().next == world::VoxelCell(2, 0));
     assert(chunks.set(coord, {1, 1, 1}, world::VoxelCell::air()));
-    assert(chunks.edit_log().size() == 1);
-    assert(chunks.edit_log().front().previous == chunks.edit_log().front().next);
+    assert(chunks.edit_log().empty());
     assert(chunks.find(coord)->dirty().contains(world::ChunkDirtyFlag::save));
     assert(chunks.find(coord)->dirty().contains(world::ChunkDirtyFlag::replication));
 

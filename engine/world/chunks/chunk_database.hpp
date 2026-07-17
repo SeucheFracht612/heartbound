@@ -85,8 +85,9 @@ class ChunkDatabase {
     [[nodiscard]] std::vector<VoxelEditRecord>
     build_replaced_saved_edit_history(std::span<const VoxelEditRecord> touched_edits,
                                       std::span<const VoxelEditRecord> canonical_edits) const;
-    void mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
-                                         dirty::DirtyRegionTracker* dirty_regions);
+    [[nodiscard]] core::Status
+    mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
+                                    dirty::DirtyRegionTracker* dirty_regions);
     [[nodiscard]] std::vector<ChunkCoord>
     rich_mesh_invalidation_neighbors(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
                                      std::uint16_t radius) const;
