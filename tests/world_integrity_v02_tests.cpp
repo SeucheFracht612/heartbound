@@ -34,7 +34,9 @@ struct TerrainFixture {
 
     TerrainFixture() {
         auto clay_id = heartstead::core::PrototypeId::parse("base:voxels/clay");
+        auto tree_id = heartstead::core::PrototypeId::parse("base:features/integrity_tree");
         assert(clay_id);
+        assert(tree_id);
 
         heartstead::world::VoxelDefinition clay;
         clay.type = 1;
@@ -49,6 +51,7 @@ struct TerrainFixture {
         region.age = "test_age";
         region.biome_cluster = "test_biome";
         region.resource_rules.push_back({clay_id.value(), "terrain", 1.0});
+        region.resource_rules.push_back({tree_id.value(), "large_static_object", 1.0});
         assert(regions.add_region(std::move(region)));
 
         generation.world_seed = 42;
@@ -127,6 +130,49 @@ void test_worldgen_preserves_i64_height_and_rejects_unrepresentable_chunks() {
         impossible, fixture.generation, fixture.regions, fixture.palette);
     assert(!generated);
     assert(generated.error().code == "terrain_generator.chunk_coord_overflow");
+
+    fixture.generation.base_surface_y = 0;
+    fixture.generation.surface_variation = std::numeric_limits<std::uint16_t>::max();
+    bool far_coordinate_changes_height = false;
+    for (std::int64_t x = 0; x < 64; ++x) {
+        const auto near_height =
+            heartstead::world::DeterministicTerrainGenerator::surface_height_at(fixture.generation,
+                                                                                x, 0);
+        const auto far_height_at_x =
+            heartstead::world::DeterministicTerrainGenerator::surface_height_at(
+                fixture.generation, x, std::numeric_limits<std::int64_t>::min());
+        far_coordinate_changes_height |= near_height != far_height_at_x;
+    }
+    assert(far_coordinate_changes_height);
+}
+
+void test_worldgen_features_only_belong_to_their_surface_chunk() {
+    TerrainFixture fixture;
+
+    auto surface_chunk =
+        heartstead::world::DeterministicTerrainGenerator::generate_chunk_with_features(
+            {0, 0, 0}, fixture.generation, fixture.regions, fixture.palette);
+    assert(surface_chunk);
+    assert(!surface_chunk.value().features.empty());
+    assert(std::ranges::all_of(surface_chunk.value().features, [](const auto& feature) {
+        return heartstead::world::chunk_coord_for_block(feature.position) ==
+               heartstead::world::ChunkCoord{0, 0, 0};
+    }));
+
+    auto vertically_repeated =
+        heartstead::world::DeterministicTerrainGenerator::generate_chunk_with_features(
+            {0, 1, 0}, fixture.generation, fixture.regions, fixture.palette);
+    assert(vertically_repeated);
+    assert(vertically_repeated.value().features.empty());
+
+    fixture.generation.base_surface_y = std::numeric_limits<std::int64_t>::max();
+    const auto top_chunk_y =
+        heartstead::world::chunk_axis_for_block(std::numeric_limits<std::int64_t>::max());
+    auto unrepresentable_feature =
+        heartstead::world::DeterministicTerrainGenerator::generate_chunk_with_features(
+            {0, top_chunk_y, 0}, fixture.generation, fixture.regions, fixture.palette);
+    assert(unrepresentable_feature);
+    assert(unrepresentable_feature.value().features.empty());
 }
 
 void test_chunk_interest_planning_is_bounded() {
@@ -363,6 +409,7 @@ void test_palette_fingerprint_changes_are_blocking() {
 int main() {
     test_failed_stream_load_does_not_publish_chunk();
     test_worldgen_preserves_i64_height_and_rejects_unrepresentable_chunks();
+    test_worldgen_features_only_belong_to_their_surface_chunk();
     test_chunk_interest_planning_is_bounded();
     test_saved_edit_batch_validation_is_atomic();
     test_stream_reload_preserves_one_canonical_delta();

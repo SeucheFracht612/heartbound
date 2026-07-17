@@ -29,6 +29,11 @@ namespace {
     return static_cast<std::uint64_t>(value) ^ 0x8000000000000000ULL;
 }
 
+[[nodiscard]] std::uint64_t combine_hash(std::uint64_t hash, std::uint64_t value,
+                                         std::uint64_t domain) noexcept {
+    return mix(hash ^ mix(value ^ domain));
+}
+
 [[nodiscard]] std::int64_t saturated_add(std::int64_t value, std::int64_t offset) noexcept {
     constexpr auto min = std::numeric_limits<std::int64_t>::min();
     constexpr auto max = std::numeric_limits<std::int64_t>::max();
@@ -57,8 +62,10 @@ namespace {
 
 [[nodiscard]] std::uint64_t cell_noise(std::uint64_t seed, std::int64_t x, std::int64_t y,
                                        std::int64_t z, std::string_view salt) noexcept {
-    return mix(seed ^ mix(coordinate_bits(x)) ^ mix(coordinate_bits(y) << 1U) ^
-               mix(coordinate_bits(z) << 2U) ^ mix(stable_string_hash(salt)));
+    auto hash = mix(seed ^ stable_string_hash(salt));
+    hash = combine_hash(hash, coordinate_bits(x), 0x243f6a8885a308d3ULL);
+    hash = combine_hash(hash, coordinate_bits(y), 0x13198a2e03707344ULL);
+    return combine_hash(hash, coordinate_bits(z), 0xa4093822299f31d0ULL);
 }
 
 [[nodiscard]] bool placement_is_external(std::string_view placement) noexcept {
@@ -78,12 +85,12 @@ namespace {
     return GeneratedWorldFeatureKind::rich_block;
 }
 
-[[nodiscard]] bool rule_depth_matches(std::string_view placement, std::int64_t depth) noexcept {
+[[nodiscard]] bool rule_depth_matches(std::string_view placement, std::uint64_t depth) noexcept {
     if (placement.contains("surface"))
         return depth <= 1;
     if (placement.contains("deep"))
         return depth >= 16;
-    return depth >= 0;
+    return true;
 }
 
 [[nodiscard]] bool rule_selected(const RegionResourceRule& rule,
@@ -151,7 +158,11 @@ core::Result<VoxelChunk> DeterministicTerrainGenerator::generate_chunk(
                     cells.push_back(VoxelCell{VoxelPalette::air_type, 255});
                     continue;
                 }
-                const auto depth = surface_y - global_y;
+                // The mathematical depth can span the entire signed coordinate range. Unsigned
+                // subtraction is exact here because the above branch established surface_y >=
+                // global_y, and avoids signed overflow at the world-coordinate extremes.
+                const auto depth =
+                    static_cast<std::uint64_t>(surface_y) - static_cast<std::uint64_t>(global_y);
                 if (config.enable_caves && depth >= config.cave_min_depth &&
                     cell_noise(config.world_seed, global_x, global_y, global_z, "cave") % 1000U <
                         config.cave_frequency_per_mille) {
@@ -204,14 +215,22 @@ core::Result<GeneratedChunk> DeterministicTerrainGenerator::generate_chunk_with_
             for (std::uint16_t x = 0; x < VoxelChunk::edge_length; ++x) {
                 const auto global_x = origin.value().x + x;
                 const auto global_z = origin.value().z + z;
-                const auto global_y = surface_height_at(config, global_x, global_z) + 1;
-                if (!rule_selected(rule, config, global_x, global_y, global_z))
+                const BlockCoord surface_position{
+                    global_x, surface_height_at(config, global_x, global_z), global_z};
+                auto feature_position =
+                    checked_block_coord_offset(surface_position, BlockCoord{0, 1, 0});
+                if (!feature_position || chunk_coord_for_block(feature_position.value()) != coord ||
+                    !rule_selected(rule, config, feature_position.value().x,
+                                   feature_position.value().y, feature_position.value().z)) {
                     continue;
+                }
                 result.features.push_back({
                     rule.prototype_id,
                     feature_kind(rule.placement),
-                    {global_x, global_y, global_z},
-                    cell_noise(config.world_seed, global_x, global_y, global_z, rule.placement),
+                    feature_position.value(),
+                    cell_noise(config.world_seed, feature_position.value().x,
+                               feature_position.value().y, feature_position.value().z,
+                               rule.placement),
                     rule.placement,
                 });
             }
@@ -227,11 +246,11 @@ std::int64_t DeterministicTerrainGenerator::surface_height_at(const TerrainGener
         return config.base_surface_y;
     }
 
-    const auto hash = mix(config.world_seed) ^ mix(coordinate_bits(global_x)) ^
-                      mix(coordinate_bits(global_z) << 1U) ^
-                      mix(stable_string_hash(config.region_id));
+    auto hash = mix(config.world_seed ^ stable_string_hash(config.region_id));
+    hash = combine_hash(hash, coordinate_bits(global_x), 0x243f6a8885a308d3ULL);
+    hash = combine_hash(hash, coordinate_bits(global_z), 0xa4093822299f31d0ULL);
     const auto range = static_cast<std::uint64_t>(config.surface_variation) * 2ULL + 1ULL;
-    const auto offset = static_cast<std::int64_t>(mix(hash) % range) -
+    const auto offset = static_cast<std::int64_t>(hash % range) -
                         static_cast<std::int64_t>(config.surface_variation);
     return saturated_add(config.base_surface_y, offset);
 }
