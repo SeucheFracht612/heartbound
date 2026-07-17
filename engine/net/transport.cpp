@@ -193,6 +193,11 @@ class PosixDatagramSocket final {
     return errno == EAGAIN || errno == EWOULDBLOCK;
 }
 
+[[nodiscard]] std::uint64_t fragment_source_scope(const sockaddr_in& address) noexcept {
+    return (static_cast<std::uint64_t>(ntohl(address.sin_addr.s_addr)) << 16U) |
+           static_cast<std::uint64_t>(ntohs(address.sin_port));
+}
+
 class PosixDatagramTransportHost final : public ITransportHost {
   private:
     struct ClientEndpoint {
@@ -340,6 +345,8 @@ class PosixDatagramTransportHost final : public ITransportHost {
         if (!client) {
             return core::Status::failure(client.error().code, client.error().message);
         }
+        server_reassembler_.discard_source(fragment_source_scope(client.value()->address));
+        client.value()->reassembler.clear();
         client.value()->connected = false;
         return core::Status::ok();
     }
@@ -422,11 +429,13 @@ class PosixDatagramTransportHost final : public ITransportHost {
     [[nodiscard]] core::Result<TransportMaintenanceResult>
     poll_maintenance(std::int64_t now_ms) override {
         current_time_ms_ = now_ms;
+        (void)server_reassembler_.expire(now_ms);
         TransportMaintenanceResult result;
         for (auto& [_, client] : clients_) {
             if (!client.connected) {
                 continue;
             }
+            (void)client.reassembler.expire(now_ms);
 
             auto server_poll = client.server_reliability.poll(now_ms);
             for (const auto& envelope : server_poll.retransmissions) {
@@ -694,8 +703,9 @@ class PosixDatagramTransportHost final : public ITransportHost {
                 continue;
             }
 
-            auto envelope = decode_datagram(
-                std::string_view(buffer.data(), static_cast<std::size_t>(received)), reassembler);
+            auto envelope =
+                decode_datagram(std::string_view(buffer.data(), static_cast<std::size_t>(received)),
+                                reassembler, fragment_source_scope(remote));
             if (envelope) {
                 callback(std::move(envelope.value()), remote);
             }
@@ -703,7 +713,8 @@ class PosixDatagramTransportHost final : public ITransportHost {
     }
 
     [[nodiscard]] std::optional<TransportEnvelope>
-    decode_datagram(std::string_view datagram, TransportPacketReassembler& reassembler) {
+    decode_datagram(std::string_view datagram, TransportPacketReassembler& reassembler,
+                    std::uint64_t source_scope) {
         auto packet = TransportPacketCodec::decode(
             datagram, TransportPacketCodecConfig{config_.max_payload_bytes});
         if (packet) {
@@ -714,7 +725,8 @@ class PosixDatagramTransportHost final : public ITransportHost {
         if (!fragment) {
             return std::nullopt;
         }
-        auto reassembled = reassembler.accept_fragment(std::move(fragment).value());
+        auto reassembled = reassembler.accept_fragment(source_scope, std::move(fragment).value(),
+                                                       current_time_ms_);
         if (!reassembled || !reassembled.value().complete) {
             return std::nullopt;
         }

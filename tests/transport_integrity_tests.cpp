@@ -1,4 +1,5 @@
 #include "engine/net/transport.hpp"
+#include "engine/net/transport_packet.hpp"
 #include "engine/net/transport_reliability.hpp"
 
 #include <cassert>
@@ -89,10 +90,54 @@ void test_external_capacity_failure_does_not_leak_untracked_datagram() {
     assert(client_messages.value().front().message.sequence == 2);
 }
 
+void test_fragment_reassembly_is_scoped_and_expires() {
+    net::TransportPacketFragmentCodecConfig config;
+    config.max_fragment_payload_bytes = 4;
+    config.max_packet_bytes = 8;
+    config.max_fragment_count = 2;
+    config.max_pending_packets = 2;
+    config.max_pending_packet_bytes = 16;
+    config.pending_packet_timeout_ms = 50;
+    net::TransportPacketReassembler reassembler(config);
+
+    const net::TransportPacketFragment first_a{7, 0, 2, 8, "AAAA"};
+    const net::TransportPacketFragment second_a{7, 1, 2, 8, "aaaa"};
+    const net::TransportPacketFragment first_b{7, 0, 2, 8, "BBBB"};
+    const net::TransportPacketFragment second_b{7, 1, 2, 8, "bbbb"};
+    auto a = reassembler.accept_fragment(10, first_a, 0);
+    auto b = reassembler.accept_fragment(20, first_b, 0);
+    assert(a && b && !a.value().complete && !b.value().complete);
+    assert(reassembler.pending_packet_count() == 2);
+    assert(reassembler.pending_packet_bytes() == 16);
+
+    a = reassembler.accept_fragment(10, second_a, 10);
+    assert(a && a.value().complete && a.value().packet == "AAAAaaaa");
+    assert(reassembler.pending_packet_count() == 1);
+    b = reassembler.accept_fragment(20, second_b, 10);
+    assert(b && b.value().complete && b.value().packet == "BBBBbbbb");
+    assert(reassembler.pending_packet_count() == 0);
+    assert(reassembler.pending_packet_bytes() == 0);
+
+    config.max_pending_packets = 1;
+    config.max_pending_packet_bytes = 8;
+    net::TransportPacketReassembler expiring(config);
+    assert(expiring.accept_fragment(10, first_a, 100));
+    auto at_capacity = expiring.accept_fragment(20, first_b, 149);
+    assert(!at_capacity);
+    assert(at_capacity.error().code == "transport_fragment.pending_budget_exceeded");
+    assert(expiring.pending_packet_count() == 1);
+    assert(expiring.expire(150) == 1);
+    assert(expiring.pending_packet_count() == 0);
+    assert(expiring.accept_fragment(20, first_b, 150));
+    expiring.discard_source(20);
+    assert(expiring.pending_packet_count() == 0);
+}
+
 } // namespace
 
 int main() {
     test_tracking_can_be_rolled_back_before_retry();
     test_external_capacity_failure_does_not_leak_untracked_datagram();
+    test_fragment_reassembly_is_scoped_and_expires();
     return 0;
 }

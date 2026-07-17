@@ -464,6 +464,10 @@ TransportPacketFragmentCodec::validate_config(const TransportPacketFragmentCodec
             "transport_fragment.invalid_config",
             "reassembly pending budgets must hold at least one maximum-size packet");
     }
+    if (config.pending_packet_timeout_ms == 0) {
+        return core::Status::failure("transport_fragment.invalid_config",
+                                     "reassembly pending packet timeout must be non-zero");
+    }
     return core::Status::ok();
 }
 
@@ -528,15 +532,30 @@ TransportPacketFragmentCodec::validate_fragment(const TransportPacketFragment& f
 TransportPacketReassembler::TransportPacketReassembler(TransportPacketFragmentCodecConfig config)
     : config_(config) {}
 
+std::size_t TransportPacketReassembler::PendingPacketKeyHash::operator()(
+    const PendingPacketKey& key) const noexcept {
+    const auto source_hash = std::hash<std::uint64_t>{}(key.source_scope);
+    const auto packet_hash = std::hash<std::uint64_t>{}(key.packet_id);
+    return source_hash ^ (packet_hash + 0x9e3779b9U + (source_hash << 6U) + (source_hash >> 2U));
+}
+
 core::Result<TransportPacketReassemblyResult>
 TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
+    return accept_fragment(0, std::move(fragment), 0);
+}
+
+core::Result<TransportPacketReassemblyResult>
+TransportPacketReassembler::accept_fragment(std::uint64_t source_scope,
+                                            TransportPacketFragment fragment, std::int64_t now_ms) {
+    (void)expire(now_ms);
     auto status = TransportPacketFragmentCodec::validate_fragment(fragment, config_);
     if (!status) {
         return core::Result<TransportPacketReassemblyResult>::failure(status.error().code,
                                                                       status.error().message);
     }
 
-    auto [iterator, inserted] = pending_.try_emplace(fragment.packet_id);
+    const PendingPacketKey key{source_scope, fragment.packet_id};
+    auto [iterator, inserted] = pending_.try_emplace(key);
     auto& pending = iterator->second;
     if (inserted) {
         if (pending_.size() > config_.max_pending_packets ||
@@ -552,6 +571,7 @@ TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
         pending.fragment_count = fragment.fragment_count;
         pending.fragments.resize(static_cast<std::size_t>(fragment.fragment_count));
         pending.received.resize(static_cast<std::size_t>(fragment.fragment_count), false);
+        pending.last_fragment_ms = now_ms;
         pending_packet_bytes_ += fragment.total_packet_bytes;
     } else if (pending.total_packet_bytes != fragment.total_packet_bytes ||
                pending.fragment_count != fragment.fragment_count) {
@@ -561,6 +581,7 @@ TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
             "transport_fragment.mismatched_packet_metadata",
             "fragment metadata does not match the pending packet");
     }
+    pending.last_fragment_ms = now_ms;
 
     const auto fragment_index = static_cast<std::size_t>(fragment.fragment_index);
     if (pending.received[fragment_index]) {
@@ -613,11 +634,53 @@ TransportPacketReassembler::accept_fragment(TransportPacketFragment fragment) {
         true, fragment.packet_id, received_count, expected_count, std::move(packet)});
 }
 
+std::size_t TransportPacketReassembler::expire(std::int64_t now_ms) {
+    std::size_t expired_count = 0;
+    for (auto iterator = pending_.begin(); iterator != pending_.end();) {
+        const auto last_fragment_ms = iterator->second.last_fragment_ms;
+        const auto elapsed_ms =
+            static_cast<std::uint64_t>(now_ms) - static_cast<std::uint64_t>(last_fragment_ms);
+        const bool expired =
+            now_ms >= last_fragment_ms && elapsed_ms >= config_.pending_packet_timeout_ms;
+        if (!expired) {
+            ++iterator;
+            continue;
+        }
+        pending_packet_bytes_ -= iterator->second.total_packet_bytes;
+        iterator = pending_.erase(iterator);
+        ++expired_count;
+    }
+    return expired_count;
+}
+
+std::size_t TransportPacketReassembler::pending_packet_count() const noexcept {
+    return pending_.size();
+}
+
+std::uint64_t TransportPacketReassembler::pending_packet_bytes() const noexcept {
+    return pending_packet_bytes_;
+}
+
 void TransportPacketReassembler::discard(std::uint64_t packet_id) {
-    const auto found = pending_.find(packet_id);
+    discard(0, packet_id);
+}
+
+void TransportPacketReassembler::discard(std::uint64_t source_scope, std::uint64_t packet_id) {
+    const auto found = pending_.find(PendingPacketKey{source_scope, packet_id});
     if (found != pending_.end()) {
         pending_packet_bytes_ -= found->second.total_packet_bytes;
         pending_.erase(found);
+    }
+}
+
+void TransportPacketReassembler::discard_source(std::uint64_t source_scope) {
+    for (auto iterator = pending_.begin(); iterator != pending_.end();) {
+        if (iterator->first.source_scope != source_scope) {
+            ++iterator;
+            continue;
+        }
+        pending_packet_bytes_ -= iterator->second.total_packet_bytes;
+        iterator = pending_.erase(iterator);
     }
 }
 

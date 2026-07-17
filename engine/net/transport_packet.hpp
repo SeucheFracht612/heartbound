@@ -3,6 +3,7 @@
 #include "engine/net/transport.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -20,6 +21,7 @@ struct TransportPacketFragmentCodecConfig {
     std::uint32_t max_fragment_count = 1024;
     std::uint32_t max_pending_packets = 64;
     std::uint64_t max_pending_packet_bytes = 16u * 1024u * 1024u;
+    std::uint32_t pending_packet_timeout_ms = 10'000;
 };
 
 struct TransportPacketFragment {
@@ -66,20 +68,40 @@ class TransportPacketReassembler final {
 
     [[nodiscard]] core::Result<TransportPacketReassemblyResult>
     accept_fragment(TransportPacketFragment fragment);
+    [[nodiscard]] core::Result<TransportPacketReassemblyResult>
+    accept_fragment(std::uint64_t source_scope, TransportPacketFragment fragment,
+                    std::int64_t now_ms);
+    [[nodiscard]] std::size_t expire(std::int64_t now_ms);
+    [[nodiscard]] std::size_t pending_packet_count() const noexcept;
+    [[nodiscard]] std::uint64_t pending_packet_bytes() const noexcept;
     void discard(std::uint64_t packet_id);
+    void discard(std::uint64_t source_scope, std::uint64_t packet_id);
+    void discard_source(std::uint64_t source_scope);
     void clear();
 
   private:
+    struct PendingPacketKey {
+        std::uint64_t source_scope = 0;
+        std::uint64_t packet_id = 0;
+
+        [[nodiscard]] bool operator==(const PendingPacketKey&) const noexcept = default;
+    };
+
+    struct PendingPacketKeyHash {
+        [[nodiscard]] std::size_t operator()(const PendingPacketKey& key) const noexcept;
+    };
+
     struct PendingPacket {
         std::uint64_t total_packet_bytes = 0;
         std::uint32_t fragment_count = 0;
         std::uint32_t received_fragment_count = 0;
         std::vector<std::string> fragments;
         std::vector<bool> received;
+        std::int64_t last_fragment_ms = 0;
     };
 
     TransportPacketFragmentCodecConfig config_;
-    std::unordered_map<std::uint64_t, PendingPacket> pending_;
+    std::unordered_map<PendingPacketKey, PendingPacket, PendingPacketKeyHash> pending_;
     std::uint64_t pending_packet_bytes_ = 0;
 };
 
