@@ -97,8 +97,8 @@ Implemented in this repository:
 - item stack and cargo representations
 - entity runtime/save identity separation
 - compound physical-resource lifecycle from dynamic body to cargo
-- build piece prototype materialization, derived invalidation, assembly representations, and
-  validated assembly creation
+- build-piece prototype materialization, derived invalidation, assembly representations, and
+  validated direct/staged assembly construction
 - prototype registry validation
 - game runtime target above the engine
 - composition-root runtime with local server/client and dedicated-server modes
@@ -127,16 +127,17 @@ Implemented in this repository:
 - file-backed save database for full snapshots and chunk deltas
 - typed save snapshot sections with prototype/reference validation
 - chunk database with voxel edit records and neighbor invalidation
-- world state container with separate stores for chunks, build objects, entities, cargo,
-  inventories, workpieces, assemblies, processes, networks, and mod state
+- world state container with separate stores for regions, chunks, build objects, entities, cargo,
+  inventories, workpieces, physical resources, assemblies, processes, fires, rooms, networks, mod
+  state, missing-prototype placeholders, and the persisted voxel-palette manifest
 - world snapshot bridge for exporting/importing typed save sections from runtime world state
 - server-authoritative command dispatcher skeleton
 - deterministic command payload codec for structured engine command fields
-- engine-owned world command handlers for voxel edits, build-piece placement and completion,
-  local workpiece cell edits, ordinary inventory transfers, persistent cargo creation, entity
-  spawns, timestamped process starts and advancement, and validated assembly creation
-- deterministic transport packet codec plus packet fragmentation/reassembly helpers for future
-  external network backends
+- engine-owned world command handlers for voxel edits and sleep, build-piece placement/completion,
+  local workpiece edits/finishing, inventory transfers, persistent cargo creation, entity spawns,
+  timestamped process starts/advancement, and direct or staged assembly lifecycle operations
+- deterministic transport packet codec and packet fragmentation/reassembly used by the current
+  project-owned POSIX UDP backend
 - deterministic transport control payload codec with server welcome messages for session
   handshakes and server disconnect messages for graceful session close
 - client-side transport handshake acceptance into validated session records
@@ -148,10 +149,10 @@ Implemented in this repository:
 - world-derived replication interest rules from simulation subjects and viewer positions, with
   inspectable derivation reports and a world-layer host-session policy refresh helper for live ticks
 - world-layer replication delta planning that classifies event subjects across build pieces,
-  persistent entities, cargo, assemblies, owner inventories, and owner processes without collapsing
-  those stores into one replicated object model
-- typed replication delta materialization that reuses existing save-section record shapes before a
-  future network delta codec is introduced
+  persistent entities, cargo, assemblies, owner inventories, workpieces, and owner processes without
+  collapsing those stores into one replicated object model
+- typed replication delta materialization that reuses existing save-section record shapes for the
+  current text transport payload and future binary codecs
 - world-layer host-tick delta materialization that converts successful authoritative mutating
   command reports into typed replication snapshots while reporting skipped commands explicitly
 - world-layer typed replication delta apply that upserts separate world stores while preserving
@@ -264,14 +265,15 @@ Use WASD and Space to move, hold the right mouse button to look, and press Escap
 window to exit. See [`docs/dev/build_instructions.md`](docs/dev/build_instructions.md) for shader
 rebuild commands and validation details.
 
-Run the bounded dedicated-server smoke path (120 ticks by default):
+Run the long-lived headless dedicated-server process:
 
 ```bash
-./build/default-debug/apps/dedicated_server/heartstead_dedicated_server --ticks 120
+./build/default-debug/apps/dedicated_server/heartstead_dedicated_server
 ```
 
-This executable currently uses the in-memory transport, prints its final authoritative tick, and
-exits. It is not a long-running or remotely joinable server daemon.
+It runs fixed ticks until `SIGINT` or `SIGTERM`. For a bounded smoke/test run, pass a positive tick
+count, for example `--ticks 120`. The executable still defaults to the in-memory transport and has
+no remote join path; long-lived process behavior does not yet make it a remotely joinable server.
 
 Run an uncapped deterministic renderer benchmark (headless by default, add `--vulkan` for GPU
 timestamps and a native window):

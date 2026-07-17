@@ -134,8 +134,10 @@ The repository currently implements the initial engine-owned foundation:
 - entity runtime identity records
 - entity transforms persisted through save snapshots and accepted by authoritative spawns
 - compound physical-resource lifecycle from one physics body into cargo
-- build piece and assembly validation records plus validated assembly creation
-- world state container with separate runtime stores for the major representations
+- build-piece and assembly validation records plus validated direct/staged assembly construction
+- world state container with separate runtime stores for regions, chunks, build pieces, entities,
+  cargo, inventories, workpieces, physical resources, assemblies, processes, fires, rooms, networks,
+  mod state, missing-prototype placeholders, and the persisted voxel-palette manifest
 - world snapshot bridge between runtime ownership and typed save sections
 - prototype registry lookup and expected-kind validation
 - game runtime target scaffold above the engine
@@ -150,11 +152,11 @@ The repository currently implements the initial engine-owned foundation:
   per-command success/error reports
 - server-authoritative command dispatch skeleton
 - deterministic command payload codec for structured engine command fields
-- engine-owned world command handlers for voxel edits, build-piece placement and completion,
-  local workpiece cell edits, ordinary inventory transfers, persistent cargo creation, entity
-  spawns, timestamped process starts and advancement, and validated assembly creation
-- deterministic transport packet codec plus packet fragmentation/reassembly helpers for future
-  external network backends
+- engine-owned world command handlers for voxel edits and sleep, build-piece placement/completion,
+  local workpiece edits/finishing, inventory transfers, persistent cargo creation, entity spawns,
+  timestamped process starts/advancement, and direct or staged assembly lifecycle operations
+- deterministic transport packet codec and packet fragmentation/reassembly used by the current
+  project-owned POSIX UDP backend
 - deterministic transport control payload codec with server welcome messages for session
   handshakes and server disconnect messages for graceful session close
 - client-side transport handshake acceptance into validated session records
@@ -165,9 +167,10 @@ The repository currently implements the initial engine-owned foundation:
 - replication event batch codec, deterministic interest filtering, and in-memory host delivery path
 - world-derived replication interest rules from simulation subjects and viewer positions, with
   inspectable derivation reports and host-session policy refresh for live ticks
-- world-layer replication delta planning that classifies event subjects across concrete world
-  stores before future snapshot/delta serialization
-- typed replication delta materialization using existing save-section record shapes
+- world-layer replication delta planning that classifies event subjects, including workpieces,
+  across concrete world stores before typed snapshot/delta serialization
+- typed replication delta materialization using existing save-section record shapes through the
+  current text transport payload
 - world-layer host-tick delta materialization from authoritative command reports into typed
   snapshots, with explicit skipped-command diagnostics, error details, and rollback trace summaries
 - world-layer typed replication delta apply through separate stores, preserving receiving-side

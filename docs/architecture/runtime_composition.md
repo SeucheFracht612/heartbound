@@ -23,10 +23,10 @@ session is deliberately rejected until connection establishment for the external
 wired into `RuntimeSession`; the protocol and transport backend remain separate so this does not
 change gameplay commands or systems.
 
-The current `heartstead_dedicated_server` executable is a bounded headless runner for smoke tests
-and server-path validation. It uses the in-memory transport, advances 120 fixed ticks by default
-(`--ticks N` selects another positive count), prints a summary, and exits. It is not yet a
-long-running service or remotely joinable server process.
+The current `heartstead_dedicated_server` executable is a long-lived headless process by default. It
+uses the in-memory transport and advances fixed ticks until `SIGINT` or `SIGTERM`; `--ticks N`
+selects a positive bounded count for smoke tests and server-path validation. It is not remotely
+joinable because the runtime still has no remote accept/identity/authentication path.
 
 Applications own platform graphics and audio services. `GameRuntime` owns content references,
 session lifetime, the fixed-step clock, and the local runtime composition. It never exposes Vulkan
