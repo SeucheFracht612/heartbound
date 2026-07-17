@@ -193,8 +193,9 @@ core::Result<bool> AuthoritativeServer::discover(core::NetId client_id, std::str
     return changed;
 }
 
-core::Status AuthoritativeServer::chat(core::NetId client_id, std::string channel,
-                                       std::string message, simulation::WorldTick world_time) {
+core::Status AuthoritativeServer::chat(core::NetId client_id, const std::string& channel,
+                                       const std::string& message,
+                                       simulation::WorldTick world_time) {
     auto* player = find(client_id);
     if (player == nullptr)
         return core::Status::failure("authoritative_server.unknown_client",

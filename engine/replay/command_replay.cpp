@@ -475,8 +475,9 @@ parse_indexed_save_ids(const net::CommandPayload& payload, std::string_view pref
     return core::Result<RecordedCommand>::success(std::move(command));
 }
 
-[[nodiscard]] core::Status expectation_mismatch(std::string field, std::string expected,
-                                                std::string actual) {
+[[nodiscard]] core::Status expectation_mismatch(const std::string& field,
+                                                const std::string& expected,
+                                                const std::string& actual) {
     return core::Status::failure("replay.expectation_mismatch", "replay expectation mismatch for " +
                                                                     field + ": expected " +
                                                                     expected + ", got " + actual);

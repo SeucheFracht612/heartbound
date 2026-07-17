@@ -16,17 +16,17 @@ namespace heartstead::modding {
 
 namespace {
 
-[[nodiscard]] std::string trim(std::string value) {
+[[nodiscard]] std::string trim(std::string_view value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) {
         return {};
     }
     const auto last = value.find_last_not_of(" \t\r\n");
-    return value.substr(first, last - first + 1);
+    return std::string(value.substr(first, last - first + 1));
 }
 
 [[nodiscard]] std::string unquote(std::string value) {
-    value = trim(std::move(value));
+    value = trim(value);
     if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
                               (value.front() == '\'' && value.back() == '\''))) {
         return value.substr(1, value.size() - 2);

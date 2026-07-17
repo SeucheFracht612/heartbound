@@ -70,7 +70,7 @@ namespace {
 
 class DisabledScriptRuntime final : public IScriptRuntime {
   public:
-    explicit DisabledScriptRuntime(ScriptRuntimeDesc desc) : desc_(desc) {}
+    explicit DisabledScriptRuntime(ScriptRuntimeDesc desc) : desc_(std::move(desc)) {}
 
     [[nodiscard]] ScriptBackend backend() const noexcept override {
         return ScriptBackend::disabled;
@@ -183,9 +183,9 @@ core::Result<std::unique_ptr<IScriptRuntime>> create_script_runtime(ScriptRuntim
     switch (desc.backend) {
     case ScriptBackend::disabled:
         return core::Result<std::unique_ptr<IScriptRuntime>>::success(
-            std::make_unique<DisabledScriptRuntime>(desc));
+            std::make_unique<DisabledScriptRuntime>(std::move(desc)));
     case ScriptBackend::luau:
-        return luau::create_runtime(desc);
+        return luau::create_runtime(std::move(desc));
     }
 
     return core::Result<std::unique_ptr<IScriptRuntime>>::failure("scripting.unknown_backend",

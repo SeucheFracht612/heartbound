@@ -672,7 +672,7 @@ evaluate_return_expression(const ExportedFunction& function,
 
 class LuauFoundationRuntime final : public IScriptRuntime {
   public:
-    explicit LuauFoundationRuntime(ScriptRuntimeDesc desc) : desc_(desc) {}
+    explicit LuauFoundationRuntime(ScriptRuntimeDesc desc) : desc_(std::move(desc)) {}
 
     [[nodiscard]] ScriptBackend backend() const noexcept override {
         return ScriptBackend::luau;
@@ -797,7 +797,7 @@ ScriptBackendInfo backend_info() noexcept {
 
 core::Result<std::unique_ptr<IScriptRuntime>> create_runtime(ScriptRuntimeDesc desc) {
     return core::Result<std::unique_ptr<IScriptRuntime>>::success(
-        std::make_unique<LuauFoundationRuntime>(desc));
+        std::make_unique<LuauFoundationRuntime>(std::move(desc)));
 }
 
 } // namespace heartstead::scripting::luau

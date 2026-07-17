@@ -396,17 +396,17 @@ read_file_bytes(const std::filesystem::path& path) {
                                      source.logical_id);
 }
 
-[[nodiscard]] std::string trim_ascii_whitespace(std::string value) {
+[[nodiscard]] std::string trim_ascii_whitespace(std::string_view value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) {
         return {};
     }
     const auto last = value.find_last_not_of(" \t\r\n");
-    return value.substr(first, last - first + 1U);
+    return std::string(value.substr(first, last - first + 1U));
 }
 
 [[nodiscard]] core::Status validate_gltf_json_text(std::string text, const AssetRecord& source) {
-    text = trim_ascii_whitespace(std::move(text));
+    text = trim_ascii_whitespace(text);
     if (text.size() < 2 || text.front() != '{' || text.back() != '}') {
         return core::Status::failure("asset_cooker.invalid_model",
                                      "production glTF model must be a JSON object: " +

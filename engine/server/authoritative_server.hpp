@@ -55,8 +55,8 @@ class AuthoritativeServer {
     [[nodiscard]] core::Result<bool> discover(core::NetId client_id, std::string_view layer_id,
                                               player_profiles::MapCellCoord cell,
                                               simulation::WorldTick world_time);
-    [[nodiscard]] core::Status chat(core::NetId client_id, std::string channel, std::string message,
-                                    simulation::WorldTick world_time);
+    [[nodiscard]] core::Status chat(core::NetId client_id, const std::string& channel,
+                                    const std::string& message, simulation::WorldTick world_time);
     [[nodiscard]] core::Status flush_dirty_profiles();
 
     [[nodiscard]] core::Result<net::HostSessionTickResult>

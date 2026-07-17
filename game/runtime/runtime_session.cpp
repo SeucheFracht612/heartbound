@@ -37,8 +37,8 @@ core::Status RuntimeConfiguration::validate() const {
 RuntimeSession::RuntimeSession(RuntimeConfiguration config, SessionRequest request,
                                const modding::PrototypeRegistry& prototypes,
                                const world::VoxelPalette& voxel_palette)
-    : config_(config), request_(std::move(request)), prototypes_(&prototypes),
-      voxel_palette_(&voxel_palette), fixed_step_(config.fixed_step) {}
+    : config_(std::move(config)), request_(std::move(request)), prototypes_(&prototypes),
+      voxel_palette_(&voxel_palette), fixed_step_(config_.fixed_step) {}
 
 RuntimeSession::~RuntimeSession() {
     (void)shutdown();
@@ -65,7 +65,7 @@ RuntimeSession::create(RuntimeConfiguration config, SessionRequest request,
             "runtime_session.invalid_scenario", "session scenario id must not be empty");
     }
     auto session = std::unique_ptr<RuntimeSession>(
-        new RuntimeSession(config, std::move(request), prototypes, voxel_palette));
+        new RuntimeSession(std::move(config), std::move(request), prototypes, voxel_palette));
     status = session->initialize();
     if (!status) {
         return core::Result<std::unique_ptr<RuntimeSession>>::failure(status.error().code,
