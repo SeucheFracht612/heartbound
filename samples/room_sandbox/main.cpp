@@ -1,5 +1,6 @@
 #include "engine/build/build_piece.hpp"
 #include "engine/core/logging.hpp"
+#include "engine/core/process_entry.hpp"
 #include "engine/debug/inspection.hpp"
 #include "engine/rooms/room_extraction.hpp"
 #include "engine/rooms/room_graph.hpp"
@@ -124,34 +125,36 @@ void log_room(const heartstead::rooms::RoomRecord& room) {
 
 } // namespace
 
-int main() {
-    using namespace heartstead;
+int main(int argc, char** argv) {
+    return heartstead::core::run_no_argument_process_entry(argc, argv, [] {
+        using namespace heartstead;
 
-    auto graph_result = make_extracted_room_graph();
-    if (!graph_result) {
-        core::log(core::LogLevel::error, graph_result.error().message);
-        return 1;
-    }
-    auto graph = std::move(graph_result).value();
+        auto graph_result = make_extracted_room_graph();
+        if (!graph_result) {
+            core::log(core::LogLevel::error, graph_result.error().message);
+            return 1;
+        }
+        auto graph = std::move(graph_result).value();
 
-    auto smoky_room = make_smoky_kitchen();
-    smoky_room.id = rooms::RoomId::from_value(2);
-    auto status = graph.add_or_replace(smoky_room);
-    if (!status) {
-        core::log(core::LogLevel::error, status.error().message);
-        return 1;
-    }
+        auto smoky_room = make_smoky_kitchen();
+        smoky_room.id = rooms::RoomId::from_value(2);
+        auto status = graph.add_or_replace(smoky_room);
+        if (!status) {
+            core::log(core::LogLevel::error, status.error().message);
+            return 1;
+        }
 
-    graph.evaluate_all();
-    core::log(core::LogLevel::info, "Rooms evaluated: " + std::to_string(graph.room_count()));
-    core::log(core::LogLevel::info,
-              "Smoky rooms: " + std::to_string(graph.count_descriptor("smoky")));
-    core::log(core::LogLevel::info,
-              "Rooms with cart access: " + std::to_string(graph.count_descriptor("cart_access")));
+        graph.evaluate_all();
+        core::log(core::LogLevel::info, "Rooms evaluated: " + std::to_string(graph.room_count()));
+        core::log(core::LogLevel::info,
+                  "Smoky rooms: " + std::to_string(graph.count_descriptor("smoky")));
+        core::log(core::LogLevel::info, "Rooms with cart access: " +
+                                            std::to_string(graph.count_descriptor("cart_access")));
 
-    for (const auto* room : graph.rooms()) {
-        log_room(*room);
-    }
+        for (const auto* room : graph.rooms()) {
+            log_room(*room);
+        }
 
-    return graph.count_descriptor("smoky") == 1 ? 0 : 1;
+        return graph.count_descriptor("smoky") == 1 ? 0 : 1;
+    });
 }
