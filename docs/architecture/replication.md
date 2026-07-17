@@ -29,8 +29,8 @@ Implemented foundation:
   - reports queued batch, event, and reserved-id counts
   - records first/last accepted command sequence and whether queued batch sequences are strictly
     increasing
-  - distinguishes global events from saved-subject events so future apply/reconciliation layers can
-    route them explicitly
+  - distinguishes global events from saved-subject events so world apply and future reconciliation
+    layers can route them explicitly
   - produces an inspectable `ReplicationIntakeReport` for client debug panels and tests
 
 - `plan_replication_delta`
@@ -38,27 +38,35 @@ Implemented foundation:
     `WorldState`
   - aggregates duplicate saved-subject events by `SaveId`
   - classifies each subject across the separate world stores: build piece, persistent entity,
-    cargo, assembly, owner inventory, and owner processes
-  - preserves global events separately instead of forcing terrain/workpiece/network events into
+    cargo, assembly, owner inventory, workpiece, and owner processes
+  - preserves events without a valid saved-subject id separately instead of forcing them into
     saved-object replication
   - marks unresolved subject ids as requiring snapshot/resync fallback
-  - produces an inspectable `WorldReplicationDeltaPlan` for the future state-delta serializer
+  - produces an inspectable `WorldReplicationDeltaPlan` consumed by the current typed text-delta
+    codec and transport bridge
 
 - `materialize_replication_delta`
   - turns the delta plan into typed record sections without inventing a universal replicated
     object model
   - reuses existing save/runtime section types for build pieces, persistent entities, cargo,
-    inventories, assemblies, and processes
+    inventories, workpieces, assemblies, and processes
+  - removes unrevealed server-only workpiece flaw bits from the public materialized record
   - preserves global events in the embedded plan and keeps unresolved subjects visible as
     resync-required diagnostics
-  - produces an inspectable `WorldReplicationDeltaSnapshot` for future network payload codecs
+  - produces an inspectable `WorldReplicationDeltaSnapshot` for the current text payload codec and
+    future binary codecs
 
 - `WorldReplicationDeltaSnapshotTextCodec`
   - deterministic early text payload for typed replication delta snapshots
   - stores the delta plan header separately from the typed section payload
-  - embeds `SaveTextCodec` snapshot text for materialized build/entity/cargo/inventory/assembly/
-    process sections
+  - embeds `SaveTextCodec` snapshot text for materialized build/entity/cargo/inventory/workpiece/
+    assembly/process sections
   - rejects unsupported sections, missing embedded snapshots, and aggregate count mismatches
+
+- `filter_replication_delta_snapshot`
+  - applies the same recipient visibility policy to the plan, events, and every typed record
+    section
+  - revalidates the filtered aggregate counts before the snapshot is sent
 
 - Typed delta transport bridge
   - world-owned replication payload type: `replication.world_delta_snapshot`
@@ -72,8 +80,8 @@ Implemented foundation:
 - `apply_replication_delta`
   - world-layer apply helper for typed replication delta snapshots
   - rejects partial deltas that require snapshot/resync fallback before mutating client world state
-  - upserts build pieces, persistent entities, cargo, inventories, assemblies, and processes through
-    their separate world stores
+  - upserts build pieces, persistent entities, cargo, inventories, workpieces, assemblies, and
+    processes through their separate world stores
   - preserves client-local runtime handles and session net ids for existing persistent entities
   - marks build-piece and assembly-derived room/network regions dirty for rebuild
   - returns an inspectable `WorldReplicationDeltaApplyReport` with inserted and updated counts
@@ -107,7 +115,8 @@ Implemented foundation:
   - reports failed, read-only, and eventless commands as skipped with explicit reasons
   - preserves skipped command error codes, messages, and rollback trace summaries for debug
     inspection without serializing those traces to clients
-  - keeps the net layer free of build/entity/cargo/inventory/assembly/process store knowledge
+  - keeps the net layer free of build/entity/cargo/inventory/workpiece/assembly/process store
+    knowledge
 
 - `send_replication_delta_snapshots_for_tick`
   - world-layer delivery bridge from materialized tick deltas to host-session client queues
@@ -154,8 +163,8 @@ Implemented foundation:
   - world code can drain queued typed delta envelopes and queued event batches through
     `apply_client_queued_replication_deltas`
 
-This is not full state synchronization yet. It establishes the transport shape for
-authoritative event replication, a first engine-level interest filter derived from world
-simulation subjects, typed world-store materialization and apply for early state deltas, and a
-deterministic text codec for tests/tools. Later systems still need production binary delta
-transport from the server to clients, prediction reconciliation, and bandwidth policy.
+This is not full state synchronization yet. It establishes authoritative event replication, a
+first engine-level interest filter derived from world simulation subjects, and typed world-store
+materialization and apply for early state deltas. The deterministic text delta codec is the current
+reliable transport payload as well as a tests/tools format. Later systems still need production
+binary delta transport, prediction reconciliation, and bandwidth policy.

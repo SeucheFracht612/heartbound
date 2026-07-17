@@ -136,8 +136,8 @@ Implemented foundation:
   - tracks pending commands until a matching command-result response is received
   - validates server sender id, recipient id, command-result sequence/type, and replication
     envelope shape before queuing decoded client-visible results
-  - rejects duplicate or older replication batch sequences before future client-side world apply
-    code can replay authoritative events
+  - rejects duplicate or older replication batch sequences before higher-layer world apply code can
+    replay authoritative events
   - accepts reliable server-disconnect control messages, clears pending commands, stores the
     disconnect reason, and moves back to disconnected state
   - queues decoded command results and replication batches for future client gameplay/UI layers
@@ -170,9 +170,9 @@ Implemented foundation:
 
 - World command path
   - engine command handlers can receive an authoritative `WorldState`
-  - reusable engine commands cover terrain edits, build-piece placement/completion,
-    workpiece edits, inventory transfers, cargo creation, entity spawns, process starts
-    and advancement, and assembly creation
+  - reusable engine commands cover terrain edits and sleep/wake, build-piece placement/completion,
+    workpiece edits/finishing, inventory transfers, cargo creation, entity spawns, process starts
+    and advancement, and direct or staged assembly lifecycle operations
   - structured payload fields are decoded before command-specific world mutation
   - the in-memory host sample now applies a voxel edit through this path
 
@@ -182,12 +182,12 @@ Implemented foundation:
   - `ReplicationTextCodec` encodes/decodes deterministic replication payloads
   - `ReplicationRelevancePolicy` gives host sessions a deterministic client interest filter
   - `ReplicationIntake` summarizes decoded client-side replication queues without applying state
-  - world replication delta planning classifies event subjects before future snapshot/state-delta
+  - world replication delta planning classifies event subjects before typed snapshot/state-delta
     payloads are serialized
   - world replication delta materialization copies typed authoritative records into sectioned
-    delta snapshots for future payload codecs
+    delta snapshots for the current text payload codec and future binary codecs
   - world code converts host tick command reports into per-command typed delta snapshots without
-    teaching `HostSession` about build/entity/cargo/inventory/assembly/process stores
+    teaching `HostSession` about build/entity/cargo/inventory/workpiece/assembly/process stores
   - world code can apply typed delta snapshots through separate world stores while preserving
     runtime-only entity identity on the receiving side
   - world code can drain `ClientSession` event intake and apply matching typed deltas without
