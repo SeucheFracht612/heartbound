@@ -221,7 +221,8 @@ debug::InspectionData GameInspector::inspect(const RuntimeSession& session) {
     data.object_type = "runtime_session";
     data.display_name = "Game Runtime Session";
     data.runtime_id = std::to_string(session.frame_count());
-    data.state = session.is_running() ? "running" : "stopped";
+    data.state = session.fault().has_value() ? "faulted"
+                                            : (session.is_running() ? "running" : "stopped");
     const auto& config = session.config();
     add_field(data, "frame_count", std::to_string(session.frame_count()));
     add_field(data, "headless", config.headless ? "true" : "false");
@@ -231,6 +232,13 @@ debug::InspectionData GameInspector::inspect(const RuntimeSession& session) {
     add_field(data, "ticks_per_second", std::to_string(config.fixed_step.ticks_per_second));
     add_field(data, "persistence_mode", "explicit_snapshot");
     add_field(data, "pending_save_count", "0");
+    add_field(data, "faulted", session.fault().has_value() ? "true" : "false");
+    if (session.fault().has_value()) {
+        add_field(data, "fault_code", session.fault()->code);
+        add_field(data, "fault_message", session.fault()->message);
+        add_issue(data, debug::InspectionSeverity::error, session.fault()->code,
+                  session.fault()->message);
+    }
 
     if (const auto* server = session.server(); server != nullptr) {
         const auto world_stats = server->world().stats();

@@ -169,6 +169,12 @@ core::Status RuntimeSession::initialize() {
 }
 
 core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput input) {
+    if (fault_.has_value()) {
+        return core::Result<RuntimeFrameStats>::failure(
+            "runtime_session.faulted",
+            "runtime session cannot continue after '" + fault_->code + "': " +
+                fault_->message);
+    }
     if (!running_) {
         return core::Result<RuntimeFrameStats>::failure(
             "runtime_session.not_running", "runtime session must be running before frame advance");
@@ -187,28 +193,24 @@ core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput inpu
             auto tick_result = server_->run_tick(
                 tick, 1.0 / static_cast<double>(config_.fixed_step.ticks_per_second), input.now_ms);
             if (!tick_result) {
-                return core::Result<RuntimeFrameStats>::failure(tick_result.error().code,
-                                                                 tick_result.error().message);
+                return fault_frame(tick_result.error());
             }
             stats.server_ticks.push_back(std::move(tick_result).value());
             stats.authoritative_world_tick = server_->world().world_time();
         }
         auto status = pump_client_messages();
         if (!status) {
-            return core::Result<RuntimeFrameStats>::failure(status.error().code,
-                                                             status.error().message);
+            return fault_frame(status.error());
         }
         if (client_ != nullptr) {
             auto synchronized = client_->synchronize();
             if (!synchronized) {
-                return core::Result<RuntimeFrameStats>::failure(synchronized.error().code,
-                                                                 synchronized.error().message);
+                return fault_frame(synchronized.error());
             }
             stats.client = std::move(synchronized).value();
             auto presented = synchronize_presentation();
             if (!presented) {
-                return core::Result<RuntimeFrameStats>::failure(presented.error().code,
-                                                                 presented.error().message);
+                return fault_frame(presented.error());
             }
             stats.presentation.inserted_objects += presented.value().inserted_objects;
             stats.presentation.adapter_count += presented.value().adapter_count;
@@ -220,6 +222,12 @@ core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput inpu
     last_frame_stats_ = stats;
     ++frame_count_;
     return core::Result<RuntimeFrameStats>::success(std::move(stats));
+}
+
+core::Result<RuntimeFrameStats> RuntimeSession::fault_frame(const core::Error& error) {
+    fault_ = error;
+    running_ = false;
+    return core::Result<RuntimeFrameStats>::failure(error.code, error.message);
 }
 
 core::Status RuntimeSession::submit_command(std::string type, std::string payload,
@@ -390,6 +398,10 @@ std::uint64_t RuntimeSession::frame_count() const noexcept {
 
 const std::optional<RuntimeFrameStats>& RuntimeSession::last_frame_stats() const noexcept {
     return last_frame_stats_;
+}
+
+const std::optional<core::Error>& RuntimeSession::fault() const noexcept {
+    return fault_;
 }
 
 } // namespace heartstead::game

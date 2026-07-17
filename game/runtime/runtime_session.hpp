@@ -90,12 +90,14 @@ class RuntimeSession final {
     [[nodiscard]] const RuntimeConfiguration& config() const noexcept;
     [[nodiscard]] std::uint64_t frame_count() const noexcept;
     [[nodiscard]] const std::optional<RuntimeFrameStats>& last_frame_stats() const noexcept;
+    [[nodiscard]] const std::optional<core::Error>& fault() const noexcept;
 
   private:
     RuntimeSession(RuntimeConfiguration config, SessionRequest request,
                    const modding::PrototypeRegistry& prototypes,
                    const world::VoxelPalette& voxel_palette);
     [[nodiscard]] core::Status initialize();
+    [[nodiscard]] core::Result<RuntimeFrameStats> fault_frame(const core::Error& error);
     [[nodiscard]] core::Status pump_client_messages();
     [[nodiscard]] core::Result<PresentationSynchronizationStats> synchronize_presentation();
 
@@ -109,6 +111,7 @@ class RuntimeSession final {
     PresentationWorld presentation_;
     ClientPresentationSynchronizer presentation_synchronizer_;
     std::optional<RuntimeFrameStats> last_frame_stats_;
+    std::optional<core::Error> fault_;
     std::uint64_t frame_count_ = 0;
     bool running_ = false;
 };

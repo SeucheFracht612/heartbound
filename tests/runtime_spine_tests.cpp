@@ -184,6 +184,77 @@ class TestGameplayModule final : public game::IGameplayModule {
     bool restored_from_snapshot = false;
 };
 
+class FailingPresentationModule final : public game::IGameplayModule {
+  public:
+    [[nodiscard]] std::string_view module_id() const noexcept override {
+        return "test.failing_presentation";
+    }
+
+    [[nodiscard]] core::Status
+    register_presentation(game::PresentationRegistry& registry) override {
+        return registry.register_adapter(
+            {"test.failing_presentation.adapter", 1,
+             [](const game::ClientRuntime&, game::PresentationWorld&) {
+                 return core::Result<game::PresentationAdapterStats>::failure(
+                     "test.presentation_failed", "intentional presentation failure");
+             }});
+    }
+};
+
+class FailingPersistenceModule final : public game::IGameplayModule {
+  public:
+    [[nodiscard]] std::string_view module_id() const noexcept override {
+        return "test.failing_persistence";
+    }
+
+    [[nodiscard]] core::Status
+    register_persistence(game::PersistenceRegistry& registry) override {
+        return registry.register_persistence(
+            {"test.failing_persistence.state", 1,
+             [](const world::WorldState&, save::SaveSnapshot&) {
+                 return core::Status::failure("test.persistence_failed",
+                                              "intentional persistence failure");
+             },
+             [](const save::SaveSnapshot&, world::WorldState&) {
+                 return core::Status::ok();
+             }});
+    }
+};
+
+class FailingReplicationModule final : public game::IGameplayModule {
+  public:
+    [[nodiscard]] std::string_view module_id() const noexcept override {
+        return "test.failing_replication";
+    }
+
+    [[nodiscard]] core::Status
+    register_commands(game::GameplayRegistrationContext& context) override {
+        return context.commands.register_command(
+            {"test.failing_replication.trigger", true, true,
+             [](const net::CommandEnvelope&, const net::CommandExecutionContext&,
+                world::WorldOperation& operation) {
+                 auto status = operation.record_mutation("trigger failing replication");
+                 if (!status) {
+                     return status;
+                 }
+                 operation.mark_save_dirty();
+                 operation.mark_replication_dirty();
+                 operation.emit_event({"test.failing_replication.delta", {}, "invalid"});
+                 return core::Status::ok();
+             }});
+    }
+
+    [[nodiscard]] core::Status
+    register_replication(game::ReplicationRegistry& registry) override {
+        return registry.register_replication(
+            {"test.failing_replication.delta", 1, true, false,
+             [](const world::OperationEvent&, game::ClientRuntime&) {
+                 return core::Status::failure("test.replication_failed",
+                                              "intentional replication failure");
+             }});
+    }
+};
+
 std::filesystem::path source_root() {
     return std::filesystem::path(HEARTSTEAD_TEST_SOURCE_DIR);
 }
@@ -638,6 +709,68 @@ void test_replication_tombstone_removes_presentation_proxy() {
     assert(runtime.shutdown());
 }
 
+void test_feature_registries_reject_missing_callbacks() {
+    game::PersistenceRegistry persistence;
+    auto status = persistence.register_persistence({"test.persistence", 1, {}, {}});
+    assert(!status && status.error().code == "gameplay_module.persistence_callback_missing");
+
+    game::ReplicationRegistry replication;
+    status = replication.register_replication({"test.replication", 1, true, false, {}});
+    assert(!status && status.error().code == "gameplay_module.replication_handler_missing");
+
+    game::PresentationRegistry presentation;
+    status = presentation.register_adapter({"test.presentation", 1, {}});
+    assert(!status && status.error().code == "gameplay_module.presentation_callback_missing");
+}
+
+void test_feature_failures_are_contextual_and_frame_failures_are_terminal() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+
+    game::RuntimeConfiguration presentation_config;
+    presentation_config.gameplay_modules.push_back(
+        std::make_shared<FailingPresentationModule>());
+    auto status = runtime.start_session(std::move(presentation_config),
+                                        make_session_request(report));
+    assert(!status && status.error().code == "test.presentation_failed");
+    assert(status.error().message.find("test.failing_presentation.adapter") !=
+           std::string::npos);
+    assert(runtime.session() == nullptr);
+
+    game::RuntimeConfiguration persistence_config;
+    persistence_config.gameplay_modules.push_back(
+        std::make_shared<FailingPersistenceModule>());
+    assert(runtime.start_session(std::move(persistence_config), make_session_request(report)));
+    auto snapshot = runtime.capture_save_snapshot();
+    assert(!snapshot && snapshot.error().code == "test.persistence_failed");
+    assert(snapshot.error().message.find("test.failing_persistence.state") !=
+           std::string::npos);
+    assert(runtime.session()->is_running());
+    assert(runtime.shutdown());
+
+    game::RuntimeConfiguration replication_config;
+    replication_config.gameplay_modules.push_back(
+        std::make_shared<FailingReplicationModule>());
+    assert(runtime.start_session(std::move(replication_config), make_session_request(report)));
+    assert(runtime.submit_command("test.failing_replication.trigger", {}, 10));
+    auto frame = runtime.run_frame({16'667, 17});
+    assert(!frame && frame.error().code == "test.replication_failed");
+    assert(frame.error().message.find("test.failing_replication.delta") !=
+           std::string::npos);
+    assert(!runtime.session()->is_running());
+    assert(runtime.session()->fault().has_value());
+    assert(runtime.session()->fault()->code == "test.replication_failed");
+    const auto diagnostics = game::GameInspector::inspect(*runtime.session());
+    assert(diagnostics.state == "faulted");
+    assert(diagnostics.find_field("fault_code")->value == "test.replication_failed");
+    assert(!diagnostics.issues.empty());
+    auto retried = runtime.run_frame({16'667, 34});
+    assert(!retried && retried.error().code == "runtime_session.faulted");
+    assert(!runtime.submit_command("test.failing_replication.trigger", {}, 20));
+    assert(runtime.shutdown());
+}
+
 void test_runtime_configuration_rejects_invalid_compositions() {
     game::RuntimeConfiguration empty;
     empty.create_server = false;
@@ -668,6 +801,8 @@ int main() {
     test_session_save_and_reload_restores_authoritative_state();
     test_gameplay_modules_extend_runtime_through_registration_contract();
     test_replication_tombstone_removes_presentation_proxy();
+    test_feature_registries_reject_missing_callbacks();
+    test_feature_failures_are_contextual_and_frame_failures_are_terminal();
     test_runtime_configuration_rejects_invalid_compositions();
     return 0;
 }
