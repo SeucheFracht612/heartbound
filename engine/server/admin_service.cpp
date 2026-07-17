@@ -15,9 +15,18 @@ namespace heartstead::server {
 namespace {
 
 constexpr std::uintmax_t max_profile_import_bytes = 4U * 1024U * 1024U;
+constexpr std::uintmax_t max_ban_file_bytes = 16U * 1024U * 1024U;
+constexpr std::size_t max_ban_records = 100'000;
+constexpr std::size_t max_ban_address_hash_bytes = 256;
+constexpr std::size_t max_ban_reason_bytes = 4U * 1024U;
+constexpr std::size_t max_ban_actor_bytes = 256;
+constexpr std::size_t max_ban_timestamp_bytes = 64;
 
 [[nodiscard]] bool safe_text(std::string_view value) noexcept {
-    return value.find_first_of("\r\n|") == std::string_view::npos;
+    return std::ranges::none_of(value, [](char character) {
+        const auto byte = static_cast<unsigned char>(character);
+        return character == '|' || byte < 0x20 || byte == 0x7f;
+    });
 }
 
 [[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter) {
@@ -64,8 +73,11 @@ core::Status ServerBanRecord::validate() const {
         return core::Status::failure("admin.invalid_ban",
                                      "ban needs a player uuid or address hash");
     }
-    if (reason.empty() || created_at_utc.empty() || created_by.empty() || !safe_text(reason) ||
-        !safe_text(created_by) || !safe_text(address_hash)) {
+    if (reason.empty() || created_at_utc.empty() || created_by.empty() ||
+        address_hash.size() > max_ban_address_hash_bytes || reason.size() > max_ban_reason_bytes ||
+        created_by.size() > max_ban_actor_bytes ||
+        created_at_utc.size() > max_ban_timestamp_bytes || !safe_text(reason) ||
+        !safe_text(created_by) || !safe_text(created_at_utc) || !safe_text(address_hash)) {
         return core::Status::failure("admin.invalid_ban", "ban fields are incomplete or unsafe");
     }
     return core::Status::ok();
@@ -97,14 +109,30 @@ std::filesystem::path ServerAdminService::ban_file() const {
 
 core::Status ServerAdminService::load_bans() {
     std::vector<ServerBanRecord> loaded;
+    std::error_code file_error;
+    const auto file_bytes = std::filesystem::file_size(ban_file(), file_error);
+    if (file_error) {
+        std::error_code exists_error;
+        const auto exists = std::filesystem::exists(ban_file(), exists_error);
+        if (!exists && !exists_error) {
+            return core::Status::ok();
+        }
+        return core::Status::failure("admin.bans_unreadable", file_error.message());
+    }
+    if (file_bytes > max_ban_file_bytes) {
+        return core::Status::failure("admin.ban_file_too_large",
+                                     "server ban list exceeds its size limit");
+    }
     std::ifstream input(ban_file());
     if (!input) {
-        if (!std::filesystem::exists(ban_file()))
-            return core::Status::ok();
         return core::Status::failure("admin.bans_unreadable", "could not read server ban list");
     }
     std::string line;
     while (std::getline(input, line)) {
+        if (loaded.size() == max_ban_records) {
+            return core::Status::failure("admin.too_many_bans",
+                                         "server ban list exceeds its record limit");
+        }
         const auto fields = split(line, '|');
         if (fields.size() != 5) {
             return core::Status::failure("admin.invalid_ban_file", "ban list record is malformed");
@@ -124,6 +152,9 @@ core::Status ServerAdminService::load_bans() {
         if (!status)
             return status;
         loaded.push_back(std::move(record));
+    }
+    if (input.bad()) {
+        return core::Status::failure("admin.bans_unreadable", "could not read server ban list");
     }
     bans_ = std::move(loaded);
     return core::Status::ok();
@@ -329,6 +360,7 @@ core::Status ServerAdminService::export_profile(const player_profiles::PlayerUui
     if (!output)
         return core::Status::failure("admin.profile_export_failed", "could not open export path");
     output << player_profiles::PlayerProfileTextCodec::encode(profile.value());
+    output.close();
     if (!output)
         return core::Status::failure("admin.profile_export_failed",
                                      "could not write profile export");
@@ -341,14 +373,28 @@ core::Status ServerAdminService::import_profile(const std::filesystem::path& sou
                                                 std::string actor) {
     std::error_code error;
     const auto size = std::filesystem::file_size(source, error);
-    if (error || size > max_profile_import_bytes)
+    if (error) {
+        return core::Status::failure("admin.profile_import_stat_failed", error.message());
+    }
+    if (size > max_profile_import_bytes)
         return core::Status::failure("admin.profile_import_too_large",
                                      "profile import exceeds its size limit");
-    std::ifstream input(source);
+    std::ifstream input(source, std::ios::binary);
     if (!input)
         return core::Status::failure("admin.profile_import_failed",
                                      "could not open profile import");
-    std::string text((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    std::string text(static_cast<std::size_t>(size), '\0');
+    if (!text.empty()) {
+        input.read(text.data(), static_cast<std::streamsize>(text.size()));
+    }
+    if (input.bad() || static_cast<std::size_t>(input.gcount()) != text.size()) {
+        return core::Status::failure("admin.profile_import_failed",
+                                     "could not read complete profile import");
+    }
+    if (input.peek() != std::char_traits<char>::eof()) {
+        return core::Status::failure("admin.profile_import_changed",
+                                     "profile import changed while it was being read");
+    }
     auto profile = player_profiles::PlayerProfileTextCodec::decode(text);
     if (!profile)
         return core::Status::failure(profile.error().code, profile.error().message);

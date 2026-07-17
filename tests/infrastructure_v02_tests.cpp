@@ -109,6 +109,12 @@ void test_admin_ban_validation() {
     assert(record.validate());
     record.reason = "bad\nline";
     assert(!record.validate());
+    record.reason = "griefing";
+    record.created_at_utc = "2026-07-10|forged";
+    assert(!record.validate());
+    record.created_at_utc = "2026-07-10T00:00:00Z";
+    record.address_hash.assign(257, 'a');
+    assert(!record.validate());
 }
 
 void test_rotated_log_archive_codec() {
