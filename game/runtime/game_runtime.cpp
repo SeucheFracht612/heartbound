@@ -479,7 +479,9 @@ core::Status GameRuntime::start_session_from_save(RuntimeConfiguration config,
         return core::Status::failure("game_runtime.not_initialized",
                                      "game runtime content must be initialized first");
     }
-    auto snapshot = database.read_validated_snapshot(*prototypes_);
+    // Missing prototypes are recoverable at the world-import boundary, where their opaque save
+    // records are preserved as placeholders before the remaining snapshot is validated.
+    auto snapshot = database.read_snapshot();
     if (!snapshot) {
         return core::Status::failure(snapshot.error().code, snapshot.error().message);
     }

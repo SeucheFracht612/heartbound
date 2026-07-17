@@ -570,6 +570,40 @@ void test_session_save_and_reload_restores_authoritative_state() {
     std::filesystem::remove_all(save_root);
 }
 
+void test_session_file_load_preserves_missing_prototypes() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+
+    save::SaveSnapshot snapshot;
+    snapshot.metadata = make_session_request(report).metadata;
+    build::BuildPieceRecord removed_build_piece;
+    removed_build_piece.object_id = core::SaveId::from_value(77);
+    removed_build_piece.prototype_id =
+        core::PrototypeId::parse("removed:build_pieces/legacy_workbench").value();
+    snapshot.build_pieces.push_back(removed_build_piece);
+
+    const auto save_root =
+        std::filesystem::temp_directory_path() / "heartstead-runtime-missing-prototype-test";
+    std::filesystem::remove_all(save_root);
+    const save::FileSaveDatabase database(save_root);
+    assert(database.write_snapshot(snapshot));
+
+    game::RuntimeConfiguration config;
+    config.create_client = false;
+    config.headless = true;
+    assert(runtime.start_session_from_save(std::move(config), database,
+                                           "base:scenarios/homestead"));
+    const auto* server = runtime.session()->server();
+    assert(server != nullptr);
+    assert(server->world().build_objects().count() == 0);
+    assert(server->world().missing_prototypes().size() == 1);
+    assert(server->world().missing_prototypes().front().original_prototype_id ==
+           removed_build_piece.prototype_id);
+    assert(runtime.shutdown());
+    std::filesystem::remove_all(save_root);
+}
+
 void test_gameplay_modules_extend_runtime_through_registration_contract() {
     const auto report = content::ContentValidation::validate(source_root());
     assert(!report.has_errors());
@@ -797,6 +831,7 @@ int main() {
     test_authoritative_player_input_moves_and_replicates();
     test_typed_voxel_commands_validate_and_replicate();
     test_session_save_and_reload_restores_authoritative_state();
+    test_session_file_load_preserves_missing_prototypes();
     test_gameplay_modules_extend_runtime_through_registration_contract();
     test_replication_tombstone_removes_presentation_proxy();
     test_feature_registries_reject_missing_callbacks();
