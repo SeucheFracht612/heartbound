@@ -241,10 +241,17 @@ int main() {
         core::log(core::LogLevel::error, texture_upload.error().message);
         return 1;
     }
-    const std::array<renderer::rhi::RenderDescriptorWrite, 2> material_writes{
+    const std::array<renderer::rhi::RenderDescriptorWrite, 3> material_writes{
         renderer::rhi::RenderDescriptorWrite{
             debug_material.id,
             "roughness",
+            uniform_upload.value().handle,
+            0,
+            uniform_bytes.size(),
+        },
+        renderer::rhi::RenderDescriptorWrite{
+            debug_material.id,
+            "tint",
             uniform_upload.value().handle,
             0,
             uniform_bytes.size(),
@@ -426,14 +433,40 @@ int main() {
         core::log(core::LogLevel::error, plan.error().message);
         return 1;
     }
-    auto planned_stats = device.value()->execute_frame_plan(plan.value());
-    if (!planned_stats) {
-        core::log(core::LogLevel::error, planned_stats.error().message);
-        return 1;
+    if (device.value()->backend() == renderer::rhi::RenderBackend::vulkan) {
+        auto unsupported_stats = device.value()->execute_frame_plan(plan.value());
+        if (unsupported_stats ||
+            unsupported_stats.error().code != "renderer.vulkan_unsupported_frame_plan") {
+            core::log(core::LogLevel::error,
+                      "Vulkan accepted a frame plan containing operations it does not implement");
+            return 1;
+        }
+        core::log(core::LogLevel::info,
+                  "Rejected an unsupported generic Vulkan frame plan as expected");
+
+        auto supported_plan = renderer::rhi::make_clear_present_frame_plan(
+            desc.initial_extent, renderer::rhi::ClearColor{0.08F, 0.12F, 0.16F, 1.0F},
+            request_present);
+        auto planned_stats = device.value()->execute_frame_plan(supported_plan);
+        if (!planned_stats) {
+            core::log(core::LogLevel::error, planned_stats.error().message);
+            return 1;
+        }
+        core::log(core::LogLevel::info, "Executed supported Vulkan frame plan with " +
+                                            std::to_string(
+                                                planned_stats.value().render_pass_count) +
+                                            " pass(es)");
+    } else {
+        auto planned_stats = device.value()->execute_frame_plan(plan.value());
+        if (!planned_stats) {
+            core::log(core::LogLevel::error, planned_stats.error().message);
+            return 1;
+        }
+        core::log(core::LogLevel::info, "Executed renderer frame plan with " +
+                                            std::to_string(
+                                                planned_stats.value().render_pass_count) +
+                                            " pass(es)");
     }
-    core::log(core::LogLevel::info, "Executed renderer frame plan with " +
-                                        std::to_string(planned_stats.value().render_pass_count) +
-                                        " pass(es)");
 
     for (std::uint32_t frame = 0; frame < 3; ++frame) {
         const auto brightness = static_cast<float>(frame) * 0.25F;
