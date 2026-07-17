@@ -31,6 +31,7 @@ void test_controlled_pack_policy() {
     pack.id = "visuals";
     pack.name = "Visuals";
     pack.version = "1";
+    pack.target_namespace = "visuals";
     pack.shader_extensions = {assets::ShaderExtensionPoint::water};
     assert(assets::ResourcePackPolicy::validate_manifest(pack));
     assets::AssetRecord raw;
@@ -42,7 +43,42 @@ void test_controlled_pack_policy() {
     assert(path);
     raw.virtual_path = path.value();
     raw.source_path = "raw.spv";
-    assert(!assets::ResourcePackPolicy::validate_override(pack, raw));
+    auto status = assets::ResourcePackPolicy::validate_override(pack, raw);
+    assert(!status);
+    assert(status.error().code == "resource_pack.raw_vulkan_forbidden");
+
+    auto allowed = raw;
+    allowed.logical_id = "visuals:shaders/extensions/water/waves.slang";
+    path = assets::VirtualPath::parse(allowed.logical_id);
+    assert(path);
+    allowed.virtual_path = path.value();
+    allowed.source_path = "waves.slang";
+    assert(assets::ResourcePackPolicy::validate_override(pack, allowed));
+
+    auto undeclared = allowed;
+    undeclared.logical_id = "visuals:shaders/extensions/foliage/leaves.slang";
+    path = assets::VirtualPath::parse(undeclared.logical_id);
+    assert(path);
+    undeclared.virtual_path = path.value();
+    status = assets::ResourcePackPolicy::validate_override(pack, undeclared);
+    assert(!status);
+    assert(status.error().code == "resource_pack.undeclared_shader_extension");
+
+    auto unscoped = allowed;
+    unscoped.logical_id = "visuals:shaders/waves.slang";
+    path = assets::VirtualPath::parse(unscoped.logical_id);
+    assert(path);
+    unscoped.virtual_path = path.value();
+    status = assets::ResourcePackPolicy::validate_override(pack, unscoped);
+    assert(!status);
+    assert(status.error().code == "resource_pack.unscoped_shader_forbidden");
+
+    auto invalid_extension_pack = pack;
+    invalid_extension_pack.shader_extensions = {static_cast<assets::ShaderExtensionPoint>(255)};
+    status = assets::ResourcePackPolicy::validate_manifest(invalid_extension_pack);
+    assert(!status);
+    assert(status.error().code == "resource_pack.unknown_shader_extension");
+
     pack.gameplay_content = true;
     assert(!assets::ResourcePackPolicy::validate_manifest(pack));
 }

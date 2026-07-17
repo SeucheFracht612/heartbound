@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/assets/asset_catalog.hpp"
 #include "engine/core/result.hpp"
 #include "engine/modding/mod_diagnostic.hpp"
 
@@ -11,8 +12,6 @@
 #include <vector>
 
 namespace heartstead::assets {
-
-struct AssetRecord;
 
 enum class ShaderExtensionPoint : std::uint8_t {
     material_template,
@@ -79,6 +78,10 @@ class ResourcePackPolicy {
     [[nodiscard]] static core::Status validate_manifest(const ResourcePackManifest& manifest);
     [[nodiscard]] static core::Status validate_override(const ResourcePackManifest& manifest,
                                                         const AssetRecord& asset);
+    [[nodiscard]] static AssetCatalogBuildResult
+    index_assets(AssetCatalog& catalog, const ResourcePackManifest& manifest,
+                 std::uint32_t priority,
+                 std::size_t maximum_file_bytes = default_maximum_asset_source_bytes);
 };
 
 [[nodiscard]] std::string_view shader_extension_point_name(ShaderExtensionPoint point) noexcept;

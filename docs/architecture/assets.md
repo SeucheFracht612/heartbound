@@ -17,7 +17,22 @@ Implemented foundation:
 - `ResourcePackDiscoverer`
   - discovers `resource_pack.toml`
   - validates namespace-style resource pack ids
+  - parses manifests through the shared bounded, quote-aware flat-manifest reader
+  - rejects duplicate and unknown manifest fields, invalid boolean values, and unknown shader
+    extension declarations
   - reports structured diagnostics
+
+- `ResourcePackPolicy`
+  - prevents resource packs from declaring gameplay content or overriding gameplay paths
+  - owns resource-pack catalog indexing so runtime validation, tools, and samples apply the same
+    restrictions
+  - stages catalog changes and commits them only when every indexed pack asset passes policy
+  - rejects generic data and unknown asset kinds instead of treating arbitrary files as
+    presentation overrides
+  - requires shader assets to use a controlled `shaders/extensions/<extension>/` path declared by
+    the pack manifest
+  - rejects malformed asset identities, undeclared/unscoped shader paths, and raw Vulkan/SPIR-V
+    shader payload paths
 
 - `ResourcePackLoadPlanner`
   - sorts discovered resource packs into a deterministic default load plan

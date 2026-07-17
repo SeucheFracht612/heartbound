@@ -7,6 +7,10 @@ Current implemented foundation:
 - one-directory-per-mod discovery under `mods/`
 - required `mod.toml`
 - namespace-style mod ids
+- one bounded flat-manifest parser shared by mod manifests, generic prototypes, prototype patches,
+  and resource-pack manifests; it handles comments only outside quoted strings, decodes the
+  supported quoted escapes, preserves the first value on duplicate keys, and reports malformed,
+  duplicate, oversized, and unknown manifest fields instead of silently accepting them
 - optional `dependencies = "other_mod,base"` manifest field with deterministic dependency
   ordering and cycle/missing-dependency diagnostics
 - engine-owned mod lifecycle plan with deterministic stage order for settings, prototypes,

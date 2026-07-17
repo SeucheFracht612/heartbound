@@ -1,9 +1,9 @@
 #include "engine/modding/generic_prototype_loader.hpp"
 
 #include "engine/core/result.hpp"
+#include "engine/modding/flat_manifest.hpp"
 
 #include <algorithm>
-#include <fstream>
 #include <map>
 #include <set>
 #include <string_view>
@@ -13,68 +13,6 @@
 namespace heartstead::modding {
 
 namespace {
-
-[[nodiscard]] std::string trim(std::string_view value) {
-    const auto first = value.find_first_not_of(" \t\r\n");
-    if (first == std::string::npos) {
-        return {};
-    }
-    const auto last = value.find_last_not_of(" \t\r\n");
-    return std::string(value.substr(first, last - first + 1));
-}
-
-[[nodiscard]] std::string unquote(std::string value) {
-    value = trim(value);
-    if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
-                              (value.front() == '\'' && value.back() == '\''))) {
-        return value.substr(1, value.size() - 2);
-    }
-    return value;
-}
-
-[[nodiscard]] std::map<std::string, std::string>
-parse_flat_toml(const std::filesystem::path& file, std::vector<ModDiagnostic>& diagnostics) {
-    std::ifstream input(file);
-    if (!input) {
-        diagnostics.push_back(ModDiagnostic{DiagnosticSeverity::error, file, "prototype.unreadable",
-                                            "could not read prototype file"});
-        return {};
-    }
-
-    std::map<std::string, std::string> values;
-    std::string line;
-    int line_number = 0;
-
-    while (std::getline(input, line)) {
-        ++line_number;
-        const auto comment = line.find('#');
-        if (comment != std::string::npos) {
-            line = line.substr(0, comment);
-        }
-
-        line = trim(std::move(line));
-        if (line.empty()) {
-            continue;
-        }
-
-        const auto separator = line.find('=');
-        if (separator == std::string::npos) {
-            diagnostics.push_back(ModDiagnostic{
-                DiagnosticSeverity::error,
-                file,
-                "prototype.syntax",
-                "expected key = value at line " + std::to_string(line_number),
-            });
-            continue;
-        }
-
-        auto key = trim(line.substr(0, separator));
-        auto value = unquote(line.substr(separator + 1));
-        values[std::move(key)] = std::move(value);
-    }
-
-    return values;
-}
 
 [[nodiscard]] std::string required_value(const std::map<std::string, std::string>& values,
                                          std::string_view key, const std::filesystem::path& source,
@@ -103,7 +41,7 @@ parse_flat_toml(const std::filesystem::path& file, std::vector<ModDiagnostic>& d
 [[nodiscard]] core::Result<GenericPrototypePatch>
 parse_patch(const std::filesystem::path& file, std::string_view source_mod_id,
             GenericPrototypePatchStage stage, std::vector<ModDiagnostic>& diagnostics) {
-    const auto fields = parse_flat_toml(file, diagnostics);
+    const auto fields = parse_flat_manifest(file, diagnostics, {.diagnostic_prefix = "prototype"});
     const auto target_text = required_value(fields, "target", file, diagnostics);
     const auto target_id = core::PrototypeId::parse(target_text);
     if (!target_id) {
@@ -268,7 +206,8 @@ GenericPrototypeLoader::load_from_mods(const std::vector<ModManifest>& mods) con
                 continue;
             }
 
-            auto fields = parse_flat_toml(file, result.diagnostics);
+            auto fields =
+                parse_flat_manifest(file, result.diagnostics, {.diagnostic_prefix = "prototype"});
             const auto kind = required_value(fields, "kind", file, result.diagnostics);
             const auto id_text = required_value(fields, "id", file, result.diagnostics);
             const auto display_name =

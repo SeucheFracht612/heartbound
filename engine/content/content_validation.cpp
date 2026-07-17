@@ -113,19 +113,9 @@ ContentValidation::validate(const std::filesystem::path& mods_root,
 
     for (const auto& entry : report.resource_pack_load_plan.entries) {
         report.resource_packs.push_back(entry.manifest);
-        index_assets(report, entry.manifest.root / "assets", entry.manifest.target_namespace,
-                     assets::AssetSourceKind::resource_pack, entry.manifest.id,
-                     entry.asset_priority);
-        for (const auto* asset : report.asset_catalog.records()) {
-            if (asset->source_kind != assets::AssetSourceKind::resource_pack ||
-                asset->source_id != entry.manifest.id) {
-                continue;
-            }
-            auto status = assets::ResourcePackPolicy::validate_override(entry.manifest, *asset);
-            if (!status) {
-                add_error(report, asset->source_path, status.error().code, status.error().message);
-            }
-        }
+        auto indexed = assets::ResourcePackPolicy::index_assets(
+            report.asset_catalog, entry.manifest, entry.asset_priority);
+        append_diagnostics_move(report.diagnostics, std::move(indexed.diagnostics));
     }
 
     for (const auto* prototype :

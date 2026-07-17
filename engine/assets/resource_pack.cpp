@@ -2,24 +2,19 @@
 
 #include "engine/assets/asset_catalog.hpp"
 #include "engine/core/ids.hpp"
+#include "engine/modding/flat_manifest.hpp"
 
 #include <algorithm>
 #include <array>
-#include <fstream>
 #include <limits>
 #include <map>
 #include <set>
 #include <string_view>
-#include <system_error>
 #include <utility>
 
 namespace heartstead::assets {
 
 namespace {
-
-constexpr std::uintmax_t max_manifest_bytes = 1024U * 1024U;
-constexpr std::size_t max_manifest_line_bytes = 64U * 1024U;
-constexpr std::size_t max_manifest_fields = 256;
 
 [[nodiscard]] std::string trim(std::string_view value) {
     const auto first = value.find_first_not_of(" \t\r\n");
@@ -28,81 +23,6 @@ constexpr std::size_t max_manifest_fields = 256;
     }
     const auto last = value.find_last_not_of(" \t\r\n");
     return std::string(value.substr(first, last - first + 1));
-}
-
-[[nodiscard]] std::string unquote(std::string value) {
-    value = trim(value);
-    if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
-                              (value.front() == '\'' && value.back() == '\''))) {
-        return value.substr(1, value.size() - 2);
-    }
-    return value;
-}
-
-[[nodiscard]] std::map<std::string, std::string>
-parse_flat_toml(const std::filesystem::path& file,
-                std::vector<modding::ModDiagnostic>& diagnostics) {
-    std::error_code file_error;
-    const auto file_bytes = std::filesystem::file_size(file, file_error);
-    if (file_error || file_bytes > max_manifest_bytes) {
-        diagnostics.push_back(modding::ModDiagnostic{
-            modding::DiagnosticSeverity::error, file, "resource_pack.manifest.too_large",
-            "resource pack manifest exceeds its size limit"});
-        return {};
-    }
-    std::ifstream input(file);
-    if (!input) {
-        diagnostics.push_back(modding::ModDiagnostic{modding::DiagnosticSeverity::error, file,
-                                                     "resource_pack.manifest.unreadable",
-                                                     "could not read resource pack manifest"});
-        return {};
-    }
-
-    std::map<std::string, std::string> values;
-    std::string line;
-    int line_number = 0;
-
-    while (std::getline(input, line)) {
-        ++line_number;
-        if (line.size() > max_manifest_line_bytes) {
-            diagnostics.push_back(modding::ModDiagnostic{
-                modding::DiagnosticSeverity::error, file, "resource_pack.manifest.too_large",
-                "resource pack manifest exceeds its line or field limit"});
-            return {};
-        }
-        const auto comment = line.find('#');
-        if (comment != std::string::npos) {
-            line = line.substr(0, comment);
-        }
-
-        line = trim(std::move(line));
-        if (line.empty()) {
-            continue;
-        }
-
-        const auto separator = line.find('=');
-        if (separator == std::string::npos) {
-            diagnostics.push_back(modding::ModDiagnostic{
-                modding::DiagnosticSeverity::error,
-                file,
-                "resource_pack.manifest.syntax",
-                "expected key = value at line " + std::to_string(line_number),
-            });
-            continue;
-        }
-
-        auto key = trim(line.substr(0, separator));
-        auto value = unquote(line.substr(separator + 1));
-        if (!values.contains(key) && values.size() >= max_manifest_fields) {
-            diagnostics.push_back(modding::ModDiagnostic{
-                modding::DiagnosticSeverity::error, file, "resource_pack.manifest.too_large",
-                "resource pack manifest exceeds its field limit"});
-            return {};
-        }
-        values[std::move(key)] = std::move(value);
-    }
-
-    return values;
 }
 
 [[nodiscard]] std::string required_value(const std::map<std::string, std::string>& values,
@@ -116,6 +36,43 @@ parse_flat_toml(const std::filesystem::path& file,
         return {};
     }
     return found->second;
+}
+
+void validate_manifest_fields(const std::map<std::string, std::string>& values,
+                              const std::filesystem::path& source,
+                              std::vector<modding::ModDiagnostic>& diagnostics) {
+    constexpr std::array<std::string_view, 7> known_fields{"id",
+                                                           "name",
+                                                           "version",
+                                                           "description",
+                                                           "gameplay",
+                                                           "target_namespace",
+                                                           "shader_extensions"};
+    for (const auto& [key, _] : values) {
+        if (std::ranges::find(known_fields, key) == known_fields.end()) {
+            diagnostics.push_back(modding::ModDiagnostic{
+                modding::DiagnosticSeverity::error, source, "resource_pack.manifest.unknown_field",
+                "unknown resource pack manifest field: " + key});
+        }
+    }
+}
+
+[[nodiscard]] core::Result<ShaderExtensionPoint>
+shader_extension_point_from_path(std::string_view path) {
+    constexpr std::string_view prefix = "shaders/extensions/";
+    if (!path.starts_with(prefix)) {
+        return core::Result<ShaderExtensionPoint>::failure(
+            "resource_pack.unscoped_shader_forbidden",
+            "resource-pack shaders must live below shaders/extensions/<extension>/");
+    }
+    path.remove_prefix(prefix.size());
+    const auto separator = path.find('/');
+    if (separator == std::string_view::npos || separator == 0 || separator + 1U >= path.size()) {
+        return core::Result<ShaderExtensionPoint>::failure(
+            "resource_pack.invalid_shader_extension_path",
+            "resource-pack shader path must name an extension point and a file");
+    }
+    return shader_extension_point_from_name(path.substr(0, separator));
 }
 
 } // namespace
@@ -178,6 +135,10 @@ core::Status ResourcePackPolicy::validate_manifest(const ResourcePackManifest& m
     }
     std::set<ShaderExtensionPoint> extensions;
     for (const auto extension : manifest.shader_extensions) {
+        if (shader_extension_point_name(extension) == "unknown") {
+            return core::Status::failure("resource_pack.unknown_shader_extension",
+                                         "shader extension point is not controlled by the engine");
+        }
         if (!extensions.insert(extension).second) {
             return core::Status::failure("resource_pack.duplicate_shader_extension",
                                          "shader extension points must be unique");
@@ -194,6 +155,10 @@ core::Status ResourcePackPolicy::validate_override(const ResourcePackManifest& m
     if (asset.source_kind != AssetSourceKind::resource_pack || asset.source_id != manifest.id) {
         return core::Status::failure("resource_pack.asset_source_mismatch",
                                      "asset does not belong to the resource pack being validated");
+    }
+    if (!core::PrototypeId::parse(asset.logical_id)) {
+        return core::Status::failure("resource_pack.invalid_asset_id",
+                                     "resource-pack asset logical id is invalid");
     }
     if (asset.virtual_path.namespace_id != manifest.target_namespace ||
         asset.logical_id != asset_logical_id(asset.virtual_path)) {
@@ -214,13 +179,70 @@ core::Status ResourcePackPolicy::validate_override(const ResourcePackManifest& m
             "resource_pack.gameplay_path_forbidden",
             "resource packs cannot override gameplay, server, migration, or worldgen data");
     }
+    if (asset.kind == AssetKind::data || asset.kind == AssetKind::unknown) {
+        return core::Status::failure(
+            "resource_pack.non_presentation_asset_forbidden",
+            "resource packs may contain only recognized presentation asset kinds");
+    }
     if (asset.kind == AssetKind::shader &&
-        (asset.source_path.extension() == ".spv" || path.contains("raw_vulkan"))) {
+        (asset.virtual_path.relative_path.extension() == ".spv" || path.contains("raw_vulkan"))) {
         return core::Status::failure(
             "resource_pack.raw_vulkan_forbidden",
             "shader packs must use controlled engine shader extension points");
     }
+    if (asset.kind == AssetKind::shader) {
+        auto extension = shader_extension_point_from_path(path);
+        if (!extension) {
+            return core::Status::failure(extension.error().code, extension.error().message);
+        }
+        if (std::ranges::find(manifest.shader_extensions, extension.value()) ==
+            manifest.shader_extensions.end()) {
+            return core::Status::failure(
+                "resource_pack.undeclared_shader_extension",
+                "resource pack shader uses an extension point not declared by its manifest: " +
+                    std::string(shader_extension_point_name(extension.value())));
+        }
+    }
     return core::Status::ok();
+}
+
+AssetCatalogBuildResult ResourcePackPolicy::index_assets(AssetCatalog& catalog,
+                                                         const ResourcePackManifest& manifest,
+                                                         std::uint32_t priority,
+                                                         std::size_t maximum_file_bytes) {
+    AssetCatalogBuildResult result;
+    if (auto status = validate_manifest(manifest); !status) {
+        result.diagnostics.push_back(modding::ModDiagnostic{
+            modding::DiagnosticSeverity::error,
+            manifest.root / "resource_pack.toml",
+            status.error().code,
+            status.error().message,
+        });
+        return result;
+    }
+
+    auto staged_catalog = catalog;
+    result = AssetCatalogBuilder::index_directory(
+        staged_catalog, manifest.root / "assets", manifest.target_namespace,
+        AssetSourceKind::resource_pack, manifest.id, priority, maximum_file_bytes);
+    for (const auto* asset : staged_catalog.records()) {
+        if (asset->source_kind != AssetSourceKind::resource_pack ||
+            asset->source_id != manifest.id) {
+            continue;
+        }
+        if (auto status = validate_override(manifest, *asset); !status) {
+            result.diagnostics.push_back(modding::ModDiagnostic{
+                modding::DiagnosticSeverity::error,
+                asset->source_path,
+                status.error().code,
+                status.error().message,
+            });
+        }
+    }
+    if (!result.has_errors()) {
+        catalog = std::move(staged_catalog);
+    }
+    return result;
 }
 
 bool ResourcePackDiscoveryResult::has_errors() const noexcept {
@@ -270,7 +292,9 @@ ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_roo
             continue;
         }
 
-        const auto values = parse_flat_toml(manifest_path, result.diagnostics);
+        const auto values = modding::parse_flat_manifest(
+            manifest_path, result.diagnostics, {.diagnostic_prefix = "resource_pack.manifest"});
+        validate_manifest_fields(values, manifest_path, result.diagnostics);
         ResourcePackManifest manifest;
         manifest.id = required_value(values, "id", manifest_path, result.diagnostics);
         manifest.name = required_value(values, "name", manifest_path, result.diagnostics);
@@ -280,9 +304,27 @@ ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_roo
         manifest.target_namespace = values.contains("target_namespace")
                                         ? values.at("target_namespace")
                                         : std::string("base");
-        manifest.gameplay_content = values.contains("gameplay") && values.at("gameplay") == "true";
+        if (const auto gameplay = values.find("gameplay"); gameplay != values.end()) {
+            if (gameplay->second == "true") {
+                manifest.gameplay_content = true;
+            } else if (gameplay->second != "false") {
+                result.diagnostics.push_back(
+                    modding::ModDiagnostic{modding::DiagnosticSeverity::error, manifest_path,
+                                           "resource_pack.manifest.invalid_bool",
+                                           "resource pack gameplay field must be true or false"});
+            }
+        }
         if (const auto shader_extensions = values.find("shader_extensions");
             shader_extensions != values.end() && !shader_extensions->second.empty()) {
+            constexpr std::size_t max_shader_extensions = 32;
+            if (static_cast<std::size_t>(std::ranges::count(shader_extensions->second, ',')) >=
+                max_shader_extensions) {
+                result.diagnostics.push_back(
+                    modding::ModDiagnostic{modding::DiagnosticSeverity::error, manifest_path,
+                                           "resource_pack.manifest.too_many_shader_extensions",
+                                           "resource pack exceeds its shader extension limit"});
+                continue;
+            }
             std::size_t start = 0;
             while (start <= shader_extensions->second.size()) {
                 const auto end = shader_extensions->second.find(',', start);

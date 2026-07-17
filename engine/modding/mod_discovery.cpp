@@ -1,9 +1,11 @@
 #include "engine/modding/mod_discovery.hpp"
 
 #include "engine/core/ids.hpp"
+#include "engine/core/result.hpp"
+#include "engine/modding/flat_manifest.hpp"
 
 #include <algorithm>
-#include <fstream>
+#include <array>
 #include <map>
 #include <set>
 #include <sstream>
@@ -25,60 +27,6 @@ namespace {
     return std::string(value.substr(first, last - first + 1));
 }
 
-[[nodiscard]] std::string unquote(std::string value) {
-    value = trim(value);
-    if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
-                              (value.front() == '\'' && value.back() == '\''))) {
-        return value.substr(1, value.size() - 2);
-    }
-    return value;
-}
-
-[[nodiscard]] std::map<std::string, std::string>
-parse_flat_toml(const std::filesystem::path& file, std::vector<ModDiagnostic>& diagnostics) {
-    std::ifstream input(file);
-    if (!input) {
-        diagnostics.push_back(ModDiagnostic{DiagnosticSeverity::error, file,
-                                            "mod.manifest.unreadable",
-                                            "could not read mod manifest"});
-        return {};
-    }
-
-    std::map<std::string, std::string> values;
-    std::string line;
-    int line_number = 0;
-
-    while (std::getline(input, line)) {
-        ++line_number;
-        const auto comment = line.find('#');
-        if (comment != std::string::npos) {
-            line = line.substr(0, comment);
-        }
-
-        line = trim(std::move(line));
-        if (line.empty()) {
-            continue;
-        }
-
-        const auto separator = line.find('=');
-        if (separator == std::string::npos) {
-            diagnostics.push_back(ModDiagnostic{
-                DiagnosticSeverity::error,
-                file,
-                "mod.manifest.syntax",
-                "expected key = value at line " + std::to_string(line_number),
-            });
-            continue;
-        }
-
-        auto key = trim(line.substr(0, separator));
-        auto value = unquote(line.substr(separator + 1));
-        values[std::move(key)] = std::move(value);
-    }
-
-    return values;
-}
-
 [[nodiscard]] std::string required_value(const std::map<std::string, std::string>& values,
                                          std::string_view key, const std::filesystem::path& source,
                                          std::vector<ModDiagnostic>& diagnostics) {
@@ -92,7 +40,12 @@ parse_flat_toml(const std::filesystem::path& file, std::vector<ModDiagnostic>& d
     return found->second;
 }
 
-[[nodiscard]] std::vector<std::string> split_csv(std::string_view value) {
+[[nodiscard]] core::Result<std::vector<std::string>> split_csv(std::string_view value) {
+    constexpr std::size_t max_dependencies = 256;
+    if (static_cast<std::size_t>(std::ranges::count(value, ',')) >= max_dependencies) {
+        return core::Result<std::vector<std::string>>::failure(
+            "mod.manifest.too_many_dependencies", "mod manifest exceeds its dependency limit");
+    }
     std::vector<std::string> result;
     std::size_t start = 0;
     while (start <= value.size()) {
@@ -108,7 +61,7 @@ parse_flat_toml(const std::filesystem::path& file, std::vector<ModDiagnostic>& d
         }
         start = end + 1;
     }
-    return result;
+    return core::Result<std::vector<std::string>>::success(std::move(result));
 }
 
 void add_error(std::vector<ModDiagnostic>& diagnostics, std::filesystem::path source,
@@ -119,6 +72,19 @@ void add_error(std::vector<ModDiagnostic>& diagnostics, std::filesystem::path so
         std::move(code),
         std::move(message),
     });
+}
+
+void validate_manifest_fields(const std::map<std::string, std::string>& values,
+                              const std::filesystem::path& source,
+                              std::vector<ModDiagnostic>& diagnostics) {
+    constexpr std::array<std::string_view, 5> known_fields{"id", "name", "version", "description",
+                                                           "dependencies"};
+    for (const auto& [key, _] : values) {
+        if (std::ranges::find(known_fields, key) == known_fields.end()) {
+            add_error(diagnostics, source, "mod.manifest.unknown_field",
+                      "unknown mod manifest field: " + key);
+        }
+    }
 }
 
 void validate_dependencies(ModDiscoveryResult& result) {
@@ -244,15 +210,23 @@ ModDiscoveryResult ModDiscoverer::discover(const std::filesystem::path& mods_roo
             continue;
         }
 
-        const auto values = parse_flat_toml(manifest_path, result.diagnostics);
+        const auto values = parse_flat_manifest(manifest_path, result.diagnostics,
+                                                {.diagnostic_prefix = "mod.manifest"});
+        validate_manifest_fields(values, manifest_path, result.diagnostics);
         ModManifest manifest;
         manifest.id = required_value(values, "id", manifest_path, result.diagnostics);
         manifest.name = required_value(values, "name", manifest_path, result.diagnostics);
         manifest.version = required_value(values, "version", manifest_path, result.diagnostics);
         manifest.description = values.contains("description") ? values.at("description") : "";
-        manifest.dependencies = values.contains("dependencies")
-                                    ? split_csv(values.at("dependencies"))
-                                    : std::vector<std::string>{};
+        if (const auto dependencies = values.find("dependencies"); dependencies != values.end()) {
+            auto parsed_dependencies = split_csv(dependencies->second);
+            if (!parsed_dependencies) {
+                add_error(result.diagnostics, manifest_path, parsed_dependencies.error().code,
+                          parsed_dependencies.error().message);
+            } else {
+                manifest.dependencies = std::move(parsed_dependencies).value();
+            }
+        }
         manifest.root = entry.path();
 
         if (!core::is_valid_namespace_id(manifest.id)) {

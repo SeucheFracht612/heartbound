@@ -37,6 +37,7 @@ target_sources(
     jobs/thread_pool/thread_pool_backend.cpp
     math/matrix.cpp
     math/vector.cpp
+    modding/flat_manifest.cpp
     modding/generic_prototype_loader.cpp
     modding/mod_fingerprint.cpp
     modding/mod_discovery.cpp
@@ -206,6 +207,7 @@ target_sources(
       jobs/thread_pool/thread_pool_backend.hpp
       math/matrix.hpp
       math/vector.hpp
+      modding/flat_manifest.hpp
       modding/generic_prototype.hpp
       modding/generic_prototype_loader.hpp
       modding/mod_fingerprint.hpp

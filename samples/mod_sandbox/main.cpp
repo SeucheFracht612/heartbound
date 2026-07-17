@@ -90,14 +90,13 @@ int main(int argc, char** argv) {
             const auto& pack = entry.manifest;
             const auto assets_root = pack.root / "assets";
             if (std::filesystem::is_directory(assets_root)) {
-                auto status = vfs.mount(pack.id, assets_root);
+                auto status = vfs.mount(pack.target_namespace, assets_root);
                 if (!status) {
                     core::log(core::LogLevel::error, status.error().message);
                     return 1;
                 }
-                auto indexed = assets::AssetCatalogBuilder::index_directory(
-                    asset_catalog, assets_root, pack.target_namespace,
-                    assets::AssetSourceKind::resource_pack, pack.id, entry.asset_priority);
+                auto indexed = assets::ResourcePackPolicy::index_assets(asset_catalog, pack,
+                                                                        entry.asset_priority);
                 for (const auto& diagnostic : indexed.diagnostics) {
                     log_diagnostic(diagnostic);
                 }

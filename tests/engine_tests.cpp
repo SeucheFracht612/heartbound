@@ -22,6 +22,7 @@
 #include "engine/items/item_stack.hpp"
 #include "engine/jobs/job_system.hpp"
 #include "engine/math/vector.hpp"
+#include "engine/modding/flat_manifest.hpp"
 #include "engine/modding/generic_prototype_loader.hpp"
 #include "engine/modding/mod_discovery.hpp"
 #include "engine/modding/mod_fingerprint.hpp"
@@ -320,6 +321,52 @@ void test_stable_hash64() {
     assert(hasher.nonzero_value() == hasher.value());
 }
 
+void test_flat_manifest_parser() {
+    const auto root = make_temp_root();
+    const auto manifest_path = root / "manifest.toml";
+    write_text(manifest_path, "name = \"Hash # Value\" # trailing comment\n"
+                              "escaped = \"quote: \\\"ok\\\" and slash \\\\ done\"\n"
+                              "literal = 'literal # value'\n"
+                              "enabled = true\n"
+                              "count = 1\n");
+
+    std::vector<heartstead::modding::ModDiagnostic> diagnostics;
+    auto values = heartstead::modding::parse_flat_manifest(manifest_path, diagnostics,
+                                                           {.diagnostic_prefix = "test.manifest"});
+    assert(diagnostics.empty());
+    assert(values.at("name") == "Hash # Value");
+    assert(values.at("escaped") == "quote: \"ok\" and slash \\ done");
+    assert(values.at("literal") == "literal # value");
+    assert(values.at("enabled") == "true");
+    assert(values.at("count") == "1");
+
+    write_text(manifest_path, "id = \"first\"\nid = \"second\"\n");
+    diagnostics.clear();
+    values = heartstead::modding::parse_flat_manifest(manifest_path, diagnostics,
+                                                      {.diagnostic_prefix = "test.manifest"});
+    assert(values.at("id") == "first");
+    assert(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "test.manifest.duplicate_key";
+    }));
+
+    write_text(manifest_path, "name = \"bad\\q\"\n");
+    diagnostics.clear();
+    values = heartstead::modding::parse_flat_manifest(manifest_path, diagnostics,
+                                                      {.diagnostic_prefix = "test.manifest"});
+    assert(values.empty());
+    assert(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "test.manifest.syntax";
+    }));
+
+    diagnostics.clear();
+    values = heartstead::modding::parse_flat_manifest(
+        manifest_path, diagnostics, {.diagnostic_prefix = "test.manifest", .maximum_bytes = 4});
+    assert(values.empty());
+    assert(std::ranges::any_of(diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "test.manifest.too_large";
+    }));
+}
+
 void test_virtual_file_system() {
     const auto root = make_temp_root();
     write_text(root / "assets/textures/blocks/stone.txt", "stone texture placeholder");
@@ -481,7 +528,9 @@ void test_resource_pack_discovery_and_asset_catalog() {
     write_bytes(mod_assets / "sounds/tools/hammer.wav", minimal_wav_bytes());
     write_text(pack_root / "resource_pack.toml", "id = \"hd_pack\"\n"
                                                  "name = \"HD Pack\"\n"
-                                                 "version = \"1.0.0\"\n");
+                                                 "version = \"1.0.0\"\n"
+                                                 "description = \"HD # Pack\"\n"
+                                                 "shader_extensions = \"water\"\n");
     write_text(pack_assets / "textures/items/raw_clay.txt", "resource pack texture");
     write_text(pack_assets / "ui/debug_panel.txt", "debug ui");
     write_text(later_pack_root / "resource_pack.toml", "id = \"ultra_pack\"\n"
@@ -494,7 +543,51 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(!discovery.has_errors());
     assert(discovery.packs.size() == 2);
     assert(discovery.packs.front().id == "hd_pack");
+    assert(discovery.packs.front().description == "HD # Pack");
+    assert(discovery.packs.front().shader_extensions.size() == 1);
+    assert(discovery.packs.front().shader_extensions.front() ==
+           heartstead::assets::ShaderExtensionPoint::water);
     assert(discovery.packs.back().id == "ultra_pack");
+
+    const auto invalid_pack_root = root / "invalid_resource_packs/bad_pack";
+    write_text(invalid_pack_root / "resource_pack.toml", "id = \"bad_pack\"\n"
+                                                         "name = \"Bad Pack\"\n"
+                                                         "name = \"Duplicate\"\n"
+                                                         "version = \"1.0.0\"\n"
+                                                         "gameplay = maybe\n"
+                                                         "surprise = true\n");
+    const auto invalid_discovery = discoverer.discover(root / "invalid_resource_packs");
+    assert(invalid_discovery.has_errors());
+    assert(std::ranges::any_of(invalid_discovery.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "resource_pack.manifest.duplicate_key";
+    }));
+    assert(std::ranges::any_of(invalid_discovery.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "resource_pack.manifest.invalid_bool";
+    }));
+    assert(std::ranges::any_of(invalid_discovery.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "resource_pack.manifest.unknown_field";
+    }));
+
+    const auto unsafe_pack_root = root / "unsafe_resource_packs/unsafe_pack";
+    write_text(unsafe_pack_root / "resource_pack.toml", "id = \"unsafe_pack\"\n"
+                                                        "name = \"Unsafe Pack\"\n"
+                                                        "version = \"1.0.0\"\n");
+    write_text(unsafe_pack_root / "assets/data/rules.toml", "cheat = true\n");
+    write_text(unsafe_pack_root / "assets/shaders/rogue.slang", "shader placeholder\n");
+    const auto unsafe_discovery = discoverer.discover(root / "unsafe_resource_packs");
+    assert(!unsafe_discovery.has_errors());
+    assert(unsafe_discovery.packs.size() == 1);
+    heartstead::assets::AssetCatalog unsafe_catalog;
+    const auto unsafe_index = heartstead::assets::ResourcePackPolicy::index_assets(
+        unsafe_catalog, unsafe_discovery.packs.front(), 1000);
+    assert(unsafe_index.has_errors());
+    assert(unsafe_catalog.record_count() == 0);
+    assert(std::ranges::any_of(unsafe_index.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "resource_pack.non_presentation_asset_forbidden";
+    }));
+    assert(std::ranges::any_of(unsafe_index.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "resource_pack.unscoped_shader_forbidden";
+    }));
 
     auto pack_plan = heartstead::assets::ResourcePackLoadPlanner::plan(discovery.packs);
     assert(pack_plan);
@@ -520,10 +613,8 @@ void test_resource_pack_discovery_and_asset_catalog() {
         catalog, mod_assets, "base", heartstead::assets::AssetSourceKind::mod, "base", 0);
     assert(!mod_index.has_errors());
     for (const auto& entry : pack_plan.value().entries) {
-        auto pack_index = heartstead::assets::AssetCatalogBuilder::index_directory(
-            catalog, entry.manifest.root / "assets", entry.manifest.target_namespace,
-            heartstead::assets::AssetSourceKind::resource_pack, entry.manifest.id,
-            entry.asset_priority);
+        auto pack_index = heartstead::assets::ResourcePackPolicy::index_assets(
+            catalog, entry.manifest, entry.asset_priority);
         assert(!pack_index.has_errors());
     }
 
@@ -4249,7 +4340,7 @@ void test_mod_discovery_and_prototypes() {
     write_text(mods_root / "base/mod.toml", "id = \"base\"\n"
                                             "name = \"Heartstead Base\"\n"
                                             "version = \"0.0.1\"\n"
-                                            "description = \"Test base mod\"\n");
+                                            "description = \"Test # base mod\"\n");
 
     write_text(mods_root / "base/data/items/raw_clay.prototype.toml",
                "kind = \"item\"\n"
@@ -4273,6 +4364,7 @@ void test_mod_discovery_and_prototypes() {
     assert(!discovery.has_errors());
     assert(discovery.mods.size() == 2);
     assert(discovery.mods.front().id == "base");
+    assert(discovery.mods.front().description == "Test # base mod");
     assert(discovery.mods.back().id == "tweaks");
     assert(discovery.mods.back().dependencies.size() == 1);
     assert(discovery.mods.back().dependencies.front() == "base");
@@ -4293,6 +4385,32 @@ void test_mod_discovery_and_prototypes() {
     assert(prototypes.prototype_patches.front().target_id.value() == "base:items/raw_clay");
     assert(prototypes.prototype_patches.back().stage ==
            heartstead::modding::GenericPrototypePatchStage::final_fix);
+
+    const auto invalid_mods_root = root / "invalid_mods";
+    write_text(invalid_mods_root / "bad/mod.toml", "id = \"bad\"\n"
+                                                   "name = \"Bad\"\n"
+                                                   "name = \"Duplicate\"\n"
+                                                   "version = \"1\"\n"
+                                                   "surprise = true\n");
+    const auto invalid_discovery = discoverer.discover(invalid_mods_root);
+    assert(invalid_discovery.has_errors());
+    assert(std::ranges::any_of(invalid_discovery.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "mod.manifest.duplicate_key";
+    }));
+    assert(std::ranges::any_of(invalid_discovery.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "mod.manifest.unknown_field";
+    }));
+
+    write_text(mods_root / "base/data/items/raw_clay.prototype.toml",
+               "kind = \"item\"\n"
+               "id = \"base:items/raw_clay\"\n"
+               "display_name = \"Raw Clay\"\n"
+               "display_name = \"Duplicate\"\n");
+    const auto invalid_prototypes = loader.load_from_mods(discovery.mods);
+    assert(invalid_prototypes.has_errors());
+    assert(std::ranges::any_of(invalid_prototypes.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "prototype.duplicate_key";
+    }));
 }
 
 void test_mod_dependency_discovery() {
@@ -14229,6 +14347,7 @@ void test_world_snapshot_bridge() {
 int main() {
     test_prototype_ids();
     test_stable_hash64();
+    test_flat_manifest_parser();
     test_virtual_file_system();
     test_math_primitives();
     test_resource_pack_discovery_and_asset_catalog();
