@@ -128,10 +128,16 @@ so release builds never require a runtime shader compiler. To regenerate and val
 checked-in artifacts with external Khronos tools:
 
 ```bash
-glslangValidator -V apps/render_smoke/assets/shaders/terrain.vert -o apps/render_smoke/assets/shaders/terrain.vert.spv
-glslangValidator -V apps/render_smoke/assets/shaders/terrain.frag -o apps/render_smoke/assets/shaders/terrain.frag.spv
-spirv-val apps/render_smoke/assets/shaders/terrain.vert.spv
-spirv-val apps/render_smoke/assets/shaders/terrain.frag.spv
+for shader in \
+  terrain.vert terrain.frag \
+  static_mesh.vert static_mesh.frag \
+  debug_line.vert debug_line.frag \
+  ui.vert ui.frag; do
+  glslangValidator -V --target-env vulkan1.0 \
+    "apps/render_smoke/assets/shaders/${shader}" \
+    -o "apps/render_smoke/assets/shaders/${shader}.spv"
+  spirv-val "apps/render_smoke/assets/shaders/${shader}.spv"
+done
 ```
 
 Both renderer applications stage the selected artifacts beside their executable. The runtime loads
