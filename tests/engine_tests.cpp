@@ -6490,10 +6490,17 @@ void test_file_save_database_safety() {
     expect_invalid_index(std::string(chunk_index_magic) +
                              "\nchunk|1|0|0|c_1_0_0.delta\nend\ntrailing\n",
                          "save_database.invalid_chunk_index");
-    write_text(index_path, std::string(chunk_index_magic) + "\nchunk|1|0|0|c_1_0_0.delta\n"
-                                                            "chunk|2|0|0|c_2_0_0.delta\nend\n");
+    write_text(index_path, std::string(chunk_index_magic) + "\nchunk|2|0|0|c_2_0_0.delta\n"
+                                                            "chunk|1|0|0|c_1_0_0.delta\nend\n");
     deltas = transaction_database.read_chunk_deltas();
     assert(deltas && deltas.value().size() == 2);
+    assert(deltas.value().front().coord == (heartstead::world::ChunkCoord{1, 0, 0}));
+
+    write_text(active_chunks / "c_1_0_0.delta", "");
+    const auto empty_delta = transaction_database.read_chunk_deltas();
+    assert(!empty_delta);
+    assert(empty_delta.error().code == "save_database.empty_chunk_delta");
+    write_text(active_chunks / "c_1_0_0.delta", "updated");
 
     const auto backup_chunks = active_chunks.parent_path() / "chunks.backup";
     std::filesystem::rename(active_chunks, backup_chunks);
@@ -8794,6 +8801,9 @@ void test_world_replication_delta_planning() {
     assert(delivered_welcome_messages.value().size() == 1);
     assert(filtered_delta_welcome_messages);
     assert(filtered_delta_welcome_messages.value().size() == 1);
+    auto delta_delivery_policy = delta_delivery_host.replication_relevance_policy();
+    delta_delivery_policy.private_access_rules.push_back({delivered_client.value(), {build_id}});
+    delta_delivery_host.set_replication_relevance_policy(std::move(delta_delivery_policy));
     heartstead::net::ClientSession delivered_delta_protocol(delivered_client.value());
     assert(delivered_delta_protocol.receive_server_message(
         delivered_welcome_messages.value().front()));
@@ -11686,6 +11696,11 @@ void test_host_session() {
     assert(filtered_observer_messages);
     assert(filtered_observer_messages.value().empty());
 
+    auto private_interest_policy = filtered_session.replication_relevance_policy();
+    private_interest_policy.private_access_rules.push_back(
+        {interested_client.value(), {core::SaveId::from_value(1)}});
+    filtered_session.set_replication_relevance_policy(std::move(private_interest_policy));
+
     world::WorldState host_interest_world;
     build::BuildPieceRecord host_interest_piece;
     host_interest_piece.object_id = core::SaveId::from_value(1);
@@ -11714,6 +11729,12 @@ void test_host_session() {
            filtered_observer_client.value());
     assert(host_interest_report.value().viewer_reports[1].visible_subject_count == 1);
     assert(filtered_session.replication_relevance_policy().client_rules.size() == 2);
+    assert(filtered_session.replication_relevance_policy().private_access_rules.size() == 1);
+    assert(filtered_session.replication_relevance_policy().private_access_rules.front().client_id ==
+           interested_client.value());
+    assert(filtered_session.replication_relevance_policy()
+               .private_access_rules.front()
+               .private_subjects == std::vector{core::SaveId::from_value(1)});
     assert(filtered_session.replication_relevance_policy().client_rules[0].client_id ==
            interested_client.value());
     assert(

@@ -39,6 +39,7 @@ struct WorldReplicationDeltaSubjectPlan {
     std::uint32_t materialized_record_count = 0;
     bool missing_subject = false;
     bool has_workpiece = false;
+    std::uint32_t private_event_count = 0;
 };
 
 struct WorldReplicationDeltaPlan {

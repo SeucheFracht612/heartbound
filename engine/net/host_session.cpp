@@ -210,12 +210,16 @@ core::Status HostSession::disconnect_client(core::NetId client_id) {
     };
     auto notice = transport_->send_server_to_client(
         client_id, make_server_disconnect_transport_message(disconnect, 0));
-    if (!notice) {
-        return notice;
-    }
     auto disconnected = transport_->disconnect_client(client_id);
     if (disconnected) {
         pending_outbound_.erase(client_id);
+        // A disconnect notice is best effort. Once the transport has removed the peer, report the
+        // requested state transition as successful even if its final notification could not be
+        // delivered.
+        return core::Status::ok();
+    }
+    if (!notice) {
+        return notice;
     }
     return disconnected;
 }

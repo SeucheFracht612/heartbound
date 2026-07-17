@@ -5,8 +5,8 @@
 #include "engine/save/save_text_codec.hpp"
 #include "engine/workpieces/workpiece_codec.hpp"
 #include "engine/workpieces/workpiece_state.hpp"
-#include "engine/world/world_state.hpp"
 #include "engine/world/voxel_change.hpp"
+#include "engine/world/world_state.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -271,17 +271,17 @@ sorted_processes_by_owner(const WorldState& state, core::SaveId owner_id) {
            << encode_bool(subject.has_cargo) << '|' << encode_bool(subject.has_assembly) << '|'
            << encode_bool(subject.has_inventory) << '|' << subject.process_count << '|'
            << subject.materialized_record_count << '|' << encode_bool(subject.missing_subject)
-           << '|' << encode_bool(subject.has_workpiece);
+           << '|' << encode_bool(subject.has_workpiece) << '|' << subject.private_event_count;
     return output.str();
 }
 
 [[nodiscard]] core::Result<WorldReplicationDeltaSubjectPlan>
 parse_subject_plan(std::string_view value) {
     const auto parts = split(value, '|');
-    if (parts.size() != 11 && parts.size() != 12) {
+    if (parts.size() != 11 && parts.size() != 12 && parts.size() != 13) {
         return core::Result<WorldReplicationDeltaSubjectPlan>::failure(
             "replication_delta.invalid_subject",
-            "replication delta subject record must contain 11 or 12 fields");
+            "replication delta subject record must contain 11, 12, or 13 fields");
     }
 
     auto subject_id = parse_u64(parts[0], "subject_id");
@@ -295,11 +295,14 @@ parse_subject_plan(std::string_view value) {
     auto process_count = parse_u32(parts[8], "subject_process_count");
     auto materialized_count = parse_u32(parts[9], "subject_materialized_record_count");
     auto missing = parse_bool(parts[10], "subject_missing");
-    auto has_workpiece = parts.size() == 12 ? parse_bool(parts[11], "subject_has_workpiece")
+    auto has_workpiece = parts.size() >= 12 ? parse_bool(parts[11], "subject_has_workpiece")
                                             : core::Result<bool>::success(false);
+    auto private_event_count = parts.size() == 13
+                                   ? parse_u32(parts[12], "subject_private_event_count")
+                                   : core::Result<std::uint32_t>::success(0);
     if (!subject_id || !event_count || !first_event_type || !has_build_piece || !has_entity ||
         !has_cargo || !has_assembly || !has_inventory || !process_count || !materialized_count ||
-        !missing || !has_workpiece) {
+        !missing || !has_workpiece || !private_event_count) {
         return core::Result<WorldReplicationDeltaSubjectPlan>::failure(
             "replication_delta.invalid_subject",
             "replication delta subject record contains invalid fields");
@@ -319,6 +322,7 @@ parse_subject_plan(std::string_view value) {
         missing.value(),
     };
     result.has_workpiece = has_workpiece.value();
+    result.private_event_count = private_event_count.value();
     return core::Result<WorldReplicationDeltaSubjectPlan>::success(std::move(result));
 }
 
@@ -371,6 +375,11 @@ validate_delta_snapshot_payload(const WorldReplicationDeltaSnapshot& snapshot) {
     std::uint32_t materialized_record_count = 0;
     std::uint32_t missing_subject_count = 0;
     for (const auto& subject : snapshot.plan.subjects) {
+        if (subject.private_event_count > subject.event_count) {
+            return core::Status::failure(
+                "replication_delta.private_event_count_mismatch",
+                "replication delta private event count exceeds the subject event count");
+        }
         subject_event_count += subject.event_count;
         materialized_record_count += subject.materialized_record_count;
         missing_subject_count += subject.missing_subject ? 1U : 0U;
@@ -907,6 +916,8 @@ WorldReplicationDeltaPlan plan_replication_delta(const WorldState& state,
             subject.first_event_type = event.type;
         }
         ++subject.event_count;
+        subject.private_event_count +=
+            net::replication_event_requires_private_access(event) ? 1U : 0U;
     }
 
     plan.subjects.reserve(subjects_by_id.size());
@@ -1004,11 +1015,29 @@ filter_replication_delta_snapshot(const WorldReplicationDeltaSnapshot& snapshot,
         if (!net::ReplicationRelevance::subject_is_visible(policy, recipient, subject.subject_id)) {
             continue;
         }
-        filtered.plan.subjects.push_back(subject);
+        const auto private_visible = net::ReplicationRelevance::private_subject_is_visible(
+            policy, recipient, subject.subject_id);
+        if (!private_visible && subject.private_event_count == subject.event_count) {
+            continue;
+        }
+        auto visible_subject = subject;
+        if (!private_visible) {
+            visible_subject.event_count -= visible_subject.private_event_count;
+            visible_subject.private_event_count = 0;
+            if (visible_subject.first_event_type.starts_with("inventory.")) {
+                visible_subject.first_event_type.clear();
+            }
+            if (visible_subject.has_inventory) {
+                visible_subject.has_inventory = false;
+                --visible_subject.materialized_record_count;
+            }
+            visible_subject.missing_subject = visible_subject.materialized_record_count == 0;
+        }
+        filtered.plan.subjects.push_back(visible_subject);
         visible_subjects.insert(subject.subject_id.value());
-        filtered.plan.subject_event_count += subject.event_count;
-        filtered.plan.materialized_record_count += subject.materialized_record_count;
-        filtered.plan.missing_subject_count += subject.missing_subject ? 1U : 0U;
+        filtered.plan.subject_event_count += visible_subject.event_count;
+        filtered.plan.materialized_record_count += visible_subject.materialized_record_count;
+        filtered.plan.missing_subject_count += visible_subject.missing_subject ? 1U : 0U;
     }
     filtered.plan.unique_subject_count = static_cast<std::uint32_t>(filtered.plan.subjects.size());
     filtered.plan.event_count =
@@ -1034,7 +1063,8 @@ filter_replication_delta_snapshot(const WorldReplicationDeltaSnapshot& snapshot,
         }
     }
     for (const auto& record : snapshot.inventories) {
-        if (visible(record.owner_id)) {
+        if (visible(record.owner_id) && net::ReplicationRelevance::private_subject_is_visible(
+                                            policy, recipient, record.owner_id)) {
             filtered.inventories.push_back(record);
         }
     }
@@ -1266,8 +1296,8 @@ apply_replication_delta(WorldState& state, const WorldReplicationDeltaSnapshot& 
         }
         auto change = VoxelChangeTextCodec::decode(event.message);
         if (!change) {
-            return core::Result<WorldReplicationDeltaApplyReport>::failure(
-                change.error().code, change.error().message);
+            return core::Result<WorldReplicationDeltaApplyReport>::failure(change.error().code,
+                                                                           change.error().message);
         }
         const auto address = block_to_chunk_local(change.value().position);
         (void)state.chunks().get_or_create(address.chunk);

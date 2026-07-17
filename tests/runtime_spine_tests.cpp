@@ -348,6 +348,11 @@ void test_selected_scenario_drives_authoritative_bootstrap() {
     assert(player->state.position == (world::WorldPosition{8.5, 1.0, 8.5}));
     const auto* inventory = world.inventories().find(player->save_id);
     assert(inventory != nullptr && inventory->stacks.size() == 2);
+    const auto& private_access =
+        session->server()->host().replication_relevance_policy().private_access_rules;
+    assert(private_access.size() == 1);
+    assert(private_access.front().client_id == session->client()->client_id());
+    assert(private_access.front().private_subjects == std::vector{player->save_id});
     assert(inventory->stacks[0].prototype_id == *core::PrototypeId::parse("base:items/raw_clay"));
     assert(inventory->stacks[1].prototype_id == *core::PrototypeId::parse("base:items/nails"));
     assert(
@@ -592,8 +597,8 @@ void test_session_file_load_preserves_missing_prototypes() {
     game::RuntimeConfiguration config;
     config.create_client = false;
     config.headless = true;
-    assert(runtime.start_session_from_save(std::move(config), database,
-                                           "base:scenarios/homestead"));
+    assert(
+        runtime.start_session_from_save(std::move(config), database, "base:scenarios/homestead"));
     const auto* server = runtime.session()->server();
     assert(server != nullptr);
     assert(server->world().build_objects().count() == 0);
@@ -716,6 +721,13 @@ void test_replication_tombstone_removes_presentation_proxy() {
     const auto* second_player = server->player_for_client(second_client.value());
     assert(second_player != nullptr);
     const auto second_player_net_id = second_player->net_id;
+    const auto second_player_save_id = second_player->save_id;
+    assert(std::ranges::any_of(server->host().replication_relevance_policy().private_access_rules,
+                               [second_client, second_player_save_id](const auto& rule) {
+                                   return rule.client_id == second_client.value() &&
+                                          rule.private_subjects ==
+                                              std::vector{second_player_save_id};
+                               }));
 
     movement::PlayerInputFrame input;
     input.tick = 1;
@@ -735,6 +747,9 @@ void test_replication_tombstone_removes_presentation_proxy() {
     assert(session->presentation()->find_object(second_player_net_id) != nullptr);
 
     assert(server->disconnect_client(second_client.value()));
+    assert(std::ranges::none_of(
+        server->host().replication_relevance_policy().private_access_rules,
+        [second_client](const auto& rule) { return rule.client_id == second_client.value(); }));
     auto disappeared = runtime.run_frame({16'667, 34});
     assert(disappeared);
     assert(disappeared.value().server_ticks.front().player_tombstone_count == 1);

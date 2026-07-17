@@ -142,6 +142,15 @@ find_interest_rule(const ReplicationRelevancePolicy& policy, core::NetId client_
     return found == policy.client_rules.end() ? nullptr : &*found;
 }
 
+[[nodiscard]] const ReplicationPrivateAccessRule*
+find_private_access_rule(const ReplicationRelevancePolicy& policy, core::NetId client_id) noexcept {
+    const auto found = std::ranges::find_if(policy.private_access_rules,
+                                            [client_id](const ReplicationPrivateAccessRule& rule) {
+                                                return rule.client_id == client_id;
+                                            });
+    return found == policy.private_access_rules.end() ? nullptr : &*found;
+}
+
 [[nodiscard]] bool subject_is_visible_for_rule(const ReplicationInterestRule& rule,
                                                core::SaveId subject) noexcept {
     if (!subject.is_valid()) {
@@ -158,21 +167,24 @@ evaluate_client_relevance(const ReplicationRelevancePolicy& policy, const Replic
 
     const auto* rule = find_interest_rule(policy, client_id);
     decision.explicit_rule = rule != nullptr;
-    if (rule == nullptr) {
-        decision.relevant = policy.broadcast_by_default;
-        decision.relevant_event_count =
-            decision.relevant ? static_cast<std::uint32_t>(batch.events.size()) : 0U;
-        decision.reason = decision.relevant ? "broadcast_default" : "no_interest_rule";
-        return decision;
-    }
-
     for (const auto& event : batch.events) {
-        if (subject_is_visible_for_rule(*rule, event.subject)) {
+        const auto publicly_visible = rule == nullptr
+                                          ? policy.broadcast_by_default
+                                          : subject_is_visible_for_rule(*rule, event.subject);
+        const auto privately_visible =
+            !replication_event_requires_private_access(event) ||
+            ReplicationRelevance::private_subject_is_visible(policy, client_id, event.subject);
+        if (publicly_visible && privately_visible) {
             ++decision.relevant_event_count;
         }
     }
     decision.relevant = decision.relevant_event_count > 0;
-    decision.reason = decision.relevant ? "matched_subject" : "filtered_subject";
+    if (decision.relevant) {
+        decision.reason = rule == nullptr ? "broadcast_default" : "matched_subject";
+    } else {
+        decision.reason = rule == nullptr && !policy.broadcast_by_default ? "no_interest_rule"
+                                                                          : "filtered_subject";
+    }
     return decision;
 }
 
@@ -375,6 +387,17 @@ bool ReplicationRelevance::subject_is_visible(const ReplicationRelevancePolicy& 
     return subject_is_visible_for_rule(*rule, subject);
 }
 
+bool ReplicationRelevance::private_subject_is_visible(const ReplicationRelevancePolicy& policy,
+                                                      core::NetId client_id,
+                                                      core::SaveId subject) noexcept {
+    if (!subject.is_valid()) {
+        return false;
+    }
+    const auto* rule = find_private_access_rule(policy, client_id);
+    return rule != nullptr &&
+           std::ranges::find(rule->private_subjects, subject) != rule->private_subjects.end();
+}
+
 ReplicationBatch ReplicationRelevance::filter_for_client(const ReplicationRelevancePolicy& policy,
                                                          const ReplicationBatch& batch,
                                                          core::NetId client_id) {
@@ -385,7 +408,9 @@ ReplicationBatch ReplicationRelevance::filter_for_client(const ReplicationReleva
     filtered.source_client_id = batch.source_client_id;
 
     for (const auto& event : batch.events) {
-        if (subject_is_visible(policy, client_id, event.subject)) {
+        if (subject_is_visible(policy, client_id, event.subject) &&
+            (!replication_event_requires_private_access(event) ||
+             private_subject_is_visible(policy, client_id, event.subject))) {
             filtered.events.push_back(event);
         }
     }
@@ -401,6 +426,10 @@ ReplicationBatch ReplicationRelevance::filter_for_client(const ReplicationReleva
         }
     }
     return filtered;
+}
+
+bool replication_event_requires_private_access(const world::OperationEvent& event) noexcept {
+    return event.type.starts_with("inventory.");
 }
 
 ReplicationIntakeReport ReplicationIntake::summarize(std::span<const ReplicationBatch> batches) {

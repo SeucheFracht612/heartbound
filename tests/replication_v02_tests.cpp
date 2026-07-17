@@ -125,8 +125,11 @@ void test_mixed_visibility_filters_events_ids_and_typed_state() {
 
     net::ReplicationRelevancePolicy policy;
     policy.broadcast_by_default = false;
-    policy.client_rules.push_back({first_id.value(), {core::SaveId::from_value(100)}, false});
-    policy.client_rules.push_back({second_id.value(), {core::SaveId::from_value(101)}, false});
+    const std::vector public_subjects{core::SaveId::from_value(100), core::SaveId::from_value(101)};
+    policy.client_rules.push_back({first_id.value(), public_subjects, false});
+    policy.client_rules.push_back({second_id.value(), public_subjects, false});
+    policy.private_access_rules.push_back({first_id.value(), {core::SaveId::from_value(100)}});
+    policy.private_access_rules.push_back({second_id.value(), {core::SaveId::from_value(101)}});
     host.set_replication_relevance_policy(policy);
 
     net::ServerCommandDispatcher dispatcher;
@@ -145,8 +148,8 @@ void test_mixed_visibility_filters_events_ids_and_typed_state() {
             if (!status) {
                 return status;
             }
-            operation.emit_event({"test.private", first.value(), "first private"});
-            operation.emit_event({"test.private", second.value(), "second private"});
+            operation.emit_event({"inventory.changed", first.value(), "first private"});
+            operation.emit_event({"inventory.changed", second.value(), "second private"});
             operation.emit_event({"test.global", {}, "hidden global"});
             operation.mark_replication_dirty();
             operation.mark_save_dirty();
@@ -240,6 +243,21 @@ void test_mixed_visibility_filters_events_ids_and_typed_state() {
     assert(second_snapshot.value().inventories.size() == 1);
     assert(first_snapshot.value().inventories.front().owner_id == core::SaveId::from_value(100));
     assert(second_snapshot.value().inventories.front().owner_id == core::SaveId::from_value(101));
+
+    net::ReplicationRelevancePolicy no_private_access;
+    no_private_access.broadcast_by_default = true;
+    const auto hidden_batch = net::ReplicationRelevance::filter_for_client(
+        no_private_access, complete_batch, first_id.value());
+    assert(hidden_batch.events.size() == 1);
+    assert(hidden_batch.events.front().type == "test.global");
+    assert(hidden_batch.reserved_ids.empty());
+    auto hidden_snapshot = world::filter_replication_delta_snapshot(
+        complete_snapshot, no_private_access, first_id.value());
+    assert(hidden_snapshot);
+    assert(hidden_snapshot.value().inventories.empty());
+    assert(hidden_snapshot.value().plan.subjects.empty());
+    assert(hidden_snapshot.value().plan.subject_event_count == 0);
+    assert(hidden_snapshot.value().plan.global_event_count == 1);
 
     auto unsafe_snapshot = complete_snapshot;
     unsafe_snapshot.inventories.front().owner_id = core::SaveId::from_value(999);

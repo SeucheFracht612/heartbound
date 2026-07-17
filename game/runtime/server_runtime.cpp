@@ -18,6 +18,43 @@
 
 namespace heartstead::game {
 
+namespace {
+
+void grant_private_subject_access(net::HostSession& host, core::NetId client_id,
+                                  core::SaveId subject_id) {
+    auto policy = host.replication_relevance_policy();
+    auto rule = std::ranges::find_if(policy.private_access_rules,
+                                     [client_id](const net::ReplicationPrivateAccessRule& value) {
+                                         return value.client_id == client_id;
+                                     });
+    if (rule == policy.private_access_rules.end()) {
+        policy.private_access_rules.push_back({client_id, {subject_id}});
+    } else if (std::ranges::find(rule->private_subjects, subject_id) ==
+               rule->private_subjects.end()) {
+        rule->private_subjects.push_back(subject_id);
+    }
+    host.set_replication_relevance_policy(std::move(policy));
+}
+
+void revoke_private_subject_access(net::HostSession& host, core::NetId client_id,
+                                   core::SaveId subject_id) {
+    auto policy = host.replication_relevance_policy();
+    auto rule = std::ranges::find_if(policy.private_access_rules,
+                                     [client_id](const net::ReplicationPrivateAccessRule& value) {
+                                         return value.client_id == client_id;
+                                     });
+    if (rule == policy.private_access_rules.end()) {
+        return;
+    }
+    std::erase(rule->private_subjects, subject_id);
+    if (rule->private_subjects.empty()) {
+        policy.private_access_rules.erase(rule);
+    }
+    host.set_replication_relevance_policy(std::move(policy));
+}
+
+} // namespace
+
 ServerRuntime::ServerRuntime(ServerRuntimeDesc desc)
     : desc_(std::move(desc)), world_(desc_.world), host_(desc_.host) {}
 
@@ -345,7 +382,11 @@ core::Status ServerRuntime::disconnect_client(core::NetId client_id) {
     const auto entity_id = found->second.entity_id;
     const auto* player = players_.find(runtime_handle);
     const auto removed_player_net_id = player == nullptr ? core::NetId{} : player->net_id;
+    const auto removed_player_save_id = player == nullptr ? core::SaveId{} : player->save_id;
     player_connections_.erase(found);
+    if (removed_player_save_id.is_valid()) {
+        revoke_private_subject_access(host_, client_id, removed_player_save_id);
+    }
     (void)players_.erase(runtime_handle);
     const auto* legacy = world_.entities().find(runtime_handle);
     if (legacy != nullptr && !legacy->persistent) {
@@ -706,6 +747,7 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
     player_connections_.emplace(
         client_id.value(), PlayerConnection{runtime_handle, entity_id.value(),
                                             movement::ServerMovementInputQueue{}, std::nullopt});
+    grant_private_subject_access(host_, client_id, save_id);
     return core::Status::ok();
 }
 

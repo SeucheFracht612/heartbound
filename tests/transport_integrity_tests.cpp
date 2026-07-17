@@ -468,14 +468,12 @@ void test_host_defers_reliable_application_replication_without_overtaking() {
     assert(session.drain_client_messages(client.value()));
 
     transport->fail_server_send(client.value(), net::TransportMessageKind::replication, 1);
-    assert(session.send_replication_message(
-        client.value(),
-        {net::TransportMessageKind::replication, net::TransportChannel::reliable, 1,
-         "test.snapshot", "first", 0}));
-    assert(session.send_replication_message(
-        client.value(),
-        {net::TransportMessageKind::replication, net::TransportChannel::reliable, 2,
-         "test.snapshot", "second", 0}));
+    assert(session.send_replication_message(client.value(), {net::TransportMessageKind::replication,
+                                                             net::TransportChannel::reliable, 1,
+                                                             "test.snapshot", "first", 0}));
+    assert(session.send_replication_message(client.value(), {net::TransportMessageKind::replication,
+                                                             net::TransportChannel::reliable, 2,
+                                                             "test.snapshot", "second", 0}));
     assert(session.pending_outbound_message_count() == 2);
     auto before_retry = session.drain_client_messages(client.value());
     assert(before_retry && before_retry.value().empty());
@@ -495,6 +493,20 @@ void test_host_defers_reliable_application_replication_without_overtaking() {
     assert(delivered.value()[1].message.payload == "second");
 }
 
+void test_host_disconnects_when_the_final_notice_cannot_be_delivered() {
+    FaultInjectingTransportHost* transport = nullptr;
+    auto session = make_fault_injected_session(transport);
+    assert(session.start());
+    auto client = session.connect_client();
+    assert(client && transport != nullptr);
+    assert(session.drain_client_messages(client.value()));
+
+    transport->fail_server_send(client.value(), net::TransportMessageKind::control, 0);
+    assert(session.disconnect_client(client.value()));
+    assert(session.connected_client_count() == 0);
+    assert(!transport->is_client_connected(client.value()));
+}
+
 } // namespace
 
 int main() {
@@ -506,5 +518,6 @@ int main() {
     test_host_send_failure_blocks_only_the_affected_client();
     test_host_backpressures_commands_while_committed_delivery_is_blocked();
     test_host_defers_reliable_application_replication_without_overtaking();
+    test_host_disconnects_when_the_final_notice_cannot_be_delivered();
     return 0;
 }

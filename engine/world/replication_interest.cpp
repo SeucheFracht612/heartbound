@@ -107,8 +107,7 @@ derive_replication_interest_report(const WorldState& state,
     }
 
     WorldReplicationInterestReport report;
-    report.subject_count =
-        static_cast<std::uint32_t>(subjects.value().size() + workpieces.size());
+    report.subject_count = static_cast<std::uint32_t>(subjects.value().size() + workpieces.size());
     report.viewer_count = static_cast<std::uint32_t>(options.viewers.size());
     report.broadcast_by_default = options.broadcast_by_default;
     report.receives_global_events = options.receives_global_events;
@@ -163,8 +162,8 @@ derive_replication_interest_report(const WorldState& state,
         // Keep their replication private and deterministic by exposing them only to the owning
         // live session. Unbound workpieces remain hidden until stable player identity rebinds them.
         for (const auto* workpiece : workpieces) {
-            const auto owner_visible = workpiece->owner_session.is_valid() &&
-                                       workpiece->owner_session == viewer.viewer_id;
+            const auto owner_visible =
+                workpiece->owner_session.is_valid() && workpiece->owner_session == viewer.viewer_id;
             const auto lod = owner_visible ? simulation::SimulationLod::full
                                            : simulation::SimulationLod::unloaded;
             count_lod(viewer_report, lod);
@@ -212,8 +211,9 @@ refresh_host_session_replication_interest(net::HostSession& host, const WorldSta
         return report;
     }
 
-    auto policy = report.value().policy;
-    host.set_replication_relevance_policy(std::move(policy));
+    report.value().policy.private_access_rules =
+        host.replication_relevance_policy().private_access_rules;
+    host.set_replication_relevance_policy(report.value().policy);
     return core::Result<WorldReplicationInterestReport>::success(std::move(report).value());
 }
 

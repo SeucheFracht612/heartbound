@@ -25,8 +25,7 @@ struct ReplicationBatch {
     core::NetId source_client_id;
 };
 
-[[nodiscard]] std::uint64_t
-replication_stream_sequence(const ReplicationBatch& batch) noexcept;
+[[nodiscard]] std::uint64_t replication_stream_sequence(const ReplicationBatch& batch) noexcept;
 
 struct ReplicationInterestRule {
     core::NetId client_id;
@@ -34,9 +33,15 @@ struct ReplicationInterestRule {
     bool receives_global_events = true;
 };
 
+struct ReplicationPrivateAccessRule {
+    core::NetId client_id;
+    std::vector<core::SaveId> private_subjects;
+};
+
 struct ReplicationRelevancePolicy {
     bool broadcast_by_default = true;
     std::vector<ReplicationInterestRule> client_rules;
+    std::vector<ReplicationPrivateAccessRule> private_access_rules;
 };
 
 struct ReplicationRelevanceDecision {
@@ -98,10 +103,16 @@ class ReplicationRelevance {
     [[nodiscard]] static bool subject_is_visible(const ReplicationRelevancePolicy& policy,
                                                  core::NetId client_id,
                                                  core::SaveId subject) noexcept;
-    [[nodiscard]] static ReplicationBatch filter_for_client(
-        const ReplicationRelevancePolicy& policy, const ReplicationBatch& batch,
-        core::NetId client_id);
+    [[nodiscard]] static bool private_subject_is_visible(const ReplicationRelevancePolicy& policy,
+                                                         core::NetId client_id,
+                                                         core::SaveId subject) noexcept;
+    [[nodiscard]] static ReplicationBatch
+    filter_for_client(const ReplicationRelevancePolicy& policy, const ReplicationBatch& batch,
+                      core::NetId client_id);
 };
+
+[[nodiscard]] bool
+replication_event_requires_private_access(const world::OperationEvent& event) noexcept;
 
 class ReplicationIntake {
   public:
