@@ -459,6 +459,42 @@ void test_host_backpressures_commands_while_committed_delivery_is_blocked() {
     }
 }
 
+void test_host_defers_reliable_application_replication_without_overtaking() {
+    FaultInjectingTransportHost* transport = nullptr;
+    auto session = make_fault_injected_session(transport);
+    assert(session.start());
+    auto client = session.connect_client();
+    assert(client && transport != nullptr);
+    assert(session.drain_client_messages(client.value()));
+
+    transport->fail_server_send(client.value(), net::TransportMessageKind::replication, 1);
+    assert(session.send_replication_message(
+        client.value(),
+        {net::TransportMessageKind::replication, net::TransportChannel::reliable, 1,
+         "test.snapshot", "first", 0}));
+    assert(session.send_replication_message(
+        client.value(),
+        {net::TransportMessageKind::replication, net::TransportChannel::reliable, 2,
+         "test.snapshot", "second", 0}));
+    assert(session.pending_outbound_message_count() == 2);
+    auto before_retry = session.drain_client_messages(client.value());
+    assert(before_retry && before_retry.value().empty());
+
+    net::ServerCommandDispatcher dispatcher;
+    auto retry = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(retry);
+    assert(retry.value().outbound_delivery.delivered_message_count == 2);
+    assert(retry.value().outbound_delivery.retry_attempt_count == 1);
+    assert(retry.value().outbound_delivery.pending_message_count == 0);
+
+    auto delivered = session.drain_client_messages(client.value());
+    assert(delivered && delivered.value().size() == 2);
+    assert(delivered.value()[0].message.sequence == 1);
+    assert(delivered.value()[0].message.payload == "first");
+    assert(delivered.value()[1].message.sequence == 2);
+    assert(delivered.value()[1].message.payload == "second");
+}
+
 } // namespace
 
 int main() {
@@ -469,5 +505,6 @@ int main() {
     test_host_retries_responses_without_redispatching_drained_commands();
     test_host_send_failure_blocks_only_the_affected_client();
     test_host_backpressures_commands_while_committed_delivery_is_blocked();
+    test_host_defers_reliable_application_replication_without_overtaking();
     return 0;
 }

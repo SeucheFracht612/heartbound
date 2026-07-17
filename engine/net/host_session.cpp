@@ -246,7 +246,31 @@ core::Status HostSession::send_replication_message(core::NetId client_id,
                                      "host session can only send replication messages through "
                                      "send_replication_message");
     }
-    return transport_->send_server_to_client(client_id, std::move(message));
+    auto status = validate_transport_message(message, transport_->capabilities().max_payload_bytes);
+    if (!status) {
+        return status;
+    }
+    if (!transport_->is_client_connected(client_id)) {
+        return core::Status::failure("transport.unknown_client",
+                                     "replication recipient is not connected");
+    }
+
+    auto pending = pending_outbound_.find(client_id);
+    if (pending != pending_outbound_.end() && !pending->second.empty()) {
+        pending->second.push_back(PendingOutboundMessage{std::move(message), 0});
+        return core::Status::ok();
+    }
+
+    status = transport_->send_server_to_client(client_id, message);
+    if (status || message.channel != TransportChannel::reliable) {
+        return status;
+    }
+
+    // Reliable application replication describes authoritative state that may already have been
+    // committed. Retain it behind the same per-client FIFO as command results so a transient
+    // transport failure cannot turn a successful world mutation into an apparent API failure.
+    pending_outbound_[client_id].push_back(PendingOutboundMessage{std::move(message), 1});
+    return core::Status::ok();
 }
 
 core::Result<std::vector<TransportEnvelope>>
