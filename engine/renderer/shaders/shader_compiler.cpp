@@ -2,6 +2,7 @@
 
 #include "engine/core/hash.hpp"
 #include "engine/core/ids.hpp"
+#include "engine/renderer/shaders/spirv_loader.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -40,7 +41,8 @@ constexpr std::string_view manifest_magic = "heartstead.shader_manifest.v1";
 }
 
 [[nodiscard]] bool is_valid_relative_path(const std::filesystem::path& path) {
-    return !path.empty() && !path.is_absolute() && core::is_valid_local_id(path.generic_string());
+    return assets::is_safe_asset_relative_path(path) &&
+           core::is_valid_local_id(path.generic_string());
 }
 
 [[nodiscard]] std::filesystem::path make_compiled_path(const assets::AssetRecord& source,
@@ -69,14 +71,6 @@ read_file_bytes(const std::filesystem::path& path) {
         std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()));
 }
 
-[[nodiscard]] std::uint32_t read_le_u32(std::span<const std::uint8_t> bytes,
-                                        std::size_t offset) noexcept {
-    return static_cast<std::uint32_t>(bytes[offset]) |
-           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8U) |
-           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16U) |
-           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24U);
-}
-
 void add_diagnostic(ShaderCompileResult& result, modding::DiagnosticSeverity severity,
                     std::filesystem::path source, std::string code, std::string message) {
     result.diagnostics.push_back(modding::ModDiagnostic{
@@ -89,27 +83,11 @@ void add_diagnostic(ShaderCompileResult& result, modding::DiagnosticSeverity sev
 
 [[nodiscard]] core::Status validate_spirv_bytes(std::span<const std::uint8_t> bytes,
                                                 std::string_view source_name) {
-    constexpr std::uint32_t spirv_magic = 0x07230203;
-    if (bytes.size() < sizeof(std::uint32_t) * 5U || bytes.size() % sizeof(std::uint32_t) != 0) {
-        return core::Status::failure(
-            "shader_compiler.invalid_spirv",
-            "production SPIR-V shader must contain a complete header and 32-bit words: " +
-                std::string(source_name));
-    }
-    if (read_le_u32(bytes, 0) != spirv_magic) {
+    auto status = validate_spirv(bytes);
+    if (!status) {
         return core::Status::failure("shader_compiler.invalid_spirv",
-                                     "production SPIR-V shader has an invalid magic word: " +
-                                         std::string(source_name));
-    }
-    if (read_le_u32(bytes, 4) == 0) {
-        return core::Status::failure("shader_compiler.invalid_spirv",
-                                     "production SPIR-V shader version word must be non-zero: " +
-                                         std::string(source_name));
-    }
-    if (read_le_u32(bytes, 12) == 0) {
-        return core::Status::failure("shader_compiler.invalid_spirv",
-                                     "production SPIR-V shader id bound must be non-zero: " +
-                                         std::string(source_name));
+                                     "production SPIR-V shader is invalid: " +
+                                         std::string(source_name) + ": " + status.error().message);
     }
     return core::Status::ok();
 }
@@ -236,10 +214,10 @@ core::Result<ShaderCompileResult> ShaderCompiler::compile(const assets::AssetCat
         return core::Result<ShaderCompileResult>::failure(
             "shader_compiler.invalid_output_root", "shader compiler output root is required");
     }
-    if (config.manifest_relative_path.empty() || config.manifest_relative_path.is_absolute()) {
+    if (!assets::is_safe_asset_relative_path(config.manifest_relative_path)) {
         return core::Result<ShaderCompileResult>::failure(
             "shader_compiler.invalid_manifest_path",
-            "shader compiler manifest path must be a relative path");
+            "shader compiler manifest path must be a safe relative path");
     }
     if (!core::is_valid_namespace_id(config.profile)) {
         return core::Result<ShaderCompileResult>::failure(
@@ -251,8 +229,20 @@ core::Result<ShaderCompileResult> ShaderCompiler::compile(const assets::AssetCat
             "shader compiler pipeline version must be non-zero");
     }
 
+    auto output_root = assets::canonical_asset_root(config.output_root);
+    if (!output_root) {
+        return core::Result<ShaderCompileResult>::failure(output_root.error().code,
+                                                          output_root.error().message);
+    }
+    auto manifest_path =
+        assets::resolve_asset_path(output_root.value(), config.manifest_relative_path);
+    if (!manifest_path) {
+        return core::Result<ShaderCompileResult>::failure(manifest_path.error().code,
+                                                          manifest_path.error().message);
+    }
+
     ShaderCompileResult result;
-    result.manifest_path = config.output_root / config.manifest_relative_path;
+    result.manifest_path = std::move(manifest_path).value();
     struct PendingShader {
         CompiledShaderRecord record;
         std::vector<std::uint8_t> source_bytes;
@@ -347,9 +337,14 @@ core::Result<ShaderCompileResult> ShaderCompiler::compile(const assets::AssetCat
     }
 
     for (const auto& shader : pending_shaders) {
+        auto compiled_path =
+            assets::resolve_asset_path(output_root.value(), shader.record.compiled_relative_path);
+        if (!compiled_path) {
+            return core::Result<ShaderCompileResult>::failure(compiled_path.error().code,
+                                                              compiled_path.error().message);
+        }
         auto status =
-            write_compiled_payload(config.output_root / shader.record.compiled_relative_path,
-                                   shader.record, shader.source_bytes);
+            write_compiled_payload(compiled_path.value(), shader.record, shader.source_bytes);
         if (!status) {
             return core::Result<ShaderCompileResult>::failure(status.error().code,
                                                               status.error().message);

@@ -1,5 +1,6 @@
 #include "engine/renderer/shaders/spirv_loader.hpp"
 
+#include <array>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -10,6 +11,14 @@ namespace heartstead::renderer::shaders {
 namespace {
 
 constexpr std::uint32_t spirv_magic = 0x07230203;
+
+[[nodiscard]] std::uint32_t read_le_u32(std::span<const std::uint8_t> bytes,
+                                        std::size_t offset) noexcept {
+    return static_cast<std::uint32_t>(bytes[offset]) |
+           (static_cast<std::uint32_t>(bytes[offset + 1]) << 8U) |
+           (static_cast<std::uint32_t>(bytes[offset + 2]) << 16U) |
+           (static_cast<std::uint32_t>(bytes[offset + 3]) << 24U);
+}
 
 } // namespace
 
@@ -37,6 +46,20 @@ core::Status validate_spirv(std::span<const std::uint32_t> words) {
                                      "SPIR-V binary schema word must be zero");
     }
     return core::Status::ok();
+}
+
+core::Status validate_spirv(std::span<const std::uint8_t> bytes) {
+    if (bytes.size() < 5U * sizeof(std::uint32_t) || bytes.size() % sizeof(std::uint32_t) != 0) {
+        return core::Status::failure(
+            "renderer.invalid_spirv_size",
+            "SPIR-V binary must contain a complete header and 32-bit words");
+    }
+
+    std::array<std::uint32_t, 5> header{};
+    for (std::size_t index = 0; index < header.size(); ++index) {
+        header[index] = read_le_u32(bytes, index * sizeof(std::uint32_t));
+    }
+    return validate_spirv(header);
 }
 
 core::Result<std::vector<std::uint32_t>> load_spirv_file(const std::filesystem::path& path) {
@@ -70,9 +93,8 @@ core::Result<std::vector<std::uint32_t>> load_spirv_file(const std::filesystem::
 
     auto status = validate_spirv(words);
     if (!status) {
-        return core::Result<std::vector<std::uint32_t>>::failure(status.error().code,
-                                                                 status.error().message + ": " +
-                                                                     path.string());
+        return core::Result<std::vector<std::uint32_t>>::failure(
+            status.error().code, status.error().message + ": " + path.string());
     }
     return core::Result<std::vector<std::uint32_t>>::success(std::move(words));
 }

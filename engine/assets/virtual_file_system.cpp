@@ -19,21 +19,6 @@ namespace {
            value.find("//") != std::string_view::npos;
 }
 
-[[nodiscard]] bool is_safe_relative_path(const std::filesystem::path& path) {
-    if (path.empty() || path.is_absolute()) {
-        return false;
-    }
-
-    for (const auto& part : path) {
-        const auto text = part.generic_string();
-        if (text.empty() || text == "." || text == "..") {
-            return false;
-        }
-    }
-
-    return true;
-}
-
 [[nodiscard]] bool is_same_or_child_path(const std::filesystem::path& child,
                                          const std::filesystem::path& parent) {
     auto child_it = child.begin();
@@ -135,6 +120,73 @@ list_files_impl(const std::vector<MountPoint>& mounts, std::string_view namespac
 
 } // namespace
 
+bool is_safe_asset_relative_path(const std::filesystem::path& path) noexcept {
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory() ||
+        path.generic_string().find('\\') != std::string::npos) {
+        return false;
+    }
+
+    for (const auto& part : path) {
+        const auto text = part.generic_string();
+        if (text.empty() || text == "." || text == "..") {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+core::Result<std::filesystem::path> canonical_asset_root(const std::filesystem::path& root) {
+    if (root.empty()) {
+        return core::Result<std::filesystem::path>::failure(
+            "asset_path.invalid_root", "asset filesystem root must not be empty");
+    }
+
+    std::error_code error;
+    const auto absolute_root = std::filesystem::absolute(root, error);
+    if (error) {
+        return core::Result<std::filesystem::path>::failure(
+            "asset_path.root_resolution_failed",
+            "failed to resolve asset filesystem root: " + error.message());
+    }
+    const auto canonical_root = std::filesystem::weakly_canonical(absolute_root, error);
+    if (error) {
+        return core::Result<std::filesystem::path>::failure(
+            "asset_path.root_resolution_failed",
+            "failed to canonicalize asset filesystem root: " + error.message());
+    }
+    return core::Result<std::filesystem::path>::success(canonical_root);
+}
+
+core::Result<std::filesystem::path> resolve_asset_path(const std::filesystem::path& root,
+                                                       const std::filesystem::path& relative_path) {
+    if (!is_safe_asset_relative_path(relative_path)) {
+        return core::Result<std::filesystem::path>::failure(
+            "asset_path.invalid_relative_path",
+            "asset filesystem path must be a safe relative path");
+    }
+
+    auto canonical_root = canonical_asset_root(root);
+    if (!canonical_root) {
+        return core::Result<std::filesystem::path>::failure(canonical_root.error().code,
+                                                            canonical_root.error().message);
+    }
+
+    std::error_code error;
+    const auto candidate =
+        std::filesystem::weakly_canonical(canonical_root.value() / relative_path, error);
+    if (error) {
+        return core::Result<std::filesystem::path>::failure(
+            "asset_path.path_resolution_failed",
+            "failed to resolve asset filesystem path: " + error.message());
+    }
+    if (!is_same_or_child_path(candidate, canonical_root.value())) {
+        return core::Result<std::filesystem::path>::failure(
+            "asset_path.outside_root", "asset filesystem path resolves outside its root");
+    }
+    return core::Result<std::filesystem::path>::success(candidate);
+}
+
 core::Result<VirtualPath> VirtualPath::parse(std::string_view value) {
     const auto separator = value.find(':');
     if (separator == std::string_view::npos || separator == 0 || separator + 1 >= value.size()) {
@@ -156,7 +208,7 @@ core::Result<VirtualPath> VirtualPath::parse(std::string_view value) {
     }
 
     std::filesystem::path relative_path{std::string(relative_part)};
-    if (!is_safe_relative_path(relative_path)) {
+    if (!is_safe_asset_relative_path(relative_path)) {
         return core::Result<VirtualPath>::failure("vfs.unsafe_relative_path",
                                                   "virtual path must be a safe relative path");
     }

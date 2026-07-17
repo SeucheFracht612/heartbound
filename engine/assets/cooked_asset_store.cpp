@@ -291,13 +291,23 @@ CookedAssetStore::load(std::filesystem::path root, std::filesystem::path manifes
         return core::Result<CookedAssetStore>::failure("cooked_asset_store.invalid_root",
                                                        "cooked asset store root is required");
     }
-    if (manifest_relative_path.empty() || manifest_relative_path.is_absolute()) {
+    if (!is_safe_asset_relative_path(manifest_relative_path)) {
         return core::Result<CookedAssetStore>::failure(
             "cooked_asset_store.invalid_manifest_path",
-            "cooked asset manifest path must be relative");
+            "cooked asset manifest path must be a safe relative path");
     }
 
-    auto manifest_text = read_text_file(root / manifest_relative_path);
+    auto canonical_root = canonical_asset_root(root);
+    if (!canonical_root) {
+        return core::Result<CookedAssetStore>::failure(canonical_root.error().code,
+                                                       canonical_root.error().message);
+    }
+    auto manifest_path = resolve_asset_path(canonical_root.value(), manifest_relative_path);
+    if (!manifest_path) {
+        return core::Result<CookedAssetStore>::failure(manifest_path.error().code,
+                                                       manifest_path.error().message);
+    }
+    auto manifest_text = read_text_file(manifest_path.value());
     if (!manifest_text) {
         return core::Result<CookedAssetStore>::failure(manifest_text.error().code,
                                                        manifest_text.error().message);
@@ -309,7 +319,7 @@ CookedAssetStore::load(std::filesystem::path root, std::filesystem::path manifes
     }
 
     CookedAssetStore store;
-    store.root_ = std::move(root);
+    store.root_ = std::move(canonical_root).value();
     store.manifest_ = std::move(manifest).value();
     return core::Result<CookedAssetStore>::success(std::move(store));
 }
@@ -323,7 +333,7 @@ const std::filesystem::path& CookedAssetStore::root() const noexcept {
 }
 
 core::Result<CookedAssetPayload> CookedAssetStore::load_payload(std::string_view logical_id) const {
-    const auto* record = manifest_.find(logical_id);
+    const auto* record = manifest_.find_active(logical_id);
     if (record == nullptr) {
         return core::Result<CookedAssetPayload>::failure(
             "cooked_asset_store.asset_not_found",
@@ -334,12 +344,18 @@ core::Result<CookedAssetPayload> CookedAssetStore::load_payload(std::string_view
 
 core::Result<CookedAssetPayload>
 CookedAssetStore::load_payload(const CookedAssetRecord& record) const {
-    if (record.cooked_relative_path.empty() || record.cooked_relative_path.is_absolute()) {
+    if (!is_safe_asset_relative_path(record.cooked_relative_path)) {
         return core::Result<CookedAssetPayload>::failure(
-            "cooked_asset_store.invalid_cooked_path", "cooked asset record path must be relative");
+            "cooked_asset_store.invalid_cooked_path",
+            "cooked asset record path must be a safe relative path");
     }
 
-    auto bytes = read_file_bytes(root_ / record.cooked_relative_path);
+    auto payload_path = resolve_asset_path(root_, record.cooked_relative_path);
+    if (!payload_path) {
+        return core::Result<CookedAssetPayload>::failure(payload_path.error().code,
+                                                         payload_path.error().message);
+    }
+    auto bytes = read_file_bytes(payload_path.value());
     if (!bytes) {
         return core::Result<CookedAssetPayload>::failure(bytes.error().code, bytes.error().message);
     }

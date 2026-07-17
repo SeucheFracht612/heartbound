@@ -30,6 +30,14 @@ struct VirtualFileEntry {
     std::size_t mount_index = 0;
 };
 
+// Asset-facing filesystem paths must stay below an explicit root. These helpers reject
+// traversal syntax before resolving symlinks, then verify the resolved path component-wise.
+[[nodiscard]] bool is_safe_asset_relative_path(const std::filesystem::path& path) noexcept;
+[[nodiscard]] core::Result<std::filesystem::path>
+canonical_asset_root(const std::filesystem::path& root);
+[[nodiscard]] core::Result<std::filesystem::path>
+resolve_asset_path(const std::filesystem::path& root, const std::filesystem::path& relative_path);
+
 class VirtualFileSystem {
   public:
     [[nodiscard]] core::Status mount(std::string namespace_id, std::filesystem::path root);

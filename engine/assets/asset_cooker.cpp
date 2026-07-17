@@ -1108,10 +1108,21 @@ core::Result<AssetCookResult> AssetCooker::cook(const AssetCatalog& catalog,
                                                       manifest.error().message);
     }
 
+    auto output_root = canonical_asset_root(config.output_root);
+    if (!output_root) {
+        return core::Result<AssetCookResult>::failure(output_root.error().code,
+                                                      output_root.error().message);
+    }
+    auto manifest_path = resolve_asset_path(output_root.value(), config.manifest_relative_path);
+    if (!manifest_path) {
+        return core::Result<AssetCookResult>::failure(manifest_path.error().code,
+                                                      manifest_path.error().message);
+    }
+
     AssetCookResult result;
     result.backend = config.backend;
     result.manifest = std::move(manifest).value();
-    result.manifest_path = config.output_root / config.manifest_relative_path;
+    result.manifest_path = std::move(manifest_path).value();
 
     for (auto& cooked : result.manifest.records) {
         const auto* source = find_source_record(catalog, cooked);
@@ -1151,8 +1162,12 @@ core::Result<AssetCookResult> AssetCooker::cook(const AssetCatalog& catalog,
             build_cooked_payload_bytes(cooked, *source, config.backend, result.manifest.profile,
                                        source_bytes.value(), metadata);
         cooked.cooked_hash = core::stable_hash64_hex(payload);
-        const auto output_path = config.output_root / cooked.cooked_relative_path;
-        auto status = write_cooked_payload(output_path, payload);
+        auto output_path = resolve_asset_path(output_root.value(), cooked.cooked_relative_path);
+        if (!output_path) {
+            return core::Result<AssetCookResult>::failure(output_path.error().code,
+                                                          output_path.error().message);
+        }
+        auto status = write_cooked_payload(output_path.value(), payload);
         if (!status) {
             return core::Result<AssetCookResult>::failure(status.error().code,
                                                           status.error().message);
@@ -1174,9 +1189,9 @@ core::Status validate_asset_cook_config(const AssetCookConfig& config) {
         return core::Status::failure("asset_cooker.invalid_output_root",
                                      "asset cooker output root is required");
     }
-    if (config.manifest_relative_path.empty() || config.manifest_relative_path.is_absolute()) {
+    if (!is_safe_asset_relative_path(config.manifest_relative_path)) {
         return core::Status::failure("asset_cooker.invalid_manifest_path",
-                                     "asset cooker manifest path must be a relative path");
+                                     "asset cooker manifest path must be a safe relative path");
     }
 
     switch (config.backend) {

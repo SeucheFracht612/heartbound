@@ -78,15 +78,24 @@ core::Status AssetCatalog::add(AssetRecord record) {
         return core::Status::failure("asset_catalog.missing_source",
                                      "asset record needs a source id");
     }
+    if (!core::is_valid_namespace_id(record.source_id)) {
+        return core::Status::failure("asset_catalog.invalid_source",
+                                     "asset source id must be a safe namespace identifier");
+    }
+
+    const auto duplicate = std::ranges::find_if(records_, [&record](const AssetRecord& existing) {
+        return existing.logical_id == record.logical_id &&
+               existing.source_kind == record.source_kind && existing.source_id == record.source_id;
+    });
+    if (duplicate != records_.end()) {
+        return core::Status::failure("asset_catalog.duplicate_asset",
+                                     "duplicate asset logical id in same source: " +
+                                         record.logical_id);
+    }
 
     const auto existing = active_by_logical_id_.find(record.logical_id);
     if (existing != active_by_logical_id_.end()) {
         const auto& active = records_[existing->second];
-        if (active.priority == record.priority && active.source_id == record.source_id) {
-            return core::Status::failure("asset_catalog.duplicate_asset",
-                                         "duplicate asset logical id in same source: " +
-                                             record.logical_id);
-        }
         if (active.priority == record.priority && active.source_id != record.source_id) {
             return core::Status::failure(
                 "asset_catalog.ambiguous_priority",

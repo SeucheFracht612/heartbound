@@ -699,7 +699,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         "base",
         0,
         dependency_assets / "textures/items/clay.txt",
-        "texture_hash",
+        heartstead::core::stable_hash64_hex("texture_hash"),
         false,
         {},
     }));
@@ -711,7 +711,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         "base",
         0,
         dependency_assets / "materials/clay.mat",
-        "material_hash",
+        heartstead::core::stable_hash64_hex("material_hash"),
         false,
         {dependency_texture_path.value()},
     }));
@@ -757,7 +757,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
         "base",
         0,
         dependency_assets / "materials/clay.mat",
-        "missing_material_hash",
+        heartstead::core::stable_hash64_hex("missing_material_hash"),
         false,
         {heartstead::assets::VirtualPath::parse("base:textures/items/missing.txt").value()},
     }));

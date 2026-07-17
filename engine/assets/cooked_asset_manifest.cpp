@@ -10,6 +10,8 @@
 #include <sstream>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace heartstead::assets {
@@ -127,7 +129,14 @@ constexpr std::size_t max_record_dependencies = 4096;
 }
 
 [[nodiscard]] bool is_valid_relative_path(const std::filesystem::path& path) {
-    return core::is_valid_local_id(path.generic_string());
+    return is_safe_asset_relative_path(path) && core::is_valid_local_id(path.generic_string());
+}
+
+[[nodiscard]] bool is_valid_stable_hash(std::string_view value) noexcept {
+    return value.size() == 16 && std::ranges::all_of(value, [](char character) {
+               return (character >= '0' && character <= '9') ||
+                      (character >= 'a' && character <= 'f');
+           });
 }
 
 [[nodiscard]] core::Result<AssetKind> parse_asset_kind(std::string_view value) {
@@ -291,6 +300,11 @@ core::Status CookedAssetManifest::validate() const {
                                      "cooked asset profile must be a safe identifier");
     }
 
+    std::unordered_set<std::string> record_identities;
+    std::unordered_set<std::string> cooked_paths;
+    std::unordered_map<std::string, std::size_t> active_counts;
+    std::unordered_set<std::string> logical_ids;
+
     for (const auto& record : records) {
         if (!core::PrototypeId::parse(record.logical_id)) {
             return core::Status::failure("cooked_asset_manifest.invalid_logical_id",
@@ -301,21 +315,28 @@ core::Status CookedAssetManifest::validate() const {
             return core::Status::failure("cooked_asset_manifest.invalid_source_path",
                                          "cooked asset source virtual path is invalid");
         }
+        if (record.logical_id != asset_logical_id(record.source_virtual_path)) {
+            return core::Status::failure(
+                "cooked_asset_manifest.logical_path_mismatch",
+                "cooked asset logical id must equal its source virtual path");
+        }
         if (!core::is_valid_namespace_id(record.source_id)) {
             return core::Status::failure("cooked_asset_manifest.invalid_source_id",
                                          "cooked asset source id is invalid");
         }
-        if (record.source_hash.empty()) {
-            return core::Status::failure("cooked_asset_manifest.missing_source_hash",
-                                         "cooked asset source hash is required");
+        if (!is_valid_stable_hash(record.source_hash)) {
+            return core::Status::failure(
+                "cooked_asset_manifest.invalid_source_hash",
+                "cooked asset source hash must be a lowercase 64-bit hexadecimal digest");
         }
         if (!is_valid_relative_path(record.cooked_relative_path)) {
             return core::Status::failure("cooked_asset_manifest.invalid_cooked_path",
                                          "cooked asset output path is invalid");
         }
-        if (record.cooked_hash.empty()) {
-            return core::Status::failure("cooked_asset_manifest.missing_cooked_hash",
-                                         "cooked asset hash is required");
+        if (!is_valid_stable_hash(record.cooked_hash)) {
+            return core::Status::failure(
+                "cooked_asset_manifest.invalid_cooked_hash",
+                "cooked asset hash must be a lowercase 64-bit hexadecimal digest");
         }
         if (record.pipeline_version == 0) {
             return core::Status::failure("cooked_asset_manifest.invalid_pipeline_version",
@@ -327,6 +348,33 @@ core::Status CookedAssetManifest::validate() const {
                 return core::Status::failure("cooked_asset_manifest.invalid_dependency",
                                              "cooked asset dependency virtual path is invalid");
             }
+        }
+
+        const auto identity = record.logical_id + "|" +
+                              std::string(asset_source_kind_name(record.source_kind)) + "|" +
+                              record.source_id;
+        if (!record_identities.insert(identity).second) {
+            return core::Status::failure(
+                "cooked_asset_manifest.duplicate_record",
+                "cooked asset manifest contains a duplicate logical/source record");
+        }
+        if (!cooked_paths.insert(record.cooked_relative_path.generic_string()).second) {
+            return core::Status::failure("cooked_asset_manifest.duplicate_cooked_path",
+                                         "cooked asset manifest contains a duplicate output path");
+        }
+        logical_ids.insert(record.logical_id);
+        if (record.active) {
+            ++active_counts[record.logical_id];
+        }
+    }
+
+    for (const auto& logical_id : logical_ids) {
+        const auto active_count = active_counts[logical_id];
+        if (active_count != 1) {
+            return core::Status::failure(
+                active_count == 0 ? "cooked_asset_manifest.missing_active_record"
+                                  : "cooked_asset_manifest.multiple_active_records",
+                "cooked asset manifest must contain exactly one active record per logical id");
         }
     }
 

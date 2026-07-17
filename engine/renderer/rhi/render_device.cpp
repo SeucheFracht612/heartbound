@@ -2,6 +2,7 @@
 
 #include "engine/profiling/cpu_timing.hpp"
 #include "engine/renderer/rhi/render_frame_plan.hpp"
+#include "engine/renderer/shaders/spirv_loader.hpp"
 #include "engine/renderer/vulkan/vulkan_backend.hpp"
 
 #include <algorithm>
@@ -18,8 +19,6 @@
 namespace heartstead::renderer::rhi {
 
 namespace {
-
-constexpr std::uint32_t spirv_magic = 0x07230203;
 
 [[nodiscard]] bool is_valid_render_binding_name(std::string_view name) noexcept {
     if (name.empty() || name.front() == '.' || name.back() == '.') {
@@ -251,8 +250,8 @@ class HeadlessRenderDevice final : public IRenderDevice {
                     }
                     ++stats.draw_count;
                     ++stats.indexed_draw_count;
-                    stats.total_indices += static_cast<std::size_t>(draw.index_count) *
-                                           draw.instance_count;
+                    stats.total_indices +=
+                        static_cast<std::size_t>(draw.index_count) * draw.instance_count;
                 }
             }
         }
@@ -696,8 +695,7 @@ class HeadlessRenderDevice final : public IRenderDevice {
 
             materials.insert(draw.material_id.value());
             stats.total_vertices += draw.vertex_count;
-            stats.total_indices +=
-                static_cast<std::size_t>(draw.index_count) * draw.instance_count;
+            stats.total_indices += static_cast<std::size_t>(draw.index_count) * draw.instance_count;
         }
 
         stats.material_count = materials.size();
@@ -974,21 +972,13 @@ core::Status validate_render_shader_module_upload(const RenderShaderModuleDesc& 
     case RenderShaderStage::compute:
         break;
     }
-    if (spirv_words.size() < 5) {
+    auto status = shaders::validate_spirv(spirv_words);
+    if (!status && status.error().code == "renderer.spirv_header_missing") {
         return core::Status::failure("renderer.empty_shader_module",
                                      "shader module SPIR-V must contain a header");
     }
-    if (spirv_words.front() != spirv_magic) {
-        return core::Status::failure("renderer.invalid_spirv_magic",
-                                     "shader module SPIR-V has an invalid magic word");
-    }
-    if (spirv_words[1] == 0) {
-        return core::Status::failure("renderer.invalid_spirv_version",
-                                     "shader module SPIR-V version word must be non-zero");
-    }
-    if (spirv_words[3] == 0) {
-        return core::Status::failure("renderer.invalid_spirv_bound",
-                                     "shader module SPIR-V id bound must be non-zero");
+    if (!status) {
+        return status;
     }
     return core::Status::ok();
 }
