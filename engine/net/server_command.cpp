@@ -81,6 +81,11 @@ ServerCommandDispatcher::dispatch(const CommandEnvelope& envelope,
                                   const CommandExecutionContext& context) const {
     auto report = dispatch_report(envelope, context);
     if (!report.succeeded) {
+        if (!report.error.has_value()) {
+            return core::Result<CommandDispatchResult>::failure(
+                "command.invalid_failure_report",
+                "command dispatch failed without reporting an error");
+        }
         return core::Result<CommandDispatchResult>::failure(report.error->code,
                                                             report.error->message);
     }

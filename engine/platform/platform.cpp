@@ -424,13 +424,13 @@ std::size_t HeadlessPlatform::open_window_count() const noexcept {
 
 void HeadlessPlatform::begin_frame() {
     for (auto& [_, window_input] : input_) {
-        for (auto& [__, key] : window_input) {
+        for (auto& [ignored_key_code, key] : window_input) {
             key.pressed = false;
             key.released = false;
         }
     }
     for (auto& [_, window_input] : mouse_buttons_) {
-        for (auto& [__, button] : window_input) {
+        for (auto& [ignored_button_code, button] : window_input) {
             button.pressed = false;
             button.released = false;
         }
@@ -831,9 +831,8 @@ class X11NativePlatform final : public IPlatform {
             XSelectInput(display_, clipboard_owner_window_, PropertyChangeMask);
         }
         static const char invisible_cursor_bits[] = {0};
-        const auto cursor_bitmap =
-            XCreateBitmapFromData(display_, RootWindow(display_, screen_), invisible_cursor_bits,
-                                  1, 1);
+        const auto cursor_bitmap = XCreateBitmapFromData(display_, RootWindow(display_, screen_),
+                                                         invisible_cursor_bits, 1, 1);
         if (cursor_bitmap != None) {
             XColor transparent{};
             invisible_cursor_ = XCreatePixmapCursor(display_, cursor_bitmap, cursor_bitmap,
@@ -1060,11 +1059,10 @@ class X11NativePlatform final : public IPlatform {
             return core::Status::failure("platform.window_not_open", "window is not open");
         }
         if (captured) {
-            const auto result = XGrabPointer(display_, found->second, True,
-                                             PointerMotionMask | ButtonPressMask |
-                                                 ButtonReleaseMask,
-                                             GrabModeAsync, GrabModeAsync, found->second,
-                                             invisible_cursor_, CurrentTime);
+            const auto result =
+                XGrabPointer(display_, found->second, True,
+                             PointerMotionMask | ButtonPressMask | ButtonReleaseMask, GrabModeAsync,
+                             GrabModeAsync, found->second, invisible_cursor_, CurrentTime);
             if (result != GrabSuccess) {
                 return core::Status::failure("platform.cursor_capture_failed",
                                              "X11 pointer grab failed");
@@ -1246,10 +1244,13 @@ class X11NativePlatform final : public IPlatform {
         if (!id) {
             return;
         }
-        (void)logical_.queue_event(PlatformEvent{
-            focused ? PlatformEventKind::window_focus_gained
-                    : PlatformEventKind::window_focus_lost,
-            id.value(), KeyCode::unknown, 0, 0, {}});
+        (void)logical_.queue_event(PlatformEvent{focused ? PlatformEventKind::window_focus_gained
+                                                         : PlatformEventKind::window_focus_lost,
+                                                 id.value(),
+                                                 KeyCode::unknown,
+                                                 0,
+                                                 0,
+                                                 {}});
         if (!focused) {
             XUngrabPointer(display_, CurrentTime);
             XUndefineCursor(display_, event.window);

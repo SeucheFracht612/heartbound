@@ -93,8 +93,7 @@ debug::InspectionData GameInspector::inspect(const ScriptHostCommandBatchResult&
     return data;
 }
 
-debug::InspectionData
-GameInspector::inspect(const GameplayModuleRegistrationReport& report) {
+debug::InspectionData GameInspector::inspect(const GameplayModuleRegistrationReport& report) {
     debug::InspectionData data;
     data.object_type = "gameplay_module_registry";
     data.display_name = "Gameplay Modules";
@@ -130,14 +129,12 @@ debug::InspectionData GameInspector::inspect(const ClientRuntimeStats& stats) {
     add_field(data, "command_result_count", std::to_string(stats.command_result_count));
     add_field(data, "movement_snapshot_count", std::to_string(stats.movement_snapshot_count));
     add_field(data, "player_tombstone_count", std::to_string(stats.player_tombstone_count));
-    add_field(data, "chunk_snapshot_slice_count",
-              std::to_string(stats.chunk_snapshot_slice_count));
+    add_field(data, "chunk_snapshot_slice_count", std::to_string(stats.chunk_snapshot_slice_count));
     add_field(data, "completed_chunk_snapshot_count",
               std::to_string(stats.completed_chunk_snapshot_count));
     add_field(data, "replication_batch_count",
               std::to_string(stats.replication.drained_batch_count));
-    add_field(data, "replication_event_count",
-              std::to_string(stats.replication.total_event_count));
+    add_field(data, "replication_event_count", std::to_string(stats.replication.total_event_count));
     add_field(data, "replication_applied_record_count",
               std::to_string(stats.replication.total_applied_record_count));
     add_field(data, "feature_replication_registered_count",
@@ -154,8 +151,7 @@ debug::InspectionData GameInspector::inspect(const ClientRuntimeStats& stats) {
     return data;
 }
 
-debug::InspectionData
-GameInspector::inspect(const PresentationSynchronizationStats& stats) {
+debug::InspectionData GameInspector::inspect(const PresentationSynchronizationStats& stats) {
     debug::InspectionData data;
     data.object_type = "presentation_synchronization";
     data.display_name = "Presentation Synchronization";
@@ -174,13 +170,11 @@ debug::InspectionData GameInspector::inspect(const RuntimeFrameStats& stats) {
     data.display_name = "Runtime Frame";
     data.runtime_id = std::to_string(stats.authoritative_world_tick);
     data.state = "completed";
-    add_field(data, "authoritative_world_tick",
-              std::to_string(stats.authoritative_world_tick));
+    add_field(data, "authoritative_world_tick", std::to_string(stats.authoritative_world_tick));
     add_field(data, "fixed_step_count", std::to_string(stats.fixed_step.step_count));
     add_field(data, "fixed_step_us", std::to_string(stats.fixed_step.step_us));
     add_field(data, "fixed_step_first_tick", std::to_string(stats.fixed_step.first_tick));
-    add_field(data, "interpolation_alpha",
-              std::to_string(stats.fixed_step.interpolation_alpha));
+    add_field(data, "interpolation_alpha", std::to_string(stats.fixed_step.interpolation_alpha));
     add_field(data, "dropped_time_us", std::to_string(stats.fixed_step.dropped_time_us));
     double simulation_ms = 0.0;
     std::uint32_t command_count = 0;
@@ -202,13 +196,11 @@ debug::InspectionData GameInspector::inspect(const RuntimeFrameStats& stats) {
     add_field(data, "command_count", std::to_string(command_count));
     add_field(data, "failed_command_count", std::to_string(failed_command_count));
     add_field(data, "event_count", std::to_string(event_count));
-    add_field(data, "replication_message_count",
-              std::to_string(replication_message_count));
+    add_field(data, "replication_message_count", std::to_string(replication_message_count));
     add_field(data, "physics_body_count", std::to_string(physics_body_count));
     add_field(data, "client_received_message_count",
               std::to_string(stats.client.received_message_count));
-    add_field(data, "presentation_adapter_count",
-              std::to_string(stats.presentation.adapter_count));
+    add_field(data, "presentation_adapter_count", std::to_string(stats.presentation.adapter_count));
     if (stats.fixed_step.dropped_time_us != 0) {
         add_issue(data, debug::InspectionSeverity::warning, "runtime_frame.dropped_time",
                   "fixed-step frame discarded accumulated simulation time");
@@ -221,8 +213,8 @@ debug::InspectionData GameInspector::inspect(const RuntimeSession& session) {
     data.object_type = "runtime_session";
     data.display_name = "Game Runtime Session";
     data.runtime_id = std::to_string(session.frame_count());
-    data.state = session.fault().has_value() ? "faulted"
-                                            : (session.is_running() ? "running" : "stopped");
+    const auto& fault = session.fault();
+    data.state = fault.has_value() ? "faulted" : (session.is_running() ? "running" : "stopped");
     const auto& config = session.config();
     add_field(data, "frame_count", std::to_string(session.frame_count()));
     add_field(data, "headless", config.headless ? "true" : "false");
@@ -232,36 +224,31 @@ debug::InspectionData GameInspector::inspect(const RuntimeSession& session) {
     add_field(data, "ticks_per_second", std::to_string(config.fixed_step.ticks_per_second));
     add_field(data, "persistence_mode", "explicit_snapshot");
     add_field(data, "pending_save_count", "0");
-    add_field(data, "faulted", session.fault().has_value() ? "true" : "false");
-    if (session.fault().has_value()) {
-        add_field(data, "fault_code", session.fault()->code);
-        add_field(data, "fault_message", session.fault()->message);
-        add_issue(data, debug::InspectionSeverity::error, session.fault()->code,
-                  session.fault()->message);
+    add_field(data, "faulted", fault.has_value() ? "true" : "false");
+    if (fault.has_value()) {
+        add_field(data, "fault_code", fault->code);
+        add_field(data, "fault_message", fault->message);
+        add_issue(data, debug::InspectionSeverity::error, fault->code, fault->message);
     }
 
     if (const auto* server = session.server(); server != nullptr) {
         const auto world_stats = server->world().stats();
         const auto chunk_stats = server->world().chunks().stats();
         const auto entity_stats = server->entities().stats();
-        add_field(data, "authoritative_world_tick",
-                  std::to_string(server->world().world_time()));
+        add_field(data, "authoritative_world_tick", std::to_string(server->world().world_time()));
         add_field(data, "connected_client_count",
                   std::to_string(server->host().connected_client_count()));
         add_field(data, "loaded_chunk_count", std::to_string(world_stats.chunk_count));
         add_field(data, "chunk_edit_count", std::to_string(chunk_stats.edit_count));
-        add_field(data, "dirty_mesh_chunk_count",
-                  std::to_string(chunk_stats.dirty_mesh_count));
-        add_field(data, "dirty_save_chunk_count",
-                  std::to_string(chunk_stats.dirty_save_count));
+        add_field(data, "dirty_mesh_chunk_count", std::to_string(chunk_stats.dirty_mesh_count));
+        add_field(data, "dirty_save_chunk_count", std::to_string(chunk_stats.dirty_save_count));
         add_field(data, "dirty_region_count", std::to_string(world_stats.dirty_region_count));
         add_field(data, "persistent_entity_count",
                   std::to_string(world_stats.persistent_entity_count));
         add_field(data, "live_entity_count", std::to_string(entity_stats.live_entities));
         add_field(data, "active_entity_count", std::to_string(entity_stats.active_entities));
         add_field(data, "component_count", std::to_string(entity_stats.component_count));
-        add_field(data, "entity_tombstone_count",
-                  std::to_string(entity_stats.tombstone_count));
+        add_field(data, "entity_tombstone_count", std::to_string(entity_stats.tombstone_count));
         add_field(data, "player_controller_count", std::to_string(server->players().size()));
         add_field(data, "simulation_system_count",
                   std::to_string(server->scheduler().registered_system_count()));

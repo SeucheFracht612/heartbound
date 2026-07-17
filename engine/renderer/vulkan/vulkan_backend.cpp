@@ -5309,11 +5309,6 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         }
 
         auto old_layout = swapchain_image_layouts_[image_index];
-        VkPipelineStageFlags source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        VkAccessFlags source_access = 0;
-        if (old_layout != VK_IMAGE_LAYOUT_UNDEFINED) {
-            source_stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
-        }
 
         const VkImageSubresourceRange clear_range{
             VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1,
@@ -5321,8 +5316,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
         record_planned_image_transition_barriers(command_buffer_, swapchain_images_[image_index],
                                                  clear_range, old_layout, frame_transitions);
-        source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        source_access = 0;
+        VkPipelineStageFlags source_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkAccessFlags source_access = 0;
         if (old_layout != VK_IMAGE_LAYOUT_UNDEFINED) {
             source_stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
             source_access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
