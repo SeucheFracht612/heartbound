@@ -106,6 +106,7 @@ GameInspector::inspect(const GameplayModuleRegistrationReport& report) {
     add_field(data, "command_count", std::to_string(report.command_count));
     add_field(data, "system_count", std::to_string(report.system_count));
     add_field(data, "serializer_count", std::to_string(report.serializer_count));
+    add_field(data, "persistence_count", std::to_string(report.persistence_count));
     add_field(data, "replication_count", std::to_string(report.replication_count));
     add_field(data, "presentation_adapter_count",
               std::to_string(report.presentation_adapter_count));

@@ -205,11 +205,17 @@ core::Status ServerRuntime::initialize() {
     }
     GameplayRegistrationContext registration_context{
         *desc_.prototypes, entities_, commands_, scheduler_, component_registry_,
-        serialization_registry_, replication_registry_, presentation_registry_,
-        domain_services_};
+        serialization_registry_, persistence_registry_, replication_registry_,
+        presentation_registry_, domain_services_};
     auto registered = gameplay_modules_.register_all(registration_context);
     if (!registered) {
         return core::Status::failure(registered.error().code, registered.error().message);
+    }
+    if (desc_.initial_snapshot.has_value()) {
+        status = persistence_registry_.restore_all(*desc_.initial_snapshot, world_);
+        if (!status) {
+            return status;
+        }
     }
     return scheduler_.finalize();
 }
@@ -372,6 +378,10 @@ const ComponentRegistry& ServerRuntime::component_registry() const noexcept {
 
 const SerializationRegistry& ServerRuntime::serialization_registry() const noexcept {
     return serialization_registry_;
+}
+
+const PersistenceRegistry& ServerRuntime::persistence_registry() const noexcept {
+    return persistence_registry_;
 }
 
 const ReplicationRegistry& ServerRuntime::replication_registry() const noexcept {

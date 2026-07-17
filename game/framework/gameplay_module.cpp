@@ -1,5 +1,8 @@
 #include "game/framework/gameplay_module.hpp"
 
+#include "engine/save/save_snapshot.hpp"
+#include "engine/world/world_state.hpp"
+
 #include <algorithm>
 #include <utility>
 
@@ -62,6 +65,52 @@ SerializationRegistry::register_schema(VersionedGameplayRegistration registratio
 
 std::span<const VersionedGameplayRegistration>
 SerializationRegistry::registrations() const noexcept {
+    return registrations_;
+}
+
+core::Status PersistenceRegistry::register_persistence(PersistenceRegistration registration) {
+    auto status = validate_versioned_registration(
+        registration, std::span<const PersistenceRegistration>(registrations_), "persistence");
+    if (!status) {
+        return status;
+    }
+    if (!registration.capture || !registration.restore) {
+        return core::Status::failure(
+            "gameplay_module.persistence_callback_missing",
+            "persistence registration requires both capture and restore callbacks");
+    }
+    registrations_.push_back(std::move(registration));
+    return core::Status::ok();
+}
+
+core::Status PersistenceRegistry::capture_all(const world::WorldState& world,
+                                              save::SaveSnapshot& snapshot) const {
+    for (const auto& registration : registrations_) {
+        auto status = registration.capture(world, snapshot);
+        if (!status) {
+            return core::Status::failure(status.error().code,
+                                         "persistence capture '" + registration.name +
+                                             "' failed: " + status.error().message);
+        }
+    }
+    return core::Status::ok();
+}
+
+core::Status PersistenceRegistry::restore_all(const save::SaveSnapshot& snapshot,
+                                              world::WorldState& world) const {
+    for (const auto& registration : registrations_) {
+        auto status = registration.restore(snapshot, world);
+        if (!status) {
+            return core::Status::failure(status.error().code,
+                                         "persistence restore '" + registration.name +
+                                             "' failed: " + status.error().message);
+        }
+    }
+    return core::Status::ok();
+}
+
+std::span<const PersistenceRegistration>
+PersistenceRegistry::registrations() const noexcept {
     return registrations_;
 }
 
@@ -183,6 +232,10 @@ core::Status IGameplayModule::register_serializers(SerializationRegistry&) {
     return core::Status::ok();
 }
 
+core::Status IGameplayModule::register_persistence(PersistenceRegistry&) {
+    return core::Status::ok();
+}
+
 core::Status IGameplayModule::register_replication(ReplicationRegistry&) {
     return core::Status::ok();
 }
@@ -237,6 +290,9 @@ GameplayModuleRegistry::register_all(GameplayRegistrationContext& context) {
             status = module->register_serializers(context.serializers);
         }
         if (status) {
+            status = module->register_persistence(context.persistence);
+        }
+        if (status) {
             status = module->register_replication(context.replication);
         }
         if (status) {
@@ -258,6 +314,7 @@ GameplayModuleRegistry::register_all(GameplayRegistrationContext& context) {
                                ? system_count_after - system_count_before
                                : 0;
     report_.serializer_count = context.serializers.registrations().size();
+    report_.persistence_count = context.persistence.registrations().size();
     report_.replication_count = context.replication.registrations().size();
     report_.presentation_adapter_count = context.presentation.registrations().size();
     registered_ = true;

@@ -75,6 +75,7 @@ class ServerRuntime final {
     [[nodiscard]] const GameplayModuleRegistry& gameplay_modules() const noexcept;
     [[nodiscard]] const ComponentRegistry& component_registry() const noexcept;
     [[nodiscard]] const SerializationRegistry& serialization_registry() const noexcept;
+    [[nodiscard]] const PersistenceRegistry& persistence_registry() const noexcept;
     [[nodiscard]] const ReplicationRegistry& replication_registry() const noexcept;
     [[nodiscard]] const PresentationRegistry& presentation_registry() const noexcept;
     [[nodiscard]] DomainServiceRegistry& domain_services() noexcept;
@@ -114,6 +115,7 @@ class ServerRuntime final {
     movement::PlayerControllerStore players_;
     ComponentRegistry component_registry_;
     SerializationRegistry serialization_registry_;
+    PersistenceRegistry persistence_registry_;
     ReplicationRegistry replication_registry_;
     PresentationRegistry presentation_registry_;
     DomainServiceRegistry domain_services_;

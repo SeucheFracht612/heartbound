@@ -21,6 +21,18 @@ namespace heartstead::game {
 class ClientRuntime;
 class PresentationWorld;
 
+} // namespace heartstead::game
+
+namespace heartstead::save {
+struct SaveSnapshot;
+}
+
+namespace heartstead::world {
+class WorldState;
+}
+
+namespace heartstead::game {
+
 struct ComponentRegistration {
     std::string name;
     std::type_index type = typeid(void);
@@ -51,6 +63,26 @@ class SerializationRegistry final {
 
   private:
     std::vector<VersionedGameplayRegistration> registrations_;
+};
+
+struct PersistenceRegistration {
+    std::string name;
+    std::uint32_t version = 1;
+    std::function<core::Status(const world::WorldState&, save::SaveSnapshot&)> capture;
+    std::function<core::Status(const save::SaveSnapshot&, world::WorldState&)> restore;
+};
+
+class PersistenceRegistry final {
+  public:
+    [[nodiscard]] core::Status register_persistence(PersistenceRegistration registration);
+    [[nodiscard]] core::Status capture_all(const world::WorldState& world,
+                                           save::SaveSnapshot& snapshot) const;
+    [[nodiscard]] core::Status restore_all(const save::SaveSnapshot& snapshot,
+                                           world::WorldState& world) const;
+    [[nodiscard]] std::span<const PersistenceRegistration> registrations() const noexcept;
+
+  private:
+    std::vector<PersistenceRegistration> registrations_;
 };
 
 struct ReplicationRegistration {
@@ -116,6 +148,7 @@ struct GameplayRegistrationContext {
     simulation::SimulationScheduler& scheduler;
     ComponentRegistry& components;
     SerializationRegistry& serializers;
+    PersistenceRegistry& persistence;
     ReplicationRegistry& replication;
     PresentationRegistry& presentation;
     DomainServiceRegistry& services;
@@ -132,6 +165,7 @@ class IGameplayModule {
     [[nodiscard]] virtual core::Status register_commands(GameplayRegistrationContext& context);
     [[nodiscard]] virtual core::Status register_systems(GameplayRegistrationContext& context);
     [[nodiscard]] virtual core::Status register_serializers(SerializationRegistry& registry);
+    [[nodiscard]] virtual core::Status register_persistence(PersistenceRegistry& registry);
     [[nodiscard]] virtual core::Status register_replication(ReplicationRegistry& registry);
     [[nodiscard]] virtual core::Status register_presentation(PresentationRegistry& registry);
 };
@@ -143,6 +177,7 @@ struct GameplayModuleRegistrationReport {
     std::size_t command_count = 0;
     std::size_t system_count = 0;
     std::size_t serializer_count = 0;
+    std::size_t persistence_count = 0;
     std::size_t replication_count = 0;
     std::size_t presentation_adapter_count = 0;
 };

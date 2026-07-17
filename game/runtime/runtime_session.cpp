@@ -231,7 +231,23 @@ core::Result<save::SaveSnapshot> RuntimeSession::capture_save_snapshot() const {
             "runtime_session.no_authoritative_world",
             "saving requires an active authoritative server runtime");
     }
-    return world::WorldSnapshotBridge::export_snapshot(server_->world());
+    auto snapshot = world::WorldSnapshotBridge::export_snapshot(server_->world());
+    if (!snapshot) {
+        return snapshot;
+    }
+    auto status = server_->persistence_registry().capture_all(server_->world(), snapshot.value());
+    if (!status) {
+        return core::Result<save::SaveSnapshot>::failure(status.error().code,
+                                                         status.error().message);
+    }
+    const auto validation = save::SaveSnapshotValidator::validate(snapshot.value(), *prototypes_);
+    if (!validation.valid()) {
+        return core::Result<save::SaveSnapshot>::failure(
+            "runtime_session.feature_snapshot_invalid",
+            validation.issues.empty() ? "feature persistence produced an invalid save snapshot"
+                                      : validation.issues.front().message);
+    }
+    return snapshot;
 }
 
 core::Status RuntimeSession::save_to(const save::FileSaveDatabase& database) const {

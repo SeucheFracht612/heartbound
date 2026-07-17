@@ -91,6 +91,43 @@ class TestGameplayModule final : public game::IGameplayModule {
     }
 
     [[nodiscard]] core::Status
+    register_persistence(game::PersistenceRegistry& registry) override {
+        return registry.register_persistence(
+            {"test.feature.state", 1,
+             [this](const world::WorldState& world, save::SaveSnapshot& snapshot) {
+                 ++persistence_capture_count;
+                 if (world.mod_states().find("test", "feature_visible") == nullptr ||
+                     std::ranges::none_of(snapshot.mod_states, [](const auto& record) {
+                         return record.mod_id == "test" &&
+                                record.state_key == "feature_visible" &&
+                                record.encoded_state == "true";
+                     })) {
+                     return core::Status::failure(
+                         "test_feature.capture_missing_state",
+                         "test feature persistence capture did not receive authoritative state");
+                 }
+                 return core::Status::ok();
+             },
+             [this](const save::SaveSnapshot& snapshot, world::WorldState& world) {
+                 ++persistence_restore_count;
+                 const auto saved = std::ranges::find_if(snapshot.mod_states, [](const auto& record) {
+                     return record.mod_id == "test" && record.state_key == "feature_visible" &&
+                            record.encoded_state == "true";
+                 });
+                 if (saved == snapshot.mod_states.end() ||
+                     world.mod_states().find("test", "feature_visible") == nullptr) {
+                     return core::Status::failure(
+                         "test_feature.restore_missing_state",
+                         "test feature persistence restore did not receive imported state");
+                 }
+                 restored_from_snapshot = true;
+                 client_visible = true;
+                 client_revision = 1;
+                 return core::Status::ok();
+             }});
+    }
+
+    [[nodiscard]] core::Status
     register_replication(game::ReplicationRegistry& registry) override {
         return registry.register_replication(
             {"test.feature.delta", 1, true, false,
@@ -140,8 +177,11 @@ class TestGameplayModule final : public game::IGameplayModule {
     }
 
     std::uint32_t update_count = 0;
+    std::uint32_t persistence_capture_count = 0;
+    std::uint32_t persistence_restore_count = 0;
     std::uint64_t client_revision = 0;
     bool client_visible = false;
+    bool restored_from_snapshot = false;
 };
 
 std::filesystem::path source_root() {
@@ -427,6 +467,7 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(module_report.command_count == 3);
     assert(module_report.system_count == 1);
     assert(module_report.serializer_count == 3);
+    assert(module_report.persistence_count == 1);
     assert(module_report.replication_count == 2);
     assert(module_report.presentation_adapter_count == 1);
     const auto* service = server->domain_services().find<ITestFeatureService>();
@@ -451,6 +492,7 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
            nullptr);
     auto save_snapshot = runtime.capture_save_snapshot();
     assert(save_snapshot && save_snapshot.value().mod_states.size() == 1);
+    assert(module->persistence_capture_count == 1);
     const auto session_diagnostics = game::GameInspector::inspect(*runtime.session());
     assert(session_diagnostics.state == "running");
     assert(session_diagnostics.find_field("authoritative_world_tick") != nullptr);
@@ -479,6 +521,20 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(public_session_diagnostics && public_system_diagnostics);
     assert(public_session_diagnostics.value().state == "running");
     assert(public_system_diagnostics.value().size() == timing_diagnostics.size());
+    assert(runtime.shutdown());
+
+    auto restored_module = std::make_shared<TestGameplayModule>();
+    game::RuntimeConfiguration restored_config;
+    restored_config.gameplay_modules.push_back(restored_module);
+    auto restored_request = make_session_request(report);
+    restored_request.initial_snapshot = std::move(save_snapshot).value();
+    assert(runtime.start_session(std::move(restored_config), std::move(restored_request)));
+    assert(restored_module->persistence_restore_count == 1);
+    assert(restored_module->restored_from_snapshot);
+    assert(runtime.session()->server()->world().mod_states().find(
+               "test", "feature_visible") != nullptr);
+    const auto restored_render_snapshot = runtime.capture_render_snapshot();
+    assert(restored_render_snapshot && restored_render_snapshot.value().objects.size() == 2);
     assert(runtime.shutdown());
 }
 
