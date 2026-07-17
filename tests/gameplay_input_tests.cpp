@@ -1,4 +1,5 @@
 #include "engine/input/input_action.hpp"
+#include "engine/world/chunks/chunk_replication.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 #include "game/features/interaction/voxel_raycast.hpp"
 
@@ -79,11 +80,36 @@ void test_voxel_dda_preserves_large_world_anchor() {
     assert(result.value().hit->distance == 0.5);
 }
 
+void test_chunk_snapshot_slices_round_trip_worst_case_geometry() {
+    world::ChunkDatabase chunks;
+    auto& chunk = chunks.get_or_create({-2, 3, 4});
+    for (std::uint16_t z = 0; z < world::VoxelChunk::edge_length; ++z) {
+        for (std::uint16_t x = 0; x < world::VoxelChunk::edge_length; ++x) {
+            assert(chunk.set({x, 7, z},
+                             {static_cast<std::uint16_t>((x + z) % 2U + 1U),
+                              static_cast<std::uint8_t>((x * 7U + z) % 256U), 3, 9}));
+        }
+    }
+    auto slices = world::make_chunk_snapshot_slices(chunk);
+    assert(slices && slices.value().size() == world::VoxelChunk::edge_length);
+    for (const auto& slice : slices.value()) {
+        const auto encoded = world::ChunkSnapshotSliceTextCodec::encode(slice);
+        assert(encoded.size() < 64U * 1024U);
+        auto decoded = world::ChunkSnapshotSliceTextCodec::decode(encoded);
+        assert(decoded);
+        assert(decoded.value().identity == slice.identity);
+        assert(decoded.value().content_revision == slice.content_revision);
+        assert(decoded.value().slice_y == slice.slice_y);
+        assert(decoded.value().cells == slice.cells);
+    }
+}
+
 } // namespace
 
 int main() {
     test_contextual_action_map_and_rebinding();
     test_voxel_dda_hits_faces_and_negative_coordinates();
     test_voxel_dda_preserves_large_world_anchor();
+    test_chunk_snapshot_slices_round_trip_worst_case_geometry();
     return 0;
 }

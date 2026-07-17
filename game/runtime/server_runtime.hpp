@@ -85,6 +85,8 @@ class ServerRuntime final {
     [[nodiscard]] core::Status spawn_player(core::NetId client_id);
     [[nodiscard]] core::Status simulate_players(simulation::SimulationContext& context);
     [[nodiscard]] core::Status replicate_players();
+    [[nodiscard]] core::Status send_initial_chunks(core::NetId client_id);
+    [[nodiscard]] core::Result<std::uint64_t> reserve_custom_replication_sequence();
     [[nodiscard]] std::uint64_t collision_world_revision() const noexcept;
 
     ServerRuntimeDesc desc_;
@@ -107,6 +109,7 @@ class ServerRuntime final {
     std::uint32_t current_movement_snapshot_count_ = 0;
     std::int64_t current_time_ms_ = 0;
     bool spawn_area_initialized_ = false;
+    std::uint64_t next_custom_replication_sequence_ = 1;
 };
 
 } // namespace heartstead::game

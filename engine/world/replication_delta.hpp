@@ -144,6 +144,7 @@ struct WorldReplicationDeltaApplyReport {
     std::uint32_t assemblies_updated = 0;
     std::uint32_t processes_inserted = 0;
     std::uint32_t processes_updated = 0;
+    std::uint32_t voxel_edits_applied = 0;
     std::uint32_t dirty_region_count_before = 0;
     std::uint32_t dirty_region_count_after = 0;
     bool applied = false;

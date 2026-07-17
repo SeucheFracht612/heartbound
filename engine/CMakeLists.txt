@@ -145,6 +145,7 @@ target_sources(
     world/blocks/block_model.cpp
     world/chunks/chunk_database.cpp
     world/chunks/chunk_edit_delta_codec.cpp
+    world/chunks/chunk_replication.cpp
     world/meshing/chunk_mesher.cpp
     world/meshing/chunk_mesh_snapshot.cpp
     world/meshing/greedy_chunk_mesher.cpp
@@ -159,6 +160,7 @@ target_sources(
     world/world_commands.cpp
     world/world_snapshot.cpp
     world/world_state.cpp
+    world/voxel_change.cpp
     world/voxels/voxel_chunk.cpp
     world/voxels/voxel_palette.cpp
     world/worldgen/terrain_generator.cpp
@@ -316,6 +318,7 @@ target_sources(
       world/blocks/block_model.hpp
       world/chunks/chunk_database.hpp
       world/chunks/chunk_edit_delta_codec.hpp
+      world/chunks/chunk_replication.hpp
       world/chunks/chunk_identity.hpp
       world/coords/world_coords.hpp
       world/coords/world_position.hpp
@@ -333,6 +336,7 @@ target_sources(
       world/world_commands.hpp
       world/world_snapshot.hpp
       world/world_state.hpp
+      world/voxel_change.hpp
       world/voxels/voxel_chunk.hpp
       world/voxels/voxel_palette.hpp
       world/worldgen/terrain_generator.hpp

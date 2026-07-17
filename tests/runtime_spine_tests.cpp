@@ -120,6 +120,8 @@ void test_authoritative_player_input_moves_and_replicates() {
 
     auto* session = runtime.session();
     assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
+    auto initial_floor = session->client()->world().chunks().get({0, 0, 0}, {8, 0, 8});
+    assert(initial_floor && !initial_floor.value().is_air());
     const auto client_id = session->client()->client_id();
     const auto* player_before = session->server()->player_for_client(client_id);
     assert(player_before != nullptr);
@@ -161,6 +163,54 @@ void test_authoritative_player_input_moves_and_replicates() {
     assert(runtime.shutdown());
 }
 
+void test_typed_voxel_commands_validate_and_replicate() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    assert(runtime.start_session({}, make_session_request(report)));
+    auto* session = runtime.session();
+    assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
+    const auto clay = core::PrototypeId::parse("base:voxels/clay");
+    assert(clay.has_value());
+    const game::interaction::PlaceVoxelCommand place{{9, 1, 8}, *clay};
+    assert(session->submit_place_voxel(place, 10));
+    auto placed = runtime.run_frame({16'667, 17});
+    assert(placed && placed.value().server_ticks.size() == 1);
+    assert(placed.value().server_ticks.front().commands.command_reports.front().success);
+    assert(session->server()->events().voxel_changed.size() == 1);
+    const auto address = world::block_to_chunk_local(place.position);
+    auto authoritative = session->server()->world().chunks().get(address.chunk, address.local);
+    auto replicated = session->client()->world().chunks().get(address.chunk, address.local);
+    assert(authoritative && replicated);
+    assert(!authoritative.value().is_air());
+    assert(replicated.value() == authoritative.value());
+    assert(placed.value().client.replication.total_applied_record_count == 1);
+
+    assert(session->submit_place_voxel(place, 20));
+    auto duplicate = runtime.run_frame({16'667, 34});
+    assert(duplicate);
+    assert(!duplicate.value().server_ticks.front().commands.command_reports.front().success);
+    assert(duplicate.value().server_ticks.front().commands.command_reports.front().error_code ==
+           "voxel_command.target_occupied");
+
+    const game::interaction::PlaceVoxelCommand far_away{{100, 1, 100}, *clay};
+    assert(session->submit_place_voxel(far_away, 30));
+    auto rejected = runtime.run_frame({16'667, 51});
+    assert(rejected);
+    assert(!rejected.value().server_ticks.front().commands.command_reports.front().success);
+    assert(rejected.value().server_ticks.front().commands.command_reports.front().error_code ==
+           "voxel_command.out_of_reach");
+
+    assert(session->submit_remove_voxel({place.position}, 40));
+    auto removed = runtime.run_frame({16'667, 68});
+    assert(removed);
+    authoritative = session->server()->world().chunks().get(address.chunk, address.local);
+    replicated = session->client()->world().chunks().get(address.chunk, address.local);
+    assert(authoritative && authoritative.value().is_air());
+    assert(replicated && replicated.value().is_air());
+    assert(runtime.shutdown());
+}
+
 void test_runtime_configuration_rejects_invalid_compositions() {
     game::RuntimeConfiguration empty;
     empty.create_server = false;
@@ -185,6 +235,7 @@ int main() {
     test_local_runtime_advances_authority_through_loopback();
     test_dedicated_headless_runtime_uses_same_scheduler();
     test_authoritative_player_input_moves_and_replicates();
+    test_typed_voxel_commands_validate_and_replicate();
     test_runtime_configuration_rejects_invalid_compositions();
     return 0;
 }

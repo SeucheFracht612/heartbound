@@ -6,6 +6,7 @@
 #include "engine/workpieces/workpiece_codec.hpp"
 #include "engine/workpieces/workpiece_state.hpp"
 #include "engine/world/world_state.hpp"
+#include "engine/world/voxel_change.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -1258,6 +1259,28 @@ apply_replication_delta(WorldState& state, const WorldReplicationDeltaSnapshot& 
     report.planned_record_count = snapshot.plan.materialized_record_count;
     report.requires_snapshot_resync = snapshot.plan.requires_snapshot_resync;
     report.dirty_region_count_before = static_cast<std::uint32_t>(state.dirty_regions().size());
+
+    for (const auto& event : snapshot.plan.global_events) {
+        if (event.type != voxel_changed_event_type) {
+            continue;
+        }
+        auto change = VoxelChangeTextCodec::decode(event.message);
+        if (!change) {
+            return core::Result<WorldReplicationDeltaApplyReport>::failure(
+                change.error().code, change.error().message);
+        }
+        const auto address = block_to_chunk_local(change.value().position);
+        (void)state.chunks().get_or_create(address.chunk);
+        status = state.chunks().set(address.chunk, address.local, change.value().current,
+                                    state.dirty_regions());
+        if (!status) {
+            return core::Result<WorldReplicationDeltaApplyReport>::failure(status.error().code,
+                                                                           status.error().message);
+        }
+        ++report.voxel_edits_applied;
+        ++report.applied_record_count;
+        ++report.updated_record_count;
+    }
 
     for (const auto& record : snapshot.build_pieces) {
         status = upsert_build_piece(state, record, report);

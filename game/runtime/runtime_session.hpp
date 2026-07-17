@@ -7,6 +7,7 @@
 #include "engine/save/save_metadata.hpp"
 #include "engine/simulation/fixed_step.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
+#include "game/features/interaction/voxel_commands.hpp"
 #include "game/runtime/client_runtime.hpp"
 #include "game/runtime/server_runtime.hpp"
 
@@ -61,6 +62,10 @@ class RuntimeSession final {
     [[nodiscard]] core::Status submit_command(std::string type, std::string payload,
                                               std::int64_t now_ms = 0);
     [[nodiscard]] core::Status submit_player_input(const movement::PlayerInputFrame& input,
+                                                   std::int64_t now_ms = 0);
+    [[nodiscard]] core::Status submit_place_voxel(const interaction::PlaceVoxelCommand& command,
+                                                  std::int64_t now_ms = 0);
+    [[nodiscard]] core::Status submit_remove_voxel(const interaction::RemoveVoxelCommand& command,
                                                    std::int64_t now_ms = 0);
     [[nodiscard]] core::Status shutdown();
 

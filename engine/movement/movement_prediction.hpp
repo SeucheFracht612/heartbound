@@ -106,7 +106,8 @@ make_movement_input_bundle_message(const PlayerInputBundle& bundle,
 movement_input_bundle_from_transport(const net::TransportEnvelope& envelope);
 [[nodiscard]] net::TransportMessage
 make_movement_snapshot_message(const PlayerControllerSnapshot& snapshot,
-                               std::int64_t timestamp_ms);
+                               std::int64_t timestamp_ms,
+                               std::uint64_t transport_sequence = 0);
 [[nodiscard]] core::Result<PlayerControllerSnapshot>
 movement_snapshot_from_transport(const net::TransportEnvelope& envelope,
                                  const PlayerMovementConfig& config = {});

@@ -5,6 +5,7 @@ target_sources(
   heartstead_game
   PRIVATE
     features/interaction/voxel_raycast.cpp
+    features/interaction/voxel_commands.cpp
     runtime/client_runtime.cpp
     runtime/game_inspection.cpp
     runtime/game_runtime.cpp
@@ -16,6 +17,7 @@ target_sources(
     BASE_DIRS ${PROJECT_SOURCE_DIR}
     FILES
       features/interaction/voxel_raycast.hpp
+      features/interaction/voxel_commands.hpp
       runtime/client_runtime.hpp
       runtime/game_inspection.hpp
       runtime/game_runtime.hpp

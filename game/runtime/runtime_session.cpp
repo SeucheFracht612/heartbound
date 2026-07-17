@@ -104,7 +104,8 @@ core::Status RuntimeSession::initialize() {
         world::WorldStateDesc client_world;
         client_world.metadata = request_.metadata;
         client_world.voxel_palette = voxel_palette_->manifest();
-        client_ = std::make_unique<ClientRuntime>(connected.value(), std::move(client_world));
+        client_ = std::make_unique<ClientRuntime>(connected.value(), std::move(client_world),
+                                                  voxel_palette_);
         auto status = pump_client_messages();
         if (!status) {
             return status;
@@ -112,6 +113,11 @@ core::Status RuntimeSession::initialize() {
         if (!client_->is_connected()) {
             return core::Status::failure("runtime_session.client_handshake_failed",
                                          "local client did not accept the server welcome");
+        }
+        auto synchronized = client_->synchronize();
+        if (!synchronized) {
+            return core::Status::failure(synchronized.error().code,
+                                         synchronized.error().message);
         }
     }
     running_ = true;
@@ -181,6 +187,18 @@ core::Status RuntimeSession::submit_player_input(const movement::PlayerInputFram
         return status;
     }
     return submit_command("player.input", movement::PlayerInputTextCodec::encode(input), now_ms);
+}
+
+core::Status RuntimeSession::submit_place_voxel(const interaction::PlaceVoxelCommand& command,
+                                                std::int64_t now_ms) {
+    return submit_command(std::string(interaction::place_voxel_command_type),
+                          interaction::VoxelCommandTextCodec::encode(command), now_ms);
+}
+
+core::Status RuntimeSession::submit_remove_voxel(const interaction::RemoveVoxelCommand& command,
+                                                 std::int64_t now_ms) {
+    return submit_command(std::string(interaction::remove_voxel_command_type),
+                          interaction::VoxelCommandTextCodec::encode(command), now_ms);
 }
 
 core::Status RuntimeSession::pump_client_messages() {

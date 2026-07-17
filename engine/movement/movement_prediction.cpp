@@ -526,9 +526,12 @@ movement_input_bundle_from_transport(const net::TransportEnvelope& envelope) {
 }
 
 net::TransportMessage make_movement_snapshot_message(const PlayerControllerSnapshot& snapshot,
-                                                      std::int64_t timestamp_ms) {
+                                                      std::int64_t timestamp_ms,
+                                                      std::uint64_t transport_sequence) {
+    const auto sequence = transport_sequence == 0 ? snapshot.state.simulation_tick
+                                                   : transport_sequence;
     return {net::TransportMessageKind::replication, net::TransportChannel::reliable,
-            snapshot.state.simulation_tick, std::string(movement_snapshot_payload_type),
+            sequence, std::string(movement_snapshot_payload_type),
             PlayerControllerSnapshotTextCodec::encode(snapshot), timestamp_ms};
 }
 
@@ -542,14 +545,7 @@ movement_snapshot_from_transport(const net::TransportEnvelope& envelope,
             "movement_snapshot.invalid_transport",
             "transport envelope is not a movement snapshot");
     }
-    auto snapshot = PlayerControllerSnapshotTextCodec::decode(envelope.message.payload, config);
-    if (!snapshot || snapshot.value().state.simulation_tick != envelope.message.sequence) {
-        return core::Result<PlayerControllerSnapshot>::failure(
-            !snapshot ? snapshot.error().code : "movement_snapshot.sequence_mismatch",
-            !snapshot ? snapshot.error().message
-                      : "movement snapshot transport sequence does not match its payload");
-    }
-    return snapshot;
+    return PlayerControllerSnapshotTextCodec::decode(envelope.message.payload, config);
 }
 
 } // namespace heartstead::movement

@@ -1,12 +1,15 @@
 #include "game/runtime/client_runtime.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace heartstead::game {
 
-ClientRuntime::ClientRuntime(core::NetId expected_client_id, world::WorldStateDesc world_desc)
-    : world_(std::move(world_desc)), session_(expected_client_id) {}
+ClientRuntime::ClientRuntime(core::NetId expected_client_id, world::WorldStateDesc world_desc,
+                             const world::VoxelPalette* voxel_palette)
+    : world_(std::move(world_desc)), voxel_palette_(voxel_palette),
+      session_(expected_client_id) {}
 
 core::Status ClientRuntime::receive(std::span<const net::TransportEnvelope> messages) {
     for (const auto& message : messages) {
@@ -20,6 +23,11 @@ core::Status ClientRuntime::receive(std::span<const net::TransportEnvelope> mess
 }
 
 core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
+    auto completed_chunks = apply_queued_chunk_snapshots();
+    if (!completed_chunks) {
+        return core::Result<ClientRuntimeStats>::failure(completed_chunks.error().code,
+                                                         completed_chunks.error().message);
+    }
     auto replication = world::apply_client_queued_replication_deltas(world_, session_);
     if (!replication) {
         return core::Result<ClientRuntimeStats>::failure(replication.error().code,
@@ -51,6 +59,8 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
     stats.received_message_count = messages_since_sync_;
     stats.command_result_count = result_count;
     stats.movement_snapshot_count = movement_snapshot_count;
+    stats.chunk_snapshot_slice_count = completed_chunks.value().slice_count;
+    stats.completed_chunk_snapshot_count = completed_chunks.value().completed_chunk_count;
     stats.replication = std::move(replication).value();
     messages_since_sync_ = 0;
     return core::Result<ClientRuntimeStats>::success(std::move(stats));
@@ -106,6 +116,84 @@ std::vector<const movement::PlayerControllerSnapshot*> ClientRuntime::movement_s
 
 void ClientRuntime::clear_command_results() noexcept {
     command_results_.clear();
+}
+
+core::Result<ClientRuntime::ChunkSnapshotApplyStats>
+ClientRuntime::apply_queued_chunk_snapshots() {
+    auto messages =
+        session_.drain_replication_messages(world::chunk_snapshot_slice_payload_type);
+    std::uint32_t completed_count = 0;
+    for (const auto& message : messages) {
+        auto slice = world::chunk_snapshot_slice_from_transport(message);
+        if (!slice) {
+            return core::Result<ChunkSnapshotApplyStats>::failure(slice.error().code,
+                                                                  slice.error().message);
+        }
+        const auto coordinate = slice.value().identity.coordinate;
+        if (const auto resident = remote_chunks_.find(coordinate);
+            resident != remote_chunks_.end() &&
+            (resident->second.first.load_generation > slice.value().identity.load_generation ||
+             (resident->second.first == slice.value().identity &&
+              resident->second.second >= slice.value().content_revision))) {
+            continue;
+        }
+        auto [found, inserted] = chunk_snapshot_assemblies_.try_emplace(coordinate);
+        auto& assembly = found->second;
+        if (inserted || assembly.identity != slice.value().identity ||
+            assembly.content_revision != slice.value().content_revision) {
+            if (!inserted &&
+                (assembly.identity.load_generation > slice.value().identity.load_generation ||
+                 (assembly.identity == slice.value().identity &&
+                  assembly.content_revision > slice.value().content_revision))) {
+                continue;
+            }
+            assembly = {};
+            assembly.identity = slice.value().identity;
+            assembly.content_revision = slice.value().content_revision;
+        }
+        const auto y = static_cast<std::size_t>(slice.value().slice_y);
+        if (assembly.received[y]) {
+            if (assembly.slices[y] != slice.value().cells) {
+                return core::Result<ChunkSnapshotApplyStats>::failure(
+                    "client_runtime.conflicting_chunk_slice",
+                    "duplicate chunk snapshot slice contains different cells");
+            }
+            continue;
+        }
+        assembly.slices[y] = std::move(slice).value().cells;
+        assembly.received[y] = true;
+        if (!std::ranges::all_of(assembly.received, [](bool received) { return received; })) {
+            continue;
+        }
+
+        std::vector<world::VoxelCell> cells(world::VoxelChunk::total_cells);
+        constexpr auto edge = static_cast<std::size_t>(world::VoxelChunk::edge_length);
+        for (std::size_t slice_y = 0; slice_y < edge; ++slice_y) {
+            for (std::size_t z = 0; z < edge; ++z) {
+                for (std::size_t x = 0; x < edge; ++x) {
+                    cells[z * edge * edge + slice_y * edge + x] =
+                        assembly.slices[slice_y][z * edge + x];
+                }
+            }
+        }
+        auto& chunk = world_.chunks().get_or_create(coordinate);
+        auto status = chunk.load_generated_cells(std::move(cells));
+        if (!status) {
+            return core::Result<ChunkSnapshotApplyStats>::failure(status.error().code,
+                                                                  status.error().message);
+        }
+        remote_chunks_.insert_or_assign(
+            coordinate, std::pair{assembly.identity, assembly.content_revision});
+        chunk_snapshot_assemblies_.erase(coordinate);
+        ++completed_count;
+    }
+    if (messages.size() > std::numeric_limits<std::uint32_t>::max()) {
+        return core::Result<ChunkSnapshotApplyStats>::failure(
+            "client_runtime.chunk_snapshot_count_overflow",
+            "chunk snapshot synchronization count exceeds one frame's diagnostic range");
+    }
+    return core::Result<ChunkSnapshotApplyStats>::success(
+        {static_cast<std::uint32_t>(messages.size()), completed_count});
 }
 
 } // namespace heartstead::game

@@ -1,7 +1,10 @@
 #include "game/runtime/server_runtime.hpp"
 
 #include "engine/entities/entity_prototype.hpp"
+#include "engine/world/chunks/chunk_replication.hpp"
+#include "engine/world/voxel_change.hpp"
 #include "engine/world/world_commands.hpp"
+#include "game/features/interaction/voxel_commands.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -58,9 +61,49 @@ core::Status ServerRuntime::initialize() {
     if (!status) {
         return status;
     }
+    status = commands_.register_command(net::CommandDescriptor{
+        std::string(interaction::place_voxel_command_type), true, true,
+        [this](const net::CommandEnvelope& command, const net::CommandExecutionContext& context,
+               world::WorldOperation& operation) {
+            const auto* player = player_for_client(command.sender);
+            if (player == nullptr) {
+                return core::Status::failure("server_runtime.player_not_connected",
+                                             "voxel command sender has no active player");
+            }
+            auto decoded = interaction::VoxelCommandTextCodec::decode_place(command.payload);
+            if (!decoded) {
+                return core::Status::failure(decoded.error().code, decoded.error().message);
+            }
+            return interaction::execute_place_voxel(decoded.value(), player->state, command,
+                                                     context, operation);
+        },
+    });
+    if (!status) {
+        return status;
+    }
+    status = commands_.register_command(net::CommandDescriptor{
+        std::string(interaction::remove_voxel_command_type), true, true,
+        [this](const net::CommandEnvelope& command, const net::CommandExecutionContext& context,
+               world::WorldOperation& operation) {
+            const auto* player = player_for_client(command.sender);
+            if (player == nullptr) {
+                return core::Status::failure("server_runtime.player_not_connected",
+                                             "voxel command sender has no active player");
+            }
+            auto decoded = interaction::VoxelCommandTextCodec::decode_remove(command.payload);
+            if (!decoded) {
+                return core::Status::failure(decoded.error().code, decoded.error().message);
+            }
+            return interaction::execute_remove_voxel(decoded.value(), player->state, command,
+                                                      context, operation);
+        },
+    });
+    if (!status) {
+        return status;
+    }
     status = scheduler_.register_system({
         "runtime.command_gateway", simulation::SimulationPhase::commands, {},
-        [this](simulation::SimulationContext&) {
+        [this](simulation::SimulationContext& context) {
             net::CommandExecutionContext command_context;
             command_context.executor_role = net::CommandExecutorRole::authoritative_server;
             command_context.server_time_ms = current_time_ms_;
@@ -73,6 +116,29 @@ core::Status ServerRuntime::initialize() {
                 return core::Status::failure(result.error().code, result.error().message);
             }
             current_commands_ = std::move(result).value();
+            for (const auto& report : current_commands_.command_reports) {
+                if (!report.success) {
+                    continue;
+                }
+                for (const auto& event : report.events) {
+                    if (event.type != world::voxel_changed_event_type) {
+                        continue;
+                    }
+                    auto change = world::VoxelChangeTextCodec::decode(event.message);
+                    if (!change) {
+                        return core::Status::failure(change.error().code,
+                                                     change.error().message);
+                    }
+                    if (context.events != nullptr) {
+                        auto event_status = context.events->voxel_changed.append(
+                            {change.value().position, change.value().previous,
+                             change.value().current});
+                        if (!event_status) {
+                            return event_status;
+                        }
+                    }
+                }
+            }
             return core::Status::ok();
         },
     });
@@ -196,6 +262,11 @@ core::Result<core::NetId> ServerRuntime::connect_client() {
     auto status = spawn_player(connected.value());
     if (!status) {
         (void)host_.disconnect_client(connected.value());
+        return core::Result<core::NetId>::failure(status.error().code, status.error().message);
+    }
+    status = send_initial_chunks(connected.value());
+    if (!status) {
+        (void)disconnect_client(connected.value());
         return core::Result<core::NetId>::failure(status.error().code, status.error().message);
     }
     return connected;
@@ -496,9 +567,14 @@ core::Status ServerRuntime::replicate_players() {
             snapshot.state = player->state;
             snapshot.last_processed_input_sequence = player->state.last_input_sequence;
             snapshot.collision_world_revision = collision_revision;
+            auto sequence = reserve_custom_replication_sequence();
+            if (!sequence) {
+                return core::Status::failure(sequence.error().code, sequence.error().message);
+            }
             auto status = host_.send_replication_message(
                 core::NetId::from_value(recipient),
-                movement::make_movement_snapshot_message(snapshot, current_time_ms_));
+                movement::make_movement_snapshot_message(snapshot, current_time_ms_,
+                                                         sequence.value()));
             if (!status) {
                 return status;
             }
@@ -506,6 +582,40 @@ core::Status ServerRuntime::replicate_players() {
         }
     }
     return core::Status::ok();
+}
+
+core::Status ServerRuntime::send_initial_chunks(core::NetId client_id) {
+    for (const auto* chunk : world_.chunks().records()) {
+        auto slices = world::make_chunk_snapshot_slices(*chunk);
+        if (!slices) {
+            return core::Status::failure(slices.error().code, slices.error().message);
+        }
+        for (const auto& slice : slices.value()) {
+            auto sequence = reserve_custom_replication_sequence();
+            if (!sequence) {
+                return core::Status::failure(sequence.error().code, sequence.error().message);
+            }
+            auto status = host_.send_replication_message(
+                client_id, world::make_chunk_snapshot_slice_message(
+                               slice, sequence.value(), current_time_ms_));
+            if (!status) {
+                return status;
+            }
+        }
+    }
+    return core::Status::ok();
+}
+
+core::Result<std::uint64_t> ServerRuntime::reserve_custom_replication_sequence() {
+    if (next_custom_replication_sequence_ == 0) {
+        return core::Result<std::uint64_t>::failure(
+            "server_runtime.replication_sequence_exhausted",
+            "custom replication message sequence space is exhausted");
+    }
+    const auto sequence = next_custom_replication_sequence_;
+    next_custom_replication_sequence_ =
+        sequence == std::numeric_limits<std::uint64_t>::max() ? 0 : sequence + 1;
+    return core::Result<std::uint64_t>::success(sequence);
 }
 
 std::uint64_t ServerRuntime::collision_world_revision() const noexcept {
