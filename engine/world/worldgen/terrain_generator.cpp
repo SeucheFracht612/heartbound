@@ -29,6 +29,12 @@ namespace {
     return static_cast<std::uint64_t>(value) ^ 0x8000000000000000ULL;
 }
 
+[[nodiscard]] constexpr bool uses_legacy_coordinate_hash(std::int64_t value) noexcept {
+    constexpr auto legacy_min = -(std::int64_t{1} << 62);
+    constexpr auto legacy_max = (std::int64_t{1} << 62) - 1;
+    return value >= legacy_min && value <= legacy_max;
+}
+
 [[nodiscard]] std::uint64_t combine_hash(std::uint64_t hash, std::uint64_t value,
                                          std::uint64_t domain) noexcept {
     return mix(hash ^ mix(value ^ domain));
@@ -62,6 +68,15 @@ namespace {
 
 [[nodiscard]] std::uint64_t cell_noise(std::uint64_t seed, std::int64_t x, std::int64_t y,
                                        std::int64_t z, std::string_view salt) noexcept {
+    if (uses_legacy_coordinate_hash(x) && uses_legacy_coordinate_hash(y) &&
+        uses_legacy_coordinate_hash(z)) {
+        // Preserve the established cave/resource/feature distribution throughout the practical
+        // coordinate domain.
+        return mix(seed ^ mix(coordinate_bits(x)) ^ mix(coordinate_bits(y) << 1U) ^
+                   mix(coordinate_bits(z) << 2U) ^ mix(stable_string_hash(salt)));
+    }
+    // The legacy shifts alias coordinates whose signed representations differ only in the sign
+    // bit. Domain-separate all axes in the extreme half of the coordinate range.
     auto hash = mix(seed ^ stable_string_hash(salt));
     hash = combine_hash(hash, coordinate_bits(x), 0x243f6a8885a308d3ULL);
     hash = combine_hash(hash, coordinate_bits(y), 0x13198a2e03707344ULL);
@@ -246,9 +261,21 @@ std::int64_t DeterministicTerrainGenerator::surface_height_at(const TerrainGener
         return config.base_surface_y;
     }
 
-    auto hash = mix(config.world_seed ^ stable_string_hash(config.region_id));
-    hash = combine_hash(hash, coordinate_bits(global_x), 0x243f6a8885a308d3ULL);
-    hash = combine_hash(hash, coordinate_bits(global_z), 0xa4093822299f31d0ULL);
+    std::uint64_t hash = 0;
+    if (uses_legacy_coordinate_hash(global_x) && uses_legacy_coordinate_hash(global_z)) {
+        // This is the original worldgen formula. Preserve it throughout the practical coordinate
+        // domain so existing terrain and saved edit baselines remain stable.
+        hash =
+            mix(mix(config.world_seed) ^ mix(coordinate_bits(global_x)) ^
+                mix(coordinate_bits(global_z) << 1U) ^ mix(stable_string_hash(config.region_id)));
+    } else {
+        // Shifting coordinate_bits(z) aliases z with the value obtained by toggling its sign bit.
+        // Only the extreme half of the signed range uses the corrected domain-separated hash; its
+        // counterpart remains on the legacy path, so the pair can no longer alias.
+        hash = mix(config.world_seed ^ stable_string_hash(config.region_id));
+        hash = combine_hash(hash, coordinate_bits(global_x), 0x243f6a8885a308d3ULL);
+        hash = combine_hash(hash, coordinate_bits(global_z), 0xa4093822299f31d0ULL);
+    }
     const auto range = static_cast<std::uint64_t>(config.surface_variation) * 2ULL + 1ULL;
     const auto offset = static_cast<std::int64_t>(hash % range) -
                         static_cast<std::int64_t>(config.surface_variation);

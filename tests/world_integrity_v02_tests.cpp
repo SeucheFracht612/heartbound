@@ -133,6 +133,8 @@ void test_worldgen_preserves_i64_height_and_rejects_unrepresentable_chunks() {
 
     fixture.generation.base_surface_y = 0;
     fixture.generation.surface_variation = std::numeric_limits<std::uint16_t>::max();
+    assert(heartstead::world::DeterministicTerrainGenerator::surface_height_at(fixture.generation,
+                                                                               12, 34) == -7'936);
     bool far_coordinate_changes_height = false;
     for (std::int64_t x = 0; x < 64; ++x) {
         const auto near_height =
@@ -154,10 +156,24 @@ void test_worldgen_features_only_belong_to_their_surface_chunk() {
             {0, 0, 0}, fixture.generation, fixture.regions, fixture.palette);
     assert(surface_chunk);
     assert(!surface_chunk.value().features.empty());
+    assert((surface_chunk.value().features.front().position ==
+            heartstead::world::BlockCoord{0, 9, 0}));
+    assert(surface_chunk.value().features.front().deterministic_seed ==
+           11'419'484'320'585'080'512ULL);
     assert(std::ranges::all_of(surface_chunk.value().features, [](const auto& feature) {
         return heartstead::world::chunk_coord_for_block(feature.position) ==
                heartstead::world::ChunkCoord{0, 0, 0};
     }));
+
+    const auto far_chunk_z =
+        heartstead::world::chunk_axis_for_block(std::numeric_limits<std::int64_t>::min());
+    auto far_surface_chunk =
+        heartstead::world::DeterministicTerrainGenerator::generate_chunk_with_features(
+            {0, 0, far_chunk_z}, fixture.generation, fixture.regions, fixture.palette);
+    assert(far_surface_chunk);
+    assert(!far_surface_chunk.value().features.empty());
+    assert(far_surface_chunk.value().features.front().deterministic_seed !=
+           surface_chunk.value().features.front().deterministic_seed);
 
     auto vertically_repeated =
         heartstead::world::DeterministicTerrainGenerator::generate_chunk_with_features(
@@ -206,6 +222,69 @@ void test_saved_edit_batch_validation_is_atomic() {
     assert(unchanged);
     assert(unchanged.value().is_air());
     assert(chunks.edit_log().empty());
+
+    const heartstead::world::ChunkCoord invalid_chain_coord{8, 0, 0};
+    const std::vector<heartstead::world::VoxelEditRecord> invalid_chain{
+        {invalid_chain_coord, {1, 1, 1}, heartstead::world::VoxelCell::air(), {2, 0}},
+        {invalid_chain_coord, {1, 1, 1}, {3, 0}, {4, 0}},
+    };
+    status = chunks.apply_saved_edits(invalid_chain);
+    assert(!status);
+    assert(status.error().code == "chunk_database.saved_edit_chain_mismatch");
+    assert(!chunks.contains(invalid_chain_coord));
+    assert(chunks.edit_log().empty());
+}
+
+void test_chunk_mutations_preflight_and_compact_edit_history() {
+    using namespace heartstead;
+
+    world::ChunkDatabase chunks;
+    const world::ChunkCoord coord{9, 0, 0};
+    auto invalid = chunks.set(coord, {world::VoxelChunk::edge_length, 0, 0}, {1, 0});
+    assert(!invalid);
+    assert(!chunks.contains(coord));
+    assert(chunks.edit_log().empty());
+
+    assert(chunks.set(coord, {1, 1, 1}, world::VoxelCell::air()));
+    assert(!chunks.contains(coord));
+
+    for (std::uint16_t edit = 0; edit < 1'000; ++edit) {
+        assert(chunks.set(coord, {1, 1, 1}, {static_cast<std::uint16_t>(1 + edit % 2), 0}));
+    }
+    assert(chunks.edit_log().size() == 1);
+    assert(chunks.edit_log().front().previous == world::VoxelCell::air());
+    assert(chunks.edit_log().front().next == world::VoxelCell(2, 0));
+    assert(chunks.set(coord, {1, 1, 1}, world::VoxelCell::air()));
+    assert(chunks.edit_log().size() == 1);
+    assert(chunks.edit_log().front().previous == chunks.edit_log().front().next);
+    assert(chunks.find(coord)->dirty().contains(world::ChunkDirtyFlag::save));
+    assert(chunks.find(coord)->dirty().contains(world::ChunkDirtyFlag::replication));
+
+    const world::ChunkCoord restored_coord{10, 0, 0};
+    world::ChunkDatabase restored_chunks;
+    std::vector<world::VoxelEditRecord> long_chain;
+    auto previous = world::VoxelCell::air();
+    for (std::uint16_t edit = 0; edit < 1'000; ++edit) {
+        const world::VoxelCell next{static_cast<std::uint16_t>(1 + edit % 2), 0};
+        long_chain.push_back({restored_coord, {2, 2, 2}, previous, next});
+        previous = next;
+    }
+    assert(restored_chunks.apply_saved_edits(long_chain));
+    assert(restored_chunks.edit_log().size() == 1);
+    assert(restored_chunks.edit_log().front().chunk_coord == restored_coord);
+    assert(restored_chunks.edit_log().front().previous == world::VoxelCell::air());
+    assert(restored_chunks.edit_log().front().next == previous);
+
+    world::VoxelChunk incompatible_base({11, 0, 0});
+    incompatible_base.fill({7, 0});
+    const std::vector<world::VoxelEditRecord> incompatible_delta{
+        {{11, 0, 0}, {3, 3, 3}, world::VoxelCell::air(), {8, 0}},
+    };
+    auto rejected = restored_chunks.insert_generated_with_saved_edits(std::move(incompatible_base),
+                                                                      incompatible_delta);
+    assert(!rejected);
+    assert(rejected.error().code == "chunk_database.saved_edit_base_mismatch");
+    assert(!restored_chunks.contains({11, 0, 0}));
 }
 
 void test_chunk_residency_changes_invalidate_shared_seams() {
@@ -243,8 +322,7 @@ void test_chunk_residency_changes_invalidate_shared_seams() {
 void test_stream_reload_preserves_one_canonical_delta() {
     TerrainFixture fixture;
     heartstead::world::WorldState state;
-    heartstead::world::VoxelEditRecord saved_edit{
-        {8, 0, 0}, {1, 2, 3}, heartstead::world::VoxelCell::air(), {4, 0}};
+    heartstead::world::VoxelEditRecord saved_edit{{8, 0, 0}, {1, 2, 3}, {1, 0}, {4, 0}};
     TestDeltaSource source;
     source.record = encoded_delta(saved_edit);
 
@@ -444,6 +522,7 @@ int main() {
     test_worldgen_features_only_belong_to_their_surface_chunk();
     test_chunk_interest_planning_is_bounded();
     test_saved_edit_batch_validation_is_atomic();
+    test_chunk_mutations_preflight_and_compact_edit_history();
     test_chunk_residency_changes_invalidate_shared_seams();
     test_stream_reload_preserves_one_canonical_delta();
     test_world_set_voxel_rejects_unloaded_chunk();

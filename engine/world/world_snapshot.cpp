@@ -299,6 +299,7 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
     std::set<std::uint64_t> save_ids;
     std::set<std::uint64_t> build_piece_ids;
     std::set<ChunkCoord> chunk_edit_coords;
+    std::vector<VoxelEditRecord> restored_chunk_edits;
 
     for (const auto& chunk : snapshot.chunk_edits) {
         if (!chunk_edit_coords.insert(chunk.coord).second) {
@@ -310,7 +311,16 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
         if (!edits) {
             return core::Result<WorldState>::failure(edits.error().code, edits.error().message);
         }
-        auto status = state.chunks().apply_saved_edits(edits.value(), state.dirty_regions());
+        if (edits.value().size() > restored_chunk_edits.max_size() - restored_chunk_edits.size()) {
+            return core::Result<WorldState>::failure(
+                "world_snapshot.chunk_delta_too_large",
+                "snapshot chunk edit records exceed the addressable import limit");
+        }
+        restored_chunk_edits.insert(restored_chunk_edits.end(), edits.value().begin(),
+                                    edits.value().end());
+    }
+    if (!restored_chunk_edits.empty()) {
+        auto status = state.chunks().apply_saved_edits(restored_chunk_edits, state.dirty_regions());
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }

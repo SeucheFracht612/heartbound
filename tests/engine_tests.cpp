@@ -12695,7 +12695,7 @@ void test_chunk_streamer() {
     const heartstead::world::VoxelEditRecord streamed_edit{
         {2, 0, 0},
         {1, 2, 3},
-        heartstead::world::VoxelCell::air(),
+        heartstead::world::VoxelCell{1, 0},
         heartstead::world::VoxelCell{9, 4},
     };
     const std::vector<const heartstead::world::VoxelEditRecord*> streamed_edits{&streamed_edit};
@@ -12735,7 +12735,7 @@ void test_chunk_streamer() {
     const heartstead::world::VoxelEditRecord file_edit{
         {4, 0, 0},
         {2, 3, 4},
-        heartstead::world::VoxelCell::air(),
+        heartstead::world::VoxelCell{1, 0},
         heartstead::world::VoxelCell{10, 5},
     };
     const std::vector<const heartstead::world::VoxelEditRecord*> file_edits{&file_edit};
@@ -12982,7 +12982,7 @@ void test_chunk_streamer() {
     const heartstead::world::VoxelEditRecord maintenance_loaded_edit{
         {0, 0, 0},
         {1, 1, 1},
-        heartstead::world::VoxelCell::air(),
+        heartstead::world::VoxelCell{1, 0},
         heartstead::world::VoxelCell{17, 0},
     };
     const std::vector<const heartstead::world::VoxelEditRecord*> maintenance_loaded_edits{

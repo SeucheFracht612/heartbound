@@ -6,6 +6,7 @@
 #include <atomic>
 #include <exception>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -38,6 +39,29 @@ std::atomic<std::uint64_t> next_chunk_load_generation{1};
 
 [[nodiscard]] std::uint64_t coordinate_bits(std::int64_t value) noexcept {
     return static_cast<std::uint64_t>(value) ^ 0x8000000000000000ULL;
+}
+
+struct VoxelEditAddress {
+    ChunkCoord chunk;
+    VoxelCoord voxel;
+
+    friend auto operator<=>(const VoxelEditAddress&, const VoxelEditAddress&) = default;
+};
+
+[[nodiscard]] std::vector<VoxelEditRecord>
+canonicalize_saved_edits(std::span<const VoxelEditRecord> edits) {
+    std::vector<VoxelEditRecord> canonical;
+    std::map<VoxelEditAddress, std::size_t> positions;
+    for (const auto& edit : edits) {
+        const VoxelEditAddress address{edit.chunk_coord, edit.voxel_coord};
+        const auto [position, inserted] = positions.emplace(address, canonical.size());
+        if (inserted) {
+            canonical.push_back(edit);
+        } else {
+            canonical[position->second].next = edit.next;
+        }
+    }
+    return canonical;
 }
 
 } // namespace
@@ -95,10 +119,14 @@ std::size_t ChunkDatabase::chunk_count() const noexcept {
 }
 
 bool ChunkDatabase::erase(ChunkCoord coord) {
+    if (!contains(coord)) {
+        return false;
+    }
+    const auto neighbors = face_neighbors(coord);
     if (chunks_.erase(coord) == 0) {
         return false;
     }
-    for (const auto neighbor : face_neighbors(coord)) {
+    for (const auto neighbor : neighbors) {
         auto* chunk = find(neighbor);
         if (chunk != nullptr) {
             chunk->mark_dirty(ChunkDirtyFlag::mesh);
@@ -151,41 +179,91 @@ core::Result<VoxelCell> ChunkDatabase::get(ChunkCoord chunk_coord, VoxelCoord vo
 }
 
 core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell) {
-    auto& chunk = get_or_create(chunk_coord);
-    auto previous = chunk.get(voxel_coord);
-    if (!previous) {
-        return core::Status::failure(previous.error().code, previous.error().message);
+    if (!is_valid_local_coord(voxel_coord)) {
+        return core::Status::failure("chunk.coord_out_of_bounds",
+                                     "voxel coordinate is outside the chunk");
     }
-    if (previous.value() == cell) {
+
+    auto* resident = find(chunk_coord);
+    const auto previous =
+        resident == nullptr ? VoxelCell::air() : resident->get(voxel_coord).value();
+    if (previous == cell) {
         return core::Status::ok();
     }
 
+    auto retained_edit = std::ranges::find_if(edit_log_, [&](const VoxelEditRecord& edit) {
+        return edit.chunk_coord == chunk_coord && edit.voxel_coord == voxel_coord;
+    });
+    const bool has_retained_edit = retained_edit != edit_log_.end();
+    if (has_retained_edit && retained_edit->next != previous) {
+        return core::Status::failure(
+            "chunk_database.edit_history_mismatch",
+            "retained voxel edit history does not match the resident chunk state");
+    }
+    if (!has_retained_edit) {
+        if (edit_log_.size() == edit_log_.max_size()) {
+            return core::Status::failure("chunk_database.edit_history_exhausted",
+                                         "voxel edit history cannot retain another entry");
+        }
+        // Ensure recording the edit cannot allocate after the chunk has been mutated.
+        edit_log_.reserve(edit_log_.size() + 1);
+    }
+    const auto neighbors = boundary_neighbors(chunk_coord, voxel_coord);
+
+    auto& chunk = resident == nullptr ? get_or_create(chunk_coord) : *resident;
     auto status = chunk.set(voxel_coord, cell);
     if (!status) {
         return status;
     }
 
-    edit_log_.push_back(VoxelEditRecord{chunk_coord, voxel_coord, previous.value(), cell});
-    mark_neighbor_dirty_if_boundary(chunk_coord, voxel_coord, nullptr);
+    if (!has_retained_edit) {
+        edit_log_.push_back(VoxelEditRecord{chunk_coord, voxel_coord, previous, cell});
+    } else {
+        retained_edit->next = cell;
+    }
+    for (const auto neighbor : neighbors) {
+        auto* neighbor_chunk = find(neighbor);
+        if (neighbor_chunk != nullptr) {
+            neighbor_chunk->mark_dirty(ChunkDirtyFlag::mesh);
+            neighbor_chunk->mark_dirty(ChunkDirtyFlag::collision);
+            neighbor_chunk->mark_dirty(ChunkDirtyFlag::lighting);
+        }
+    }
     return core::Status::ok();
 }
 
 core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell,
                                 dirty::DirtyRegionTracker& dirty_regions) {
-    auto previous = find(chunk_coord) != nullptr ? find(chunk_coord)->get(voxel_coord)
-                                                 : VoxelChunk(chunk_coord).get(voxel_coord);
-    if (!previous)
-        return core::Status::failure(previous.error().code, previous.error().message);
-    if (previous.value() == cell)
+    if (!is_valid_local_coord(voxel_coord)) {
+        return core::Status::failure("chunk.coord_out_of_bounds",
+                                     "voxel coordinate is outside the chunk");
+    }
+    const auto* resident = find(chunk_coord);
+    const auto previous =
+        resident == nullptr ? VoxelCell::air() : resident->get(voxel_coord).value();
+    if (previous == cell) {
         return core::Status::ok();
+    }
+
     auto staged_dirty = dirty_regions;
-    auto status = set(chunk_coord, voxel_coord, cell);
-    if (!status)
+    auto status = mark_chunk_rebuild_regions(staged_dirty, chunk_coord, "voxel edit");
+    if (!status) {
         return status;
-    status = mark_chunk_rebuild_regions(staged_dirty, chunk_coord, "voxel edit");
-    if (!status)
+    }
+    for (const auto neighbor : boundary_neighbors(chunk_coord, voxel_coord)) {
+        if (find(neighbor) == nullptr) {
+            continue;
+        }
+        status = mark_chunk_rebuild_regions(staged_dirty, neighbor, "boundary voxel edit");
+        if (!status) {
+            return status;
+        }
+    }
+
+    status = set(chunk_coord, voxel_coord, cell);
+    if (!status) {
         return status;
-    mark_neighbor_dirty_if_boundary(chunk_coord, voxel_coord, &staged_dirty);
+    }
     dirty_regions = std::move(staged_dirty);
     return core::Status::ok();
 }
@@ -193,26 +271,38 @@ core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, 
 core::Status ChunkDatabase::set(ChunkCoord chunk_coord, VoxelCoord voxel_coord, VoxelCell cell,
                                 dirty::DirtyRegionTracker& dirty_regions,
                                 const VoxelPalette& palette) {
-    auto previous = find(chunk_coord) != nullptr ? find(chunk_coord)->get(voxel_coord)
-                                                 : VoxelChunk(chunk_coord).get(voxel_coord);
-    if (!previous) {
-        return core::Status::failure(previous.error().code, previous.error().message);
+    if (!is_valid_local_coord(voxel_coord)) {
+        return core::Status::failure("chunk.coord_out_of_bounds",
+                                     "voxel coordinate is outside the chunk");
     }
-    if (previous.value() == cell) {
+    const auto* resident = find(chunk_coord);
+    const auto previous =
+        resident == nullptr ? VoxelCell::air() : resident->get(voxel_coord).value();
+    if (previous == cell) {
         return core::Status::ok();
     }
 
-    auto staged_dirty = dirty_regions;
-    auto status = set(chunk_coord, voxel_coord, cell, staged_dirty);
-    if (!status)
-        return status;
-    const auto radius = std::max(palette.mesh_invalidation_radius(previous.value()),
+    const auto radius = std::max(palette.mesh_invalidation_radius(previous),
                                  palette.mesh_invalidation_radius(cell));
-    status = mark_rich_mesh_invalidation(chunk_coord, voxel_coord, radius, staged_dirty);
-    if (status) {
-        dirty_regions = std::move(staged_dirty);
+    const auto rich_neighbors = rich_mesh_invalidation_neighbors(chunk_coord, voxel_coord, radius);
+    auto staged_dirty = dirty_regions;
+    for (const auto neighbor : rich_neighbors) {
+        auto status = staged_dirty.mark_single(dirty::DirtyRegionKind::chunk_mesh,
+                                               dirty_coord_for_chunk(neighbor),
+                                               "rich block mesh invalidation");
+        if (!status) {
+            return status;
+        }
     }
-    return status;
+    auto status = set(chunk_coord, voxel_coord, cell, staged_dirty);
+    if (!status) {
+        return status;
+    }
+    for (const auto neighbor : rich_neighbors) {
+        find(neighbor)->mark_dirty(ChunkDirtyFlag::mesh);
+    }
+    dirty_regions = std::move(staged_dirty);
+    return core::Status::ok();
 }
 
 core::Status ChunkDatabase::apply_saved_edits(std::span<const VoxelEditRecord> edits) {
@@ -268,13 +358,14 @@ core::Status ChunkDatabase::insert_generated_impl(VoxelChunk chunk,
         return core::Status::failure("chunk_database.duplicate_generated_chunk",
                                      "generated chunk already exists");
     }
+    const auto neighbors = face_neighbors(coord);
 
     if (dirty_regions != nullptr) {
         auto status = mark_chunk_rebuild_regions(*dirty_regions, coord, "generated chunk");
         if (!status) {
             return status;
         }
-        for (const auto neighbor : face_neighbors(coord)) {
+        for (const auto neighbor : neighbors) {
             if (find(neighbor) == nullptr) {
                 continue;
             }
@@ -291,7 +382,7 @@ core::Status ChunkDatabase::insert_generated_impl(VoxelChunk chunk,
     chunk.mark_dirty(ChunkDirtyFlag::lighting);
     chunk.assign_load_generation(allocate_load_generation());
     chunks_.emplace(coord, std::move(chunk));
-    for (const auto neighbor : face_neighbors(coord)) {
+    for (const auto neighbor : neighbors) {
         auto* resident = find(neighbor);
         if (resident != nullptr) {
             resident->mark_dirty(ChunkDirtyFlag::mesh);
@@ -307,6 +398,10 @@ ChunkDatabase::insert_generated_with_saved_edits_impl(VoxelChunk chunk,
                                                       std::span<const VoxelEditRecord> edits,
                                                       dirty::DirtyRegionTracker* dirty_regions) {
     const auto coord = chunk.coord();
+    if (contains(coord)) {
+        return core::Status::failure("chunk_database.duplicate_generated_chunk",
+                                     "generated chunk already exists");
+    }
     if (edits.empty()) {
         return core::Status::failure("chunk_database.empty_saved_edit_batch",
                                      "generated chunk saved edit batch must not be empty");
@@ -317,9 +412,21 @@ ChunkDatabase::insert_generated_with_saved_edits_impl(VoxelChunk chunk,
         return status;
     }
 
+    const auto canonical_edits = canonicalize_saved_edits(edits);
+    auto staged_edit_log = build_replaced_saved_edit_history(edits, canonical_edits);
+
     // Apply to the not-yet-visible chunk first. A malformed batch can therefore never leave a
     // generated or partially restored chunk in the live database.
     for (const auto& edit : edits) {
+        auto current = chunk.get(edit.voxel_coord);
+        if (!current) {
+            return core::Status::failure(current.error().code, current.error().message);
+        }
+        if (current.value() != edit.previous) {
+            return core::Status::failure(
+                "chunk_database.saved_edit_base_mismatch",
+                "saved edit history does not match the generated terrain baseline");
+        }
         status = chunk.apply_saved_cell(edit.voxel_coord, edit.next);
         if (!status) {
             return status;
@@ -331,10 +438,7 @@ ChunkDatabase::insert_generated_with_saved_edits_impl(VoxelChunk chunk,
         return status;
     }
 
-    replace_saved_edit_history(edits);
-    for (const auto& edit : edits) {
-        mark_neighbor_dirty_if_boundary(edit.chunk_coord, edit.voxel_coord, dirty_regions);
-    }
+    edit_log_.swap(staged_edit_log);
     return core::Status::ok();
 }
 
@@ -344,32 +448,41 @@ core::Status ChunkDatabase::apply_saved_edits_impl(std::span<const VoxelEditReco
     if (!status) {
         return status;
     }
+    if (edits.empty()) {
+        return core::Status::ok();
+    }
 
-    for (const auto& edit : edits) {
-        auto& chunk = get_or_create(edit.chunk_coord);
+    const auto canonical_edits = canonicalize_saved_edits(edits);
+    auto staged = *this;
+    auto staged_edit_log = staged.build_replaced_saved_edit_history(edits, canonical_edits);
+    for (const auto& edit : canonical_edits) {
+        auto& chunk = staged.get_or_create(edit.chunk_coord);
         status = chunk.apply_saved_cell(edit.voxel_coord, edit.next);
         if (!status) {
             return status;
         }
 
         if (dirty_regions != nullptr) {
-            status = mark_chunk_rebuild_regions(*dirty_regions, edit.chunk_coord,
-                                                "saved voxel edit delta");
+            status = staged.mark_chunk_rebuild_regions(*dirty_regions, edit.chunk_coord,
+                                                       "saved voxel edit delta");
             if (!status) {
                 return status;
             }
         }
-        mark_neighbor_dirty_if_boundary(edit.chunk_coord, edit.voxel_coord, dirty_regions);
+        staged.mark_neighbor_dirty_if_boundary(edit.chunk_coord, edit.voxel_coord, dirty_regions);
     }
 
     // A persisted batch is the canonical full delta for every chunk it names. Replace any
     // retained history from an earlier load instead of appending it again on every stream cycle.
-    replace_saved_edit_history(edits);
+    staged.edit_log_.swap(staged_edit_log);
+    chunks_.swap(staged.chunks_);
+    edit_log_.swap(staged.edit_log_);
     return core::Status::ok();
 }
 
 core::Status ChunkDatabase::validate_saved_edit_batch(std::span<const VoxelEditRecord> edits,
                                                       const ChunkCoord* expected_chunk) {
+    std::map<VoxelEditAddress, VoxelCell> chain_tails;
     for (const auto& edit : edits) {
         if (expected_chunk != nullptr && edit.chunk_coord != *expected_chunk) {
             return core::Status::failure("chunk_database.saved_edit_chunk_mismatch",
@@ -382,23 +495,41 @@ core::Status ChunkDatabase::validate_saved_edit_batch(std::span<const VoxelEditR
                 "chunk_database.saved_edit_coord_out_of_bounds",
                 "saved edit batch contains a local voxel coordinate outside the chunk");
         }
+        const VoxelEditAddress address{edit.chunk_coord, edit.voxel_coord};
+        const auto [tail, inserted] = chain_tails.emplace(address, edit.next);
+        if (!inserted) {
+            if (tail->second != edit.previous) {
+                return core::Status::failure(
+                    "chunk_database.saved_edit_chain_mismatch",
+                    "saved edits for one voxel do not form a continuous previous/next chain");
+            }
+            tail->second = edit.next;
+        }
     }
     return core::Status::ok();
 }
 
-void ChunkDatabase::replace_saved_edit_history(std::span<const VoxelEditRecord> edits) {
+std::vector<VoxelEditRecord> ChunkDatabase::build_replaced_saved_edit_history(
+    std::span<const VoxelEditRecord> touched_edits,
+    std::span<const VoxelEditRecord> canonical_edits) const {
     std::set<ChunkCoord> touched_chunks;
-    for (const auto& edit : edits) {
+    for (const auto& edit : touched_edits) {
         touched_chunks.insert(edit.chunk_coord);
     }
     if (touched_chunks.empty()) {
-        return;
+        return edit_log_;
     }
 
-    std::erase_if(edit_log_, [&touched_chunks](const VoxelEditRecord& existing) {
+    auto result = edit_log_;
+    std::erase_if(result, [&touched_chunks](const VoxelEditRecord& existing) {
         return touched_chunks.contains(existing.chunk_coord);
     });
-    edit_log_.insert(edit_log_.end(), edits.begin(), edits.end());
+    for (const auto& edit : canonical_edits) {
+        if (edit.previous != edit.next) {
+            result.push_back(edit);
+        }
+    }
+    return result;
 }
 
 void ChunkDatabase::mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
@@ -416,12 +547,12 @@ void ChunkDatabase::mark_neighbor_dirty_if_boundary(ChunkCoord chunk_coord, Voxe
     }
 }
 
-core::Status ChunkDatabase::mark_rich_mesh_invalidation(ChunkCoord chunk_coord,
-                                                        VoxelCoord voxel_coord,
-                                                        std::uint16_t radius,
-                                                        dirty::DirtyRegionTracker& dirty_regions) {
+std::vector<ChunkCoord>
+ChunkDatabase::rich_mesh_invalidation_neighbors(ChunkCoord chunk_coord, VoxelCoord voxel_coord,
+                                                std::uint16_t radius) const {
+    std::vector<ChunkCoord> result;
     if (radius == 0) {
-        return core::Status::ok();
+        return result;
     }
 
     const auto floor_chunk_offset = [](std::int32_t cell) noexcept {
@@ -463,21 +594,14 @@ core::Status ChunkDatabase::mark_rich_mesh_invalidation(ChunkCoord chunk_coord,
                     continue;
                 }
                 const ChunkCoord neighbor{*neighbor_x, *neighbor_y, *neighbor_z};
-                auto* neighbor_chunk = find(neighbor);
-                if (neighbor_chunk == nullptr) {
+                if (find(neighbor) == nullptr) {
                     continue;
                 }
-                neighbor_chunk->mark_dirty(ChunkDirtyFlag::mesh);
-                auto status = dirty_regions.mark_single(dirty::DirtyRegionKind::chunk_mesh,
-                                                        dirty_coord_for_chunk(neighbor),
-                                                        "rich block mesh invalidation");
-                if (!status) {
-                    return status;
-                }
+                result.push_back(neighbor);
             }
         }
     }
-    return core::Status::ok();
+    return result;
 }
 
 dirty::DirtyRegionCoord ChunkDatabase::dirty_coord_for_chunk(ChunkCoord coord) noexcept {
