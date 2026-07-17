@@ -93,8 +93,37 @@ struct X11OutgoingIncrementalClipboardTransfer {
     case XK_Return:
     case XK_KP_Enter:
         return KeyCode::enter;
+    case XK_Tab:
+        return KeyCode::tab;
     case XK_space:
         return KeyCode::space;
+    case XK_1:
+    case XK_KP_1:
+        return KeyCode::digit_1;
+    case XK_2:
+    case XK_KP_2:
+        return KeyCode::digit_2;
+    case XK_3:
+    case XK_KP_3:
+        return KeyCode::digit_3;
+    case XK_4:
+    case XK_KP_4:
+        return KeyCode::digit_4;
+    case XK_5:
+    case XK_KP_5:
+        return KeyCode::digit_5;
+    case XK_6:
+    case XK_KP_6:
+        return KeyCode::digit_6;
+    case XK_7:
+    case XK_KP_7:
+        return KeyCode::digit_7;
+    case XK_8:
+    case XK_KP_8:
+        return KeyCode::digit_8;
+    case XK_9:
+    case XK_KP_9:
+        return KeyCode::digit_9;
     case XK_w:
     case XK_W:
         return KeyCode::w;
@@ -2105,8 +2134,28 @@ std::string_view key_code_name(KeyCode key) noexcept {
         return "escape";
     case KeyCode::enter:
         return "enter";
+    case KeyCode::tab:
+        return "tab";
     case KeyCode::space:
         return "space";
+    case KeyCode::digit_1:
+        return "1";
+    case KeyCode::digit_2:
+        return "2";
+    case KeyCode::digit_3:
+        return "3";
+    case KeyCode::digit_4:
+        return "4";
+    case KeyCode::digit_5:
+        return "5";
+    case KeyCode::digit_6:
+        return "6";
+    case KeyCode::digit_7:
+        return "7";
+    case KeyCode::digit_8:
+        return "8";
+    case KeyCode::digit_9:
+        return "9";
     case KeyCode::w:
         return "w";
     case KeyCode::a:

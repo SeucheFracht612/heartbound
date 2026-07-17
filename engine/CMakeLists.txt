@@ -30,6 +30,7 @@ target_sources(
     entities/physical_resource.cpp
     items/item_stack.cpp
     items/item_prototype.cpp
+    input/input_action.cpp
     jobs/job_system.cpp
     jobs/thread_pool/thread_pool_backend.cpp
     math/matrix.cpp
@@ -191,6 +192,7 @@ target_sources(
       entities/entity_prototype.hpp
       entities/entity_world.hpp
       entities/physical_resource.hpp
+      input/input_action.hpp
       items/item_stack.hpp
       items/item_prototype.hpp
       jobs/job_system.hpp

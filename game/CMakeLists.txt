@@ -4,6 +4,7 @@ add_library(Heartstead::GameRuntime ALIAS heartstead_game)
 target_sources(
   heartstead_game
   PRIVATE
+    features/interaction/voxel_raycast.cpp
     runtime/client_runtime.cpp
     runtime/game_inspection.cpp
     runtime/game_runtime.cpp
@@ -14,6 +15,7 @@ target_sources(
     FILE_SET HEADERS
     BASE_DIRS ${PROJECT_SOURCE_DIR}
     FILES
+      features/interaction/voxel_raycast.hpp
       runtime/client_runtime.hpp
       runtime/game_inspection.hpp
       runtime/game_runtime.hpp

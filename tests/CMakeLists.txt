@@ -61,6 +61,11 @@ heartstead_add_foundation_test(heartstead_simulation_runtime_tests simulation_ru
 heartstead_add_foundation_test(heartstead_entity_world_tests entity_world_tests.cpp)
 heartstead_add_foundation_test(heartstead_movement_controller_tests movement_controller_tests.cpp)
 
+add_executable(heartstead_gameplay_input_tests gameplay_input_tests.cpp)
+target_link_libraries(heartstead_gameplay_input_tests PRIVATE Heartstead::GameRuntime)
+heartstead_configure_target(heartstead_gameplay_input_tests)
+add_test(NAME heartstead_gameplay_input_tests COMMAND heartstead_gameplay_input_tests)
+
 function(heartstead_add_smoke_test test_name target_name)
   if(TARGET ${target_name})
     add_test(NAME ${test_name} COMMAND $<TARGET_FILE:${target_name}> ${ARGN})
