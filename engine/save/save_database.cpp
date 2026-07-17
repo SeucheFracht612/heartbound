@@ -1,5 +1,6 @@
 #include "engine/save/save_database.hpp"
 
+#include "engine/core/filesystem.hpp"
 #include "engine/save/save_binary_codec.hpp"
 
 #include <algorithm>
@@ -173,14 +174,10 @@ struct StagedGenerationEntry {
         }
     }
 
-    std::error_code error;
-    std::filesystem::rename(temporary, path, error);
+    const auto error = core::replace_file(temporary, path);
     if (error) {
-        std::filesystem::remove(path, error);
-        error.clear();
-        std::filesystem::rename(temporary, path, error);
-    }
-    if (error) {
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
         return filesystem_failure("save_database.rename_failed", error);
     }
     return core::Status::ok();

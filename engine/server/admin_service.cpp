@@ -1,5 +1,7 @@
 #include "engine/server/admin_service.hpp"
 
+#include "engine/core/filesystem.hpp"
+
 #include <algorithm>
 #include <fstream>
 #include <limits>
@@ -124,11 +126,10 @@ core::Status ServerAdminService::save_bans() const {
     output.close();
     if (!output)
         return core::Status::failure("admin.bans_unwritable", "could not flush ban list");
-    std::filesystem::rename(temporary, ban_file(), error);
+    error = core::replace_file(temporary, ban_file());
     if (error) {
-        std::filesystem::remove(ban_file(), error);
-        error.clear();
-        std::filesystem::rename(temporary, ban_file(), error);
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
     }
     return error ? core::Status::failure("admin.bans_replace_failed", error.message())
                  : core::Status::ok();

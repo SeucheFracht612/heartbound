@@ -18,6 +18,7 @@ target_sources(
     cargo/cargo_prototype.cpp
     content/content_validation.cpp
     core/assert.cpp
+    core/filesystem.cpp
     core/hash.cpp
     core/ids.cpp
     core/logging.cpp
@@ -182,6 +183,7 @@ target_sources(
       cargo/cargo_prototype.hpp
       content/content_validation.hpp
       core/assert.hpp
+      core/filesystem.hpp
       core/hash.hpp
       core/ids.hpp
       core/logging.hpp

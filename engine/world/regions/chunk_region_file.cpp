@@ -1,5 +1,6 @@
 #include "engine/world/regions/chunk_region_file.hpp"
 
+#include "engine/core/filesystem.hpp"
 #include "engine/core/hash.hpp"
 
 #include <array>
@@ -310,9 +311,10 @@ core::Status ChunkRegionFileStore::save(const ChunkRegionFile& region) const {
                                          "failed to write region file");
         }
     }
-    std::filesystem::rename(temporary, target, error);
+    error = core::replace_file(temporary, target);
     if (error) {
-        std::filesystem::remove(temporary);
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
         return core::Status::failure("chunk_region.commit_failed", error.message());
     }
     return core::Status::ok();

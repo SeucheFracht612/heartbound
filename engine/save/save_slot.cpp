@@ -1,5 +1,6 @@
 #include "engine/save/save_slot.hpp"
 
+#include "engine/core/filesystem.hpp"
 #include "engine/core/ids.hpp"
 
 #include <algorithm>
@@ -82,14 +83,10 @@ constexpr std::string_view slot_metadata_magic = "heartstead.save_slot.v1";
         }
     }
 
-    std::error_code error;
-    std::filesystem::rename(temporary, path, error);
+    const auto error = core::replace_file(temporary, path);
     if (error) {
-        std::filesystem::remove(path, error);
-        error.clear();
-        std::filesystem::rename(temporary, path, error);
-    }
-    if (error) {
+        std::error_code cleanup_error;
+        std::filesystem::remove(temporary, cleanup_error);
         return filesystem_failure("save_slot.rename_failed", error);
     }
     return core::Status::ok();

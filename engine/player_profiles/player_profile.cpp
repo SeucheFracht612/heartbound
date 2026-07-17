@@ -1,5 +1,6 @@
 #include "engine/player_profiles/player_profile.hpp"
 
+#include "engine/core/filesystem.hpp"
 #include "engine/core/ids.hpp"
 
 #include <algorithm>
@@ -205,13 +206,7 @@ template <typename T>
                                          "failed to write temporary player profile file");
         }
     }
-    std::filesystem::rename(temporary, path, error);
-    if (error) {
-        std::error_code remove_error;
-        std::filesystem::remove(path, remove_error);
-        error.clear();
-        std::filesystem::rename(temporary, path, error);
-    }
+    error = core::replace_file(temporary, path);
     if (error) {
         const auto rename_error = error;
         std::error_code cleanup_error;
