@@ -5512,7 +5512,7 @@ void test_save_text_codec() {
     metadata.schema_version = heartstead::save::current_save_schema_version;
     metadata.game_version = "0.1.0 dev";
     metadata.world_seed = 982451653;
-    metadata.enabled_mods.push_back({"base", "0.0.1", "hash|with=escaping"});
+    metadata.enabled_mods.push_back({"base", "0.0.1", "hash|with=%escaping"});
     metadata.migration_history.push_back("0001-language-and-build-system");
     metadata.migration_history.push_back("0002-percent-marker");
 
@@ -5523,11 +5523,23 @@ void test_save_text_codec() {
     assert(decoded.value().game_version == metadata.game_version);
     assert(decoded.value().world_seed == metadata.world_seed);
     assert(decoded.value().enabled_mods.size() == 1);
-    assert(decoded.value().enabled_mods.front().prototype_hash == "hash|with=escaping");
+    assert(decoded.value().enabled_mods.front().prototype_hash == "hash|with=%escaping");
     assert(decoded.value().migration_history.size() == 2);
 
     auto invalid = heartstead::save::SaveTextCodec::decode_metadata("not-heartstead\n");
     assert(!invalid);
+
+    auto duplicate_field_text = encoded;
+    duplicate_field_text.insert(duplicate_field_text.find('\n') + 1U, "schema_version=2\n");
+    auto duplicate_field = heartstead::save::SaveTextCodec::decode_metadata(duplicate_field_text);
+    assert(!duplicate_field && duplicate_field.error().code == "save_text.duplicate_field");
+
+    auto trailing_metadata = heartstead::save::SaveTextCodec::decode_metadata(encoded + "junk");
+    assert(!trailing_metadata && trailing_metadata.error().code == "save_text.trailing_data");
+
+    auto oversized_metadata = heartstead::save::SaveTextCodec::decode_metadata(
+        std::string(16U * 1024U * 1024U + 1U, 'x'));
+    assert(!oversized_metadata && oversized_metadata.error().code == "save_text.file_too_large");
 }
 
 void test_save_migration_registry() {
@@ -5856,6 +5868,41 @@ void test_save_snapshot_validation() {
     assert(decoded_snapshot.value().cargo_records.front().position.approximate_global().z == -3.5);
     assert(decoded_snapshot.value().processes.front().input_slots.front().count == 4);
     assert(decoded_snapshot.value().mod_states.front().encoded_state == "opaque mod state");
+
+    auto duplicate_snapshot_field_text = encoded_snapshot;
+    duplicate_snapshot_field_text.insert(duplicate_snapshot_field_text.find('\n') + 1U,
+                                         "schema_version=2\n");
+    auto duplicate_snapshot_field =
+        heartstead::save::SaveTextCodec::decode_snapshot(duplicate_snapshot_field_text);
+    assert(!duplicate_snapshot_field &&
+           duplicate_snapshot_field.error().code == "save_text.duplicate_field");
+
+    auto trailing_snapshot =
+        heartstead::save::SaveTextCodec::decode_snapshot(encoded_snapshot + "junk");
+    assert(!trailing_snapshot && trailing_snapshot.error().code == "save_text.trailing_data");
+
+    std::string collection_amplification = "heartstead.save_snapshot_text.v2\n"
+                                           "schema_version=2\n"
+                                           "game_version=0.1.0\n"
+                                           "world_seed=1\n"
+                                           "world_time=0\n"
+                                           "mod_state=base|state|";
+    collection_amplification.append(1'000'000U, ',');
+    auto excessive_collection =
+        heartstead::save::SaveTextCodec::decode_snapshot(collection_amplification);
+    assert(!excessive_collection &&
+           excessive_collection.error().code == "save_text.limit_exceeded");
+
+    std::string field_amplification = "heartstead.save_snapshot_text.v2\n"
+                                      "schema_version=2\n"
+                                      "game_version=0.1.0\n"
+                                      "world_seed=1\n"
+                                      "world_time=0\n"
+                                      "mod_state=";
+    field_amplification.append(1'000'000U, '|');
+    field_amplification += "\nend\n";
+    auto excessive_fields = heartstead::save::SaveTextCodec::decode_snapshot(field_amplification);
+    assert(!excessive_fields && excessive_fields.error().code == "save_text.invalid_mod_state");
 
     const auto binary_snapshot = heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot);
     assert(binary_snapshot && !binary_snapshot.value().empty());

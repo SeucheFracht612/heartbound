@@ -2,6 +2,7 @@
 
 #include "engine/math/vector.hpp"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdint>
 #include <iomanip>
@@ -20,6 +21,10 @@ namespace {
 constexpr std::string_view magic = "heartstead.save_text.v1";
 constexpr std::string_view snapshot_magic_v1 = "heartstead.save_snapshot_text.v1";
 constexpr std::string_view snapshot_magic_v2 = "heartstead.save_snapshot_text.v2";
+constexpr std::size_t max_metadata_text_bytes = 16U * 1024U * 1024U;
+constexpr std::size_t max_save_text_bytes = 512U * 1024U * 1024U;
+constexpr std::size_t max_save_records = 1'000'000U;
+constexpr std::size_t max_save_line_bytes = 16U * 1024U * 1024U;
 
 [[nodiscard]] bool is_hex_digit(char value) noexcept {
     return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f') ||
@@ -182,10 +187,16 @@ constexpr std::string_view snapshot_magic_v2 = "heartstead.save_snapshot_text.v2
     return output.str();
 }
 
-[[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter) {
+[[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter,
+                                                  std::size_t max_parts) {
     std::vector<std::string_view> result;
+    result.reserve(std::min<std::size_t>(max_parts + 1U, 16U));
     std::size_t start = 0;
     while (start <= value.size()) {
+        if (result.size() == max_parts) {
+            result.emplace_back();
+            break;
+        }
         const auto end = value.find(delimiter, start);
         if (end == std::string_view::npos) {
             result.push_back(value.substr(start));
@@ -198,7 +209,7 @@ constexpr std::string_view snapshot_magic_v2 = "heartstead.save_snapshot_text.v2
 }
 
 [[nodiscard]] core::Result<SavedModRecord> parse_mod_record(std::string_view value) {
-    const auto parts = split(value, '|');
+    const auto parts = split(value, '|', 3);
     if (parts.size() != 3) {
         return core::Result<SavedModRecord>::failure(
             "save_text.invalid_mod_record",
@@ -248,7 +259,7 @@ constexpr std::string_view snapshot_magic_v2 = "heartstead.save_snapshot_text.v2
         return core::Result<std::vector<std::string>>::success(std::move(result));
     }
 
-    for (const auto part : split(value, ',')) {
+    for (const auto part : split(value, ',', max_save_records)) {
         auto parsed = percent_unescape(part);
         if (!parsed) {
             return core::Result<std::vector<std::string>>::failure(parsed.error().code,
@@ -455,7 +466,7 @@ parse_fire_state(std::string_view value) noexcept {
 
 [[nodiscard]] core::Result<world::WorldPosition> parse_world_position(std::string_view value,
                                                                       std::string_view label) {
-    const auto parts = split(value, '~');
+    const auto parts = split(value, '~', 6);
     if (parts.size() != 3 && parts.size() != 6) {
         return core::Result<world::WorldPosition>::failure(
             "save_text.invalid_world_position",
@@ -489,7 +500,7 @@ parse_fire_state(std::string_view value) noexcept {
 }
 
 [[nodiscard]] core::Result<build::Transform> parse_transform(std::string_view value) {
-    const auto parts = split(value, '~');
+    const auto parts = split(value, '~', 12);
     if (parts.size() != 9 && parts.size() != 12) {
         return core::Result<build::Transform>::failure(
             "save_text.invalid_transform",
@@ -544,8 +555,8 @@ parse_fire_state(std::string_view value) noexcept {
     if (value.empty()) {
         return core::Result<std::vector<build::BuildSocket>>::success(std::move(sockets));
     }
-    for (const auto entry : split(value, ',')) {
-        const auto parts = split(entry, '~');
+    for (const auto entry : split(value, ',', max_save_records)) {
+        const auto parts = split(entry, '~', 5);
         if (parts.size() != 5) {
             return core::Result<std::vector<build::BuildSocket>>::failure(
                 "save_text.invalid_socket", "build socket record must contain 5 fields");
@@ -584,8 +595,8 @@ parse_build_ports(std::string_view value) {
     if (value.empty()) {
         return core::Result<std::vector<build::BuildNetworkPort>>::success(std::move(ports));
     }
-    for (const auto entry : split(value, ',')) {
-        const auto parts = split(entry, '~');
+    for (const auto entry : split(value, ',', max_save_records)) {
+        const auto parts = split(entry, '~', 3);
         if (parts.size() != 3) {
             return core::Result<std::vector<build::BuildNetworkPort>>::failure(
                 "save_text.invalid_build_port", "build network port record must contain 3 fields");
@@ -622,8 +633,8 @@ parse_item_stacks(std::string_view value) {
     if (value.empty()) {
         return core::Result<std::vector<items::ItemStack>>::success(std::move(stacks));
     }
-    for (const auto entry : split(value, ',')) {
-        const auto parts = split(entry, '~');
+    for (const auto entry : split(value, ',', max_save_records)) {
+        const auto parts = split(entry, '~', 4);
         if (parts.size() != 4) {
             return core::Result<std::vector<items::ItemStack>>::failure(
                 "save_text.invalid_item_stack", "item stack record must contain 4 fields");
@@ -659,8 +670,8 @@ parse_process_slots(std::string_view value) {
     if (value.empty()) {
         return core::Result<std::vector<processes::ProcessSlot>>::success(std::move(slots));
     }
-    for (const auto entry : split(value, ',')) {
-        const auto parts = split(entry, '~');
+    for (const auto entry : split(value, ',', max_save_records)) {
+        const auto parts = split(entry, '~', 2);
         if (parts.size() != 2) {
             return core::Result<std::vector<processes::ProcessSlot>>::failure(
                 "save_text.invalid_process_slot", "process slot record must contain 2 fields");
@@ -698,8 +709,8 @@ parse_assembly_parts(std::string_view value) {
         return core::Result<std::vector<assemblies::AssemblyPart>>::success(
             std::move(parts_result));
     }
-    for (const auto entry : split(value, ',')) {
-        const auto parts = split(entry, '~');
+    for (const auto entry : split(value, ',', max_save_records)) {
+        const auto parts = split(entry, '~', 6);
         if (parts.size() != 3 && parts.size() != 6) {
             return core::Result<std::vector<assemblies::AssemblyPart>>::failure(
                 "save_text.invalid_assembly_part",
@@ -751,12 +762,12 @@ parse_assembly_ports(std::string_view value) {
     if (value.empty()) {
         return core::Result<std::vector<assemblies::AssemblyPort>>::success(std::move(ports));
     }
-    for (const auto entry : split(value, ',')) {
-        const auto parts = split(entry, '~');
+    for (const auto entry : split(value, ',', max_save_records)) {
+        const auto parts = split(entry, '~', 7);
         if (parts.size() != 2 && parts.size() != 4 && parts.size() != 7) {
             return core::Result<std::vector<assemblies::AssemblyPort>>::failure(
                 "save_text.invalid_assembly_port",
-                "assembly port record must contain 2 or 4 fields");
+                "assembly port record must contain 2, 4, or 7 fields");
         }
         auto name = percent_unescape(parts[0]);
         auto kind = parse_network_kind(parts[1]);
@@ -807,7 +818,7 @@ parse_assembly_ports(std::string_view value) {
     std::vector<core::ProcessId> result;
     if (value.empty())
         return core::Result<std::vector<core::ProcessId>>::success(std::move(result));
-    for (const auto entry : split(value, ',')) {
+    for (const auto entry : split(value, ',', max_save_records)) {
         auto parsed = parse_u64(entry, "assembly_process_slot");
         if (!parsed || parsed.value() == 0) {
             return core::Result<std::vector<core::ProcessId>>::failure(
@@ -843,6 +854,10 @@ std::string SaveTextCodec::encode_metadata(const SaveMetadata& metadata) {
 }
 
 core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text) {
+    if (text.size() > max_metadata_text_bytes) {
+        return core::Result<SaveMetadata>::failure("save_text.file_too_large",
+                                                   "save metadata exceeds its safety limit");
+    }
     SaveMetadata metadata;
     bool saw_magic = false;
     bool saw_end = false;
@@ -850,6 +865,8 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
     bool saw_game_version = false;
     bool saw_world_seed = false;
     bool saw_world_time = false;
+    std::size_t consumed_bytes = 0;
+    std::size_t record_count = 0;
 
     std::size_t line_start = 0;
     while (line_start <= text.size()) {
@@ -859,6 +876,10 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
                         : text.substr(line_start, line_end - line_start);
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
+        }
+        if (line.size() > max_save_line_bytes || ++record_count > max_save_records) {
+            return core::Result<SaveMetadata>::failure(
+                "save_text.limit_exceeded", "save metadata exceeds its line or record limit");
         }
 
         if (!saw_magic) {
@@ -870,6 +891,7 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
+            consumed_bytes = line_end == std::string_view::npos ? text.size() : line_end + 1U;
             break;
         } else if (!line.empty()) {
             const auto separator = line.find('=');
@@ -882,6 +904,11 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
             const auto value = line.substr(separator + 1);
 
             if (key == "schema_version") {
+                if (saw_schema) {
+                    return core::Result<SaveMetadata>::failure(
+                        "save_text.duplicate_field",
+                        "save metadata repeats singleton field: schema_version");
+                }
                 auto parsed = parse_u32(value, key);
                 if (!parsed) {
                     return core::Result<SaveMetadata>::failure(parsed.error().code,
@@ -890,6 +917,11 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
                 metadata.schema_version = parsed.value();
                 saw_schema = true;
             } else if (key == "game_version") {
+                if (saw_game_version) {
+                    return core::Result<SaveMetadata>::failure(
+                        "save_text.duplicate_field",
+                        "save metadata repeats singleton field: game_version");
+                }
                 auto parsed = percent_unescape(value);
                 if (!parsed) {
                     return core::Result<SaveMetadata>::failure(parsed.error().code,
@@ -898,6 +930,11 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
                 metadata.game_version = std::move(parsed).value();
                 saw_game_version = true;
             } else if (key == "world_seed") {
+                if (saw_world_seed) {
+                    return core::Result<SaveMetadata>::failure(
+                        "save_text.duplicate_field",
+                        "save metadata repeats singleton field: world_seed");
+                }
                 auto parsed = parse_u64(value, key);
                 if (!parsed) {
                     return core::Result<SaveMetadata>::failure(parsed.error().code,
@@ -906,6 +943,11 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
                 metadata.world_seed = parsed.value();
                 saw_world_seed = true;
             } else if (key == "world_time") {
+                if (saw_world_time) {
+                    return core::Result<SaveMetadata>::failure(
+                        "save_text.duplicate_field",
+                        "save metadata repeats singleton field: world_time");
+                }
                 auto parsed = parse_u64(value, key);
                 if (!parsed) {
                     return core::Result<SaveMetadata>::failure(parsed.error().code,
@@ -943,6 +985,10 @@ core::Result<SaveMetadata> SaveTextCodec::decode_metadata(std::string_view text)
         (metadata.schema_version >= 2 && !saw_world_time)) {
         return core::Result<SaveMetadata>::failure("save_text.incomplete_metadata",
                                                    "save metadata is missing required fields");
+    }
+    if (consumed_bytes != text.size()) {
+        return core::Result<SaveMetadata>::failure(
+            "save_text.trailing_data", "save metadata contains data after its end marker");
     }
 
     auto status = metadata.validate();
@@ -1067,12 +1113,10 @@ std::string SaveTextCodec::encode_snapshot(const SaveSnapshot& snapshot) {
 }
 
 core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text) {
-    constexpr std::size_t max_save_text_bytes = 512U * 1024U * 1024U;
-    constexpr std::size_t max_save_records = 1'000'000U;
-    constexpr std::size_t max_save_line_bytes = 16U * 1024U * 1024U;
-    if (text.size() > max_save_text_bytes)
+    if (text.size() > max_save_text_bytes) {
         return core::Result<SaveSnapshot>::failure("save_text.file_too_large",
                                                    "text save exceeds its safety limit");
+    }
     SaveSnapshot snapshot;
     bool saw_magic = false;
     bool saw_end = false;
@@ -1082,6 +1126,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
     bool saw_world_time = false;
     std::size_t consumed_bytes = 0;
     std::size_t record_count = 0;
+    std::size_t collection_separator_count = 0;
 
     std::size_t line_start = 0;
     while (line_start <= text.size()) {
@@ -1092,9 +1137,21 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
-        if (line.size() > max_save_line_bytes || ++record_count > max_save_records)
+        const auto line_collection_separators =
+            static_cast<std::size_t>(std::count(line.begin(), line.end(), ','));
+        if (line.size() > max_save_line_bytes || ++record_count > max_save_records) {
             return core::Result<SaveSnapshot>::failure(
-                "save_text.limit_exceeded", "text save exceeds its line or record limit");
+                "save_text.limit_exceeded",
+                "text save exceeds its line, record, or collection limit");
+        }
+        if (collection_separator_count > max_save_records - record_count ||
+            line_collection_separators >
+                max_save_records - record_count - collection_separator_count) {
+            return core::Result<SaveSnapshot>::failure(
+                "save_text.limit_exceeded",
+                "text save exceeds its line, record, or collection limit");
+        }
+        collection_separator_count += line_collection_separators;
 
         if (!saw_magic) {
             if (line != snapshot_magic_v1 && line != snapshot_magic_v2) {
@@ -1118,6 +1175,11 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
             const auto value = line.substr(separator + 1);
 
             if (key == "schema_version") {
+                if (saw_schema) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.duplicate_field",
+                        "save snapshot repeats singleton field: schema_version");
+                }
                 auto parsed = parse_u32(value, key);
                 if (!parsed) {
                     return core::Result<SaveSnapshot>::failure(parsed.error().code,
@@ -1126,6 +1188,11 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.metadata.schema_version = parsed.value();
                 saw_schema = true;
             } else if (key == "game_version") {
+                if (saw_game_version) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.duplicate_field",
+                        "save snapshot repeats singleton field: game_version");
+                }
                 auto parsed = percent_unescape(value);
                 if (!parsed) {
                     return core::Result<SaveSnapshot>::failure(parsed.error().code,
@@ -1134,6 +1201,11 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.metadata.game_version = std::move(parsed).value();
                 saw_game_version = true;
             } else if (key == "world_seed") {
+                if (saw_world_seed) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.duplicate_field",
+                        "save snapshot repeats singleton field: world_seed");
+                }
                 auto parsed = parse_u64(value, key);
                 if (!parsed) {
                     return core::Result<SaveSnapshot>::failure(parsed.error().code,
@@ -1142,6 +1214,11 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.metadata.world_seed = parsed.value();
                 saw_world_seed = true;
             } else if (key == "world_time") {
+                if (saw_world_time) {
+                    return core::Result<SaveSnapshot>::failure(
+                        "save_text.duplicate_field",
+                        "save snapshot repeats singleton field: world_time");
+                }
                 auto parsed = parse_u64(value, key);
                 if (!parsed) {
                     return core::Result<SaveSnapshot>::failure(parsed.error().code,
@@ -1164,7 +1241,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 }
                 snapshot.metadata.migration_history.push_back(std::move(parsed).value());
             } else if (key == "voxel_palette") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 2);
                 if (parts.size() != 2) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_voxel_palette",
@@ -1185,7 +1262,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 }
                 snapshot.voxel_palette.entries.push_back({type.value(), prototype_id.value()});
             } else if (key == "chunk") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 4);
                 if (parts.size() != 4) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_chunk", "chunk record must contain 4 fields");
@@ -1201,7 +1278,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.chunk_edits.push_back(
                     {{x.value(), y.value(), z.value()}, std::move(delta).value()});
             } else if (key == "build") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 8);
                 if (parts.size() != 8) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_build", "build record must contain 8 fields");
@@ -1230,7 +1307,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 record.room_contribution_tags = std::move(room_tags).value();
                 snapshot.build_pieces.push_back(std::move(record));
             } else if (key == "entity") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 6);
                 if (parts.size() != 5 && parts.size() != 6) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_entity", "entity record must contain 5 or 6 fields");
@@ -1259,7 +1336,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                                              prototype.value(), kind.value(), sleeping.value(),
                                              std::move(encoded_state).value(), transform});
             } else if (key == "inventory") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 2);
                 if (parts.size() != 2) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_inventory", "inventory record must contain 2 fields");
@@ -1273,7 +1350,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 snapshot.inventories.push_back(
                     {core::SaveId::from_value(owner.value()), std::move(stacks).value()});
             } else if (key == "cargo") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 8);
                 if (parts.size() != 7 && parts.size() != 8) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_cargo", "cargo record must contain 7 or 8 fields");
@@ -1312,7 +1389,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 record.hazard_tags = std::move(hazards).value();
                 snapshot.cargo_records.push_back(std::move(record));
             } else if (key == "workpiece") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 11);
                 if (parts.size() != 6 && parts.size() != 11) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_workpiece",
@@ -1369,7 +1446,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                                                revision,
                                                committed});
             } else if (key == "assembly") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 16);
                 if (parts.size() != 6 && parts.size() != 13 && parts.size() != 16) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_assembly",
@@ -1427,7 +1504,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 }
                 snapshot.assemblies.push_back(std::move(record));
             } else if (key == "process") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 14);
                 if (parts.size() != 11 && parts.size() != 14) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_process",
@@ -1475,7 +1552,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                 process.interruption_policy = *interruption_policy;
                 snapshot.processes.push_back(std::move(process));
             } else if (key == "mod_state") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 3);
                 if (parts.size() != 3) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_mod_state", "mod state record must contain 3 fields");
@@ -1491,7 +1568,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                                                std::move(state_key).value(),
                                                std::move(encoded_state).value()});
             } else if (key == "fire") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 7);
                 if (parts.size() != 7) {
                     return core::Result<SaveSnapshot>::failure("save_text.invalid_fire",
                                                                "fire record must contain 7 fields");
@@ -1512,7 +1589,7 @@ core::Result<SaveSnapshot> SaveTextCodec::decode_snapshot(std::string_view text)
                                           *state, fuel.value(), last_eval.value(),
                                           embers_until.value(), exposed.value()});
             } else if (key == "missing_prototype") {
-                const auto parts = split(value, '|');
+                const auto parts = split(value, '|', 7);
                 if (parts.size() != 7) {
                     return core::Result<SaveSnapshot>::failure(
                         "save_text.invalid_missing_prototype",

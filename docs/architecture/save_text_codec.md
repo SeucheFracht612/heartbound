@@ -39,8 +39,11 @@ process-slot, failure/custom-state, and root-coordinate data. Current process re
 output-claimed, condition-function, and interruption-policy state. Their explicitly recognized
 legacy field counts receive documented defaults rather than being parsed as the current shape.
 
-The decoder rejects input above 512 MiB, individual lines above 16 MiB, and snapshots above one
-million records. These are parser safety limits, not recommended save sizes.
+The decoder rejects metadata above 16 MiB, snapshots above 512 MiB, individual lines above 16 MiB,
+and decoded record/collection growth above one million elements. Field splitting is bounded before
+allocation, so delimiter-heavy malformed records cannot amplify into unbounded temporary vectors.
+Singleton metadata fields may appear exactly once, and the end marker must consume the entire
+document. These are parser safety limits, not recommended save sizes.
 
 Migration history is written by the save migration runner after each ordered migration
 step succeeds. Future save work should keep derived data rebuildable and permanent
