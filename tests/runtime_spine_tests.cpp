@@ -35,13 +35,11 @@ class TestGameplayModule final : public game::IGameplayModule {
         return "test.feature";
     }
 
-    [[nodiscard]] core::Status
-    register_components(game::ComponentRegistry& registry) override {
+    [[nodiscard]] core::Status register_components(game::ComponentRegistry& registry) override {
         return registry.register_component<TestFeatureComponent>("test.feature_component");
     }
 
-    [[nodiscard]] core::Status
-    register_services(game::DomainServiceRegistry& registry) override {
+    [[nodiscard]] core::Status register_services(game::DomainServiceRegistry& registry) override {
         return registry.register_service<ITestFeatureService>(
             "test.feature_service", std::make_shared<TestFeatureService>());
     }
@@ -49,7 +47,9 @@ class TestGameplayModule final : public game::IGameplayModule {
     [[nodiscard]] core::Status
     register_commands(game::GameplayRegistrationContext& context) override {
         return context.commands.register_command({
-            "test.feature.set", true, true,
+            "test.feature.set",
+            true,
+            true,
             [](const net::CommandEnvelope&, const net::CommandExecutionContext& command_context,
                world::WorldOperation& operation) {
                 if (command_context.world_state == nullptr) {
@@ -76,7 +76,8 @@ class TestGameplayModule final : public game::IGameplayModule {
     [[nodiscard]] core::Status
     register_systems(game::GameplayRegistrationContext& context) override {
         return context.scheduler.register_system({
-            "test.feature.update", simulation::SimulationPhase::gameplay,
+            "test.feature.update",
+            simulation::SimulationPhase::gameplay,
             {"runtime.physics"},
             [this](simulation::SimulationContext&) {
                 ++update_count;
@@ -90,16 +91,14 @@ class TestGameplayModule final : public game::IGameplayModule {
         return registry.register_schema({"test.feature.state", 1});
     }
 
-    [[nodiscard]] core::Status
-    register_persistence(game::PersistenceRegistry& registry) override {
+    [[nodiscard]] core::Status register_persistence(game::PersistenceRegistry& registry) override {
         return registry.register_persistence(
             {"test.feature.state", 1,
              [this](const world::WorldState& world, save::SaveSnapshot& snapshot) {
                  ++persistence_capture_count;
                  if (world.mod_states().find("test", "feature_visible") == nullptr ||
                      std::ranges::none_of(snapshot.mod_states, [](const auto& record) {
-                         return record.mod_id == "test" &&
-                                record.state_key == "feature_visible" &&
+                         return record.mod_id == "test" && record.state_key == "feature_visible" &&
                                 record.encoded_state == "true";
                      })) {
                      return core::Status::failure(
@@ -110,10 +109,11 @@ class TestGameplayModule final : public game::IGameplayModule {
              },
              [this](const save::SaveSnapshot& snapshot, world::WorldState& world) {
                  ++persistence_restore_count;
-                 const auto saved = std::ranges::find_if(snapshot.mod_states, [](const auto& record) {
-                     return record.mod_id == "test" && record.state_key == "feature_visible" &&
-                            record.encoded_state == "true";
-                 });
+                 const auto saved =
+                     std::ranges::find_if(snapshot.mod_states, [](const auto& record) {
+                         return record.mod_id == "test" && record.state_key == "feature_visible" &&
+                                record.encoded_state == "true";
+                     });
                  if (saved == snapshot.mod_states.end() ||
                      world.mod_states().find("test", "feature_visible") == nullptr) {
                      return core::Status::failure(
@@ -127,8 +127,7 @@ class TestGameplayModule final : public game::IGameplayModule {
              }});
     }
 
-    [[nodiscard]] core::Status
-    register_replication(game::ReplicationRegistry& registry) override {
+    [[nodiscard]] core::Status register_replication(game::ReplicationRegistry& registry) override {
         return registry.register_replication(
             {"test.feature.delta", 1, true, false,
              [this](const world::OperationEvent& event, game::ClientRuntime&) {
@@ -157,8 +156,7 @@ class TestGameplayModule final : public game::IGameplayModule {
                  update.source_net_id = source;
                  update.visual_prototype = *core::PrototypeId::parse("test:feature/marker");
                  update.transform.position = world::WorldPosition{12.0, 2.0, 12.0};
-                 update.local_bounds = {{-0.25F, -0.25F, -0.25F},
-                                        {0.25F, 0.25F, 0.25F}};
+                 update.local_bounds = {{-0.25F, -0.25F, -0.25F}, {0.25F, 0.25F, 0.25F}};
                  update.source_revision = client_revision;
                  auto synchronized = presentation.upsert_object(update);
                  if (!synchronized) {
@@ -207,17 +205,14 @@ class FailingPersistenceModule final : public game::IGameplayModule {
         return "test.failing_persistence";
     }
 
-    [[nodiscard]] core::Status
-    register_persistence(game::PersistenceRegistry& registry) override {
+    [[nodiscard]] core::Status register_persistence(game::PersistenceRegistry& registry) override {
         return registry.register_persistence(
             {"test.failing_persistence.state", 1,
              [](const world::WorldState&, save::SaveSnapshot&) {
                  return core::Status::failure("test.persistence_failed",
                                               "intentional persistence failure");
              },
-             [](const save::SaveSnapshot&, world::WorldState&) {
-                 return core::Status::ok();
-             }});
+             [](const save::SaveSnapshot&, world::WorldState&) { return core::Status::ok(); }});
     }
 };
 
@@ -244,8 +239,7 @@ class FailingReplicationModule final : public game::IGameplayModule {
              }});
     }
 
-    [[nodiscard]] core::Status
-    register_replication(game::ReplicationRegistry& registry) override {
+    [[nodiscard]] core::Status register_replication(game::ReplicationRegistry& registry) override {
         return registry.register_replication(
             {"test.failing_replication.delta", 1, true, false,
              [](const world::OperationEvent&, game::ClientRuntime&) {
@@ -317,8 +311,7 @@ void test_local_runtime_advances_authority_through_loopback() {
 
     auto voxel = runtime.session()->server()->world().chunks().get({0, 0, 0}, {1, 2, 3});
     assert(voxel);
-    const auto clay = report.voxel_palette.type_for(
-        *core::PrototypeId::parse("base:voxels/clay"));
+    const auto clay = report.voxel_palette.type_for(*core::PrototypeId::parse("base:voxels/clay"));
     assert(clay.has_value());
     assert(voxel.value().type == *clay);
     assert(runtime.session()->client()->command_results().size() == 1);
@@ -343,8 +336,7 @@ void test_selected_scenario_drives_authoritative_bootstrap() {
     const auto* scenario_id = world.mod_states().find("engine", "scenario.id");
     const auto* start_region = world.mod_states().find("engine", "scenario.start_region");
     const auto* spawn_mode = world.mod_states().find("engine", "scenario.spawn_mode");
-    assert(scenario_id != nullptr &&
-           scenario_id->encoded_state == "base:scenarios/homestead");
+    assert(scenario_id != nullptr && scenario_id->encoded_state == "base:scenarios/homestead");
     assert(start_region != nullptr && start_region->encoded_state == "temperate_valley");
     assert(spawn_mode != nullptr && spawn_mode->encoded_state == "homestead");
     assert(world.cargo().count() == 1);
@@ -356,12 +348,10 @@ void test_selected_scenario_drives_authoritative_bootstrap() {
     assert(player->state.position == (world::WorldPosition{8.5, 1.0, 8.5}));
     const auto* inventory = world.inventories().find(player->save_id);
     assert(inventory != nullptr && inventory->stacks.size() == 2);
-    assert(inventory->stacks[0].prototype_id ==
-           *core::PrototypeId::parse("base:items/raw_clay"));
-    assert(inventory->stacks[1].prototype_id ==
-           *core::PrototypeId::parse("base:items/nails"));
-    assert(std::ranges::all_of(inventory->stacks,
-                               [](const auto& stack) { return stack.count == 1; }));
+    assert(inventory->stacks[0].prototype_id == *core::PrototypeId::parse("base:items/raw_clay"));
+    assert(inventory->stacks[1].prototype_id == *core::PrototypeId::parse("base:items/nails"));
+    assert(
+        std::ranges::all_of(inventory->stacks, [](const auto& stack) { return stack.count == 1; }));
     assert(runtime.shutdown());
 }
 
@@ -547,10 +537,23 @@ void test_session_save_and_reload_restores_authoritative_state() {
     assert(!persisted.value().entities.empty());
     assert(runtime.shutdown());
 
+    game::RuntimeConfiguration headless_config;
+    headless_config.create_client = false;
+    headless_config.headless = true;
+    assert(runtime.start_session_from_save(headless_config, database));
+    session = runtime.session();
+    assert(session != nullptr && session->server() != nullptr && session->client() == nullptr);
+    const auto address = world::block_to_chunk_local(placed_voxel.position);
+    const auto headless_authoritative =
+        session->server()->world().chunks().get(address.chunk, address.local);
+    assert(headless_authoritative && !headless_authoritative.value().is_air());
+    auto headless_snapshot = runtime.capture_save_snapshot();
+    assert(headless_snapshot && !headless_snapshot.value().chunk_edits.empty());
+    assert(runtime.shutdown());
+
     assert(runtime.start_session_from_save({}, database));
     session = runtime.session();
     assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
-    const auto address = world::block_to_chunk_local(placed_voxel.position);
     const auto authoritative =
         session->server()->world().chunks().get(address.chunk, address.local);
     const auto replicated = session->client()->world().chunks().get(address.chunk, address.local);
@@ -597,7 +600,9 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(frame.value().server_ticks.front().commands.command_reports.size() == 1);
     assert(frame.value().server_ticks.front().commands.command_reports.front().success);
     assert(module->update_count == 1);
-    assert(frame.value().server_ticks.front().commands.command_reports.front()
+    assert(frame.value()
+               .server_ticks.front()
+               .commands.command_reports.front()
                .committed_world_mutation);
     assert(frame.value().client.feature_replication.callback_event_count == 1);
     assert(frame.value().client.feature_replication.unhandled_event_count == 0);
@@ -632,8 +637,7 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(frame_diagnostics.find_field("replication_message_count") != nullptr);
     const auto client_diagnostics = game::GameInspector::inspect(frame.value().client);
     assert(client_diagnostics.find_field("feature_replication_callback_count")->value == "1");
-    const auto presentation_diagnostics =
-        game::GameInspector::inspect(frame.value().presentation);
+    const auto presentation_diagnostics = game::GameInspector::inspect(frame.value().presentation);
     assert(presentation_diagnostics.find_field("adapter_count")->value == "2");
     const auto module_diagnostics = game::GameInspector::inspect(module_report);
     assert(module_diagnostics.find_field("module_count")->value == "2");
@@ -658,8 +662,8 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(runtime.start_session(std::move(restored_config), std::move(restored_request)));
     assert(restored_module->persistence_restore_count == 1);
     assert(restored_module->restored_from_snapshot);
-    assert(runtime.session()->server()->world().mod_states().find(
-               "test", "feature_visible") != nullptr);
+    assert(runtime.session()->server()->world().mod_states().find("test", "feature_visible") !=
+           nullptr);
     const auto restored_render_snapshot = runtime.capture_render_snapshot();
     assert(restored_render_snapshot && restored_render_snapshot.value().objects.size() == 2);
     assert(runtime.shutdown());
@@ -729,35 +733,29 @@ void test_feature_failures_are_contextual_and_frame_failures_are_terminal() {
     auto runtime = make_runtime(report);
 
     game::RuntimeConfiguration presentation_config;
-    presentation_config.gameplay_modules.push_back(
-        std::make_shared<FailingPresentationModule>());
-    auto status = runtime.start_session(std::move(presentation_config),
-                                        make_session_request(report));
+    presentation_config.gameplay_modules.push_back(std::make_shared<FailingPresentationModule>());
+    auto status =
+        runtime.start_session(std::move(presentation_config), make_session_request(report));
     assert(!status && status.error().code == "test.presentation_failed");
-    assert(status.error().message.find("test.failing_presentation.adapter") !=
-           std::string::npos);
+    assert(status.error().message.find("test.failing_presentation.adapter") != std::string::npos);
     assert(runtime.session() == nullptr);
 
     game::RuntimeConfiguration persistence_config;
-    persistence_config.gameplay_modules.push_back(
-        std::make_shared<FailingPersistenceModule>());
+    persistence_config.gameplay_modules.push_back(std::make_shared<FailingPersistenceModule>());
     assert(runtime.start_session(std::move(persistence_config), make_session_request(report)));
     auto snapshot = runtime.capture_save_snapshot();
     assert(!snapshot && snapshot.error().code == "test.persistence_failed");
-    assert(snapshot.error().message.find("test.failing_persistence.state") !=
-           std::string::npos);
+    assert(snapshot.error().message.find("test.failing_persistence.state") != std::string::npos);
     assert(runtime.session()->is_running());
     assert(runtime.shutdown());
 
     game::RuntimeConfiguration replication_config;
-    replication_config.gameplay_modules.push_back(
-        std::make_shared<FailingReplicationModule>());
+    replication_config.gameplay_modules.push_back(std::make_shared<FailingReplicationModule>());
     assert(runtime.start_session(std::move(replication_config), make_session_request(report)));
     assert(runtime.submit_command("test.failing_replication.trigger", {}, 10));
     auto frame = runtime.run_frame({16'667, 17});
     assert(!frame && frame.error().code == "test.replication_failed");
-    assert(frame.error().message.find("test.failing_replication.delta") !=
-           std::string::npos);
+    assert(frame.error().message.find("test.failing_replication.delta") != std::string::npos);
     assert(!runtime.session()->is_running());
     assert(runtime.session()->fault().has_value());
     assert(runtime.session()->fault()->code == "test.replication_failed");

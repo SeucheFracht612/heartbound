@@ -3,8 +3,8 @@
 #include "engine/cargo/cargo_prototype.hpp"
 #include "engine/entities/entity_prototype.hpp"
 #include "engine/items/item_prototype.hpp"
-#include "engine/world/chunks/chunk_replication.hpp"
 #include "engine/world/chunks/chunk_edit_delta_codec.hpp"
+#include "engine/world/chunks/chunk_replication.hpp"
 #include "engine/world/voxel_change.hpp"
 #include "engine/world/world_commands.hpp"
 #include "engine/world/world_snapshot.hpp"
@@ -46,22 +46,21 @@ core::Status ServerRuntime::initialize() {
         auto state_snapshot = *desc_.initial_snapshot;
         const auto saved_chunk_edits = std::move(state_snapshot.chunk_edits);
         state_snapshot.chunk_edits.clear();
-        auto imported = world::WorldSnapshotBridge::import_validated_snapshot(
-            state_snapshot, *desc_.prototypes);
+        auto imported = world::WorldSnapshotBridge::import_validated_snapshot(state_snapshot,
+                                                                              *desc_.prototypes);
         if (!imported) {
             return core::Status::failure(imported.error().code, imported.error().message);
         }
         world_ = std::move(imported).value();
         for (const auto& saved_chunk : saved_chunk_edits) {
-            auto edits = world::ChunkEditDeltaTextCodec::decode(
-                saved_chunk.coord, saved_chunk.encoded_edit_delta);
+            auto edits = world::ChunkEditDeltaTextCodec::decode(saved_chunk.coord,
+                                                                saved_chunk.encoded_edit_delta);
             if (!edits) {
                 return core::Status::failure(edits.error().code, edits.error().message);
             }
-            pending_saved_voxel_edits_.insert(
-                pending_saved_voxel_edits_.end(),
-                std::make_move_iterator(edits.value().begin()),
-                std::make_move_iterator(edits.value().end()));
+            pending_saved_voxel_edits_.insert(pending_saved_voxel_edits_.end(),
+                                              std::make_move_iterator(edits.value().begin()),
+                                              std::make_move_iterator(edits.value().end()));
         }
     }
     auto physics = physics::create_physics_world(desc_.physics);
@@ -70,7 +69,12 @@ core::Status ServerRuntime::initialize() {
     }
     physics_ = std::move(physics).value();
 
-    if (!desc_.initial_snapshot.has_value()) {
+    if (desc_.initial_snapshot.has_value()) {
+        auto spawn_status = ensure_spawn_area();
+        if (!spawn_status) {
+            return spawn_status;
+        }
+    } else {
         auto scenario_status = initialize_new_world_scenario();
         if (!scenario_status) {
             return scenario_status;
@@ -82,7 +86,9 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = commands_.register_command(net::CommandDescriptor{
-        "player.input", false, true,
+        "player.input",
+        false,
+        true,
         [this](const net::CommandEnvelope& command, const net::CommandExecutionContext&,
                world::WorldOperation&) {
             const auto found = player_connections_.find(command.sender.value());
@@ -101,7 +107,9 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = scheduler_.register_system({
-        "runtime.command_gateway", simulation::SimulationPhase::commands, {},
+        "runtime.command_gateway",
+        simulation::SimulationPhase::commands,
+        {},
         [this](simulation::SimulationContext& context) {
             net::CommandExecutionContext command_context;
             command_context.executor_role = net::CommandExecutorRole::authoritative_server;
@@ -125,8 +133,7 @@ core::Status ServerRuntime::initialize() {
                     }
                     auto change = world::VoxelChangeTextCodec::decode(event.message);
                     if (!change) {
-                        return core::Status::failure(change.error().code,
-                                                     change.error().message);
+                        return core::Status::failure(change.error().code, change.error().message);
                     }
                     if (context.events != nullptr) {
                         auto event_status = context.events->voxel_changed.append(
@@ -145,7 +152,8 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = scheduler_.register_system({
-        "runtime.character_movement", simulation::SimulationPhase::movement,
+        "runtime.character_movement",
+        simulation::SimulationPhase::movement,
         {"runtime.command_gateway"},
         [this](simulation::SimulationContext& context) { return simulate_players(context); },
     });
@@ -153,7 +161,8 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = scheduler_.register_system({
-        "runtime.physics", simulation::SimulationPhase::physics,
+        "runtime.physics",
+        simulation::SimulationPhase::physics,
         {"runtime.character_movement"},
         [this](simulation::SimulationContext& context) {
             auto result = physics_->step(
@@ -169,7 +178,8 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = scheduler_.register_system({
-        "runtime.world_clock", simulation::SimulationPhase::environment,
+        "runtime.world_clock",
+        simulation::SimulationPhase::environment,
         {"runtime.physics"},
         [this](simulation::SimulationContext&) { return world_.advance_world_time(1); },
     });
@@ -177,7 +187,8 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = scheduler_.register_system({
-        "runtime.entity_finalize", simulation::SimulationPhase::finalize,
+        "runtime.entity_finalize",
+        simulation::SimulationPhase::finalize,
         {"runtime.world_clock"},
         [this](simulation::SimulationContext& context) {
             auto result = entities_.finalize_destruction(context.tick, context.events);
@@ -189,7 +200,8 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = scheduler_.register_system({
-        "runtime.replication", simulation::SimulationPhase::replication,
+        "runtime.replication",
+        simulation::SimulationPhase::replication,
         {"runtime.entity_finalize"},
         [this](simulation::SimulationContext&) {
             const auto deltas =
@@ -217,10 +229,16 @@ core::Status ServerRuntime::initialize() {
             return status;
         }
     }
-    GameplayRegistrationContext registration_context{
-        *desc_.prototypes, entities_, commands_, scheduler_, component_registry_,
-        serialization_registry_, persistence_registry_, replication_registry_,
-        presentation_registry_, domain_services_};
+    GameplayRegistrationContext registration_context{*desc_.prototypes,
+                                                     entities_,
+                                                     commands_,
+                                                     scheduler_,
+                                                     component_registry_,
+                                                     serialization_registry_,
+                                                     persistence_registry_,
+                                                     replication_registry_,
+                                                     presentation_registry_,
+                                                     domain_services_};
     auto registered = gameplay_modules_.register_all(registration_context);
     if (!registered) {
         return core::Status::failure(registered.error().code, registered.error().message);
@@ -261,8 +279,8 @@ ServerRuntime::run_tick(std::uint64_t tick, double fixed_delta_seconds, std::int
     current_movement_event_count_ = 0;
     current_movement_snapshot_count_ = 0;
     current_player_tombstone_count_ = 0;
-    auto simulation = scheduler_.run_tick(
-        {tick, fixed_delta_seconds, &world_, physics_.get(), &events_});
+    auto simulation =
+        scheduler_.run_tick({tick, fixed_delta_seconds, &world_, physics_.get(), &events_});
     if (!simulation) {
         return core::Result<ServerRuntimeTickStats>::failure(simulation.error().code,
                                                              simulation.error().message);
@@ -416,13 +434,15 @@ const DomainServiceRegistry& ServerRuntime::domain_services() const noexcept {
 
 movement::PlayerControllerRecord* ServerRuntime::player_for_client(core::NetId client_id) noexcept {
     const auto found = player_connections_.find(client_id.value());
-    return found == player_connections_.end() ? nullptr : players_.find(found->second.runtime_handle);
+    return found == player_connections_.end() ? nullptr
+                                              : players_.find(found->second.runtime_handle);
 }
 
 const movement::PlayerControllerRecord*
 ServerRuntime::player_for_client(core::NetId client_id) const noexcept {
     const auto found = player_connections_.find(client_id.value());
-    return found == player_connections_.end() ? nullptr : players_.find(found->second.runtime_handle);
+    return found == player_connections_.end() ? nullptr
+                                              : players_.find(found->second.runtime_handle);
 }
 
 core::Status ServerRuntime::ensure_spawn_area() {
@@ -448,8 +468,8 @@ core::Status ServerRuntime::ensure_spawn_area() {
         }
     }
     if (!pending_saved_voxel_edits_.empty()) {
-        auto status = world_.chunks().apply_saved_edits(
-            pending_saved_voxel_edits_, world_.dirty_regions());
+        auto status =
+            world_.chunks().apply_saved_edits(pending_saved_voxel_edits_, world_.dirty_regions());
         if (!status) {
             return status;
         }
@@ -472,8 +492,8 @@ world::WorldPosition ServerRuntime::scenario_spawn_position() const noexcept {
 }
 
 core::Status ServerRuntime::initialize_new_world_scenario() {
-    auto status = world_.mod_states().insert(
-        {"engine", "scenario.id", desc_.scenario.prototype_id.value()});
+    auto status =
+        world_.mod_states().insert({"engine", "scenario.id", desc_.scenario.prototype_id.value()});
     if (!status) {
         return status;
     }
@@ -494,9 +514,9 @@ core::Status ServerRuntime::initialize_new_world_scenario() {
     for (const auto& cargo_id : desc_.scenario.starting_cargo) {
         const auto* prototype = desc_.prototypes->find(cargo_id);
         if (prototype == nullptr) {
-            return core::Status::failure(
-                "server_runtime.starting_cargo_missing",
-                "scenario starting cargo prototype is not loaded: " + cargo_id.value());
+            return core::Status::failure("server_runtime.starting_cargo_missing",
+                                         "scenario starting cargo prototype is not loaded: " +
+                                             cargo_id.value());
         }
         auto definition = cargo::cargo_definition_from_prototype(*prototype);
         if (!definition) {
@@ -530,9 +550,9 @@ core::Status ServerRuntime::grant_starting_inventory(core::SaveId owner_id) {
     for (const auto& item_id : desc_.scenario.starting_items) {
         const auto* prototype = desc_.prototypes->find(item_id);
         if (prototype == nullptr) {
-            return core::Status::failure(
-                "server_runtime.starting_item_missing",
-                "scenario starting item prototype is not loaded: " + item_id.value());
+            return core::Status::failure("server_runtime.starting_item_missing",
+                                         "scenario starting item prototype is not loaded: " +
+                                             item_id.value());
         }
         auto definition = items::item_definition_from_prototype(*prototype);
         if (!definition) {
@@ -589,7 +609,7 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
         auto allocated_net_id = world_.entity_net_ids().reserve();
         auto allocated_save_id = world_.save_ids().reserve();
         if (!allocated_runtime || !allocated_net_id || !allocated_save_id) {
-            const auto& error = !allocated_runtime ? allocated_runtime.error()
+            const auto& error = !allocated_runtime  ? allocated_runtime.error()
                                 : !allocated_net_id ? allocated_net_id.error()
                                                     : allocated_save_id.error();
             return core::Status::failure(error.code, error.message);
@@ -601,8 +621,7 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
         auto legacy_record =
             definition.value().create_record(runtime_handle, net_id, save_id, transform);
         if (!legacy_record) {
-            return core::Status::failure(legacy_record.error().code,
-                                         legacy_record.error().message);
+            return core::Status::failure(legacy_record.error().code, legacy_record.error().message);
         }
         status = world_.entities().insert(std::move(legacy_record).value());
         if (!status) {
@@ -625,10 +644,8 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
             (void)world_.entities().erase(runtime_handle);
         }
     };
-    auto transform_component =
-        entities_.emplace<entities::TransformComponent>(entity_id.value(),
-                                                        entities::TransformComponent{transform,
-                                                                                     transform});
+    auto transform_component = entities_.emplace<entities::TransformComponent>(
+        entity_id.value(), entities::TransformComponent{transform, transform});
     if (!transform_component) {
         cleanup_entity();
         return core::Status::failure(transform_component.error().code,
@@ -671,9 +688,8 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
         return status;
     }
     player_connections_.emplace(
-        client_id.value(),
-        PlayerConnection{runtime_handle, entity_id.value(),
-                         movement::ServerMovementInputQueue{}, std::nullopt});
+        client_id.value(), PlayerConnection{runtime_handle, entity_id.value(),
+                                            movement::ServerMovementInputQueue{}, std::nullopt});
     return core::Status::ok();
 }
 
@@ -711,15 +727,14 @@ core::Status ServerRuntime::simulate_players(simulation::SimulationContext& cont
             return core::Status::failure(ticked.error().code, ticked.error().message);
         }
         connection.last_input = input;
-        current_movement_event_count_ +=
-            static_cast<std::uint32_t>(ticked.value().events.size());
+        current_movement_event_count_ += static_cast<std::uint32_t>(ticked.value().events.size());
         player->state = std::move(ticked).value().state;
 
         if (auto* legacy = world_.entities().find(connection.runtime_handle); legacy != nullptr) {
             legacy->transform.position = player->state.position;
-            legacy->transform.rotation_degrees =
-                {static_cast<double>(player->state.pitch_centidegrees) * 0.01,
-                 static_cast<double>(player->state.yaw_centidegrees) * 0.01, 0.0};
+            legacy->transform.rotation_degrees = {
+                static_cast<double>(player->state.pitch_centidegrees) * 0.01,
+                static_cast<double>(player->state.yaw_centidegrees) * 0.01, 0.0};
         }
         auto* transform =
             entities_.find_component<entities::TransformComponent>(connection.entity_id);
@@ -729,9 +744,9 @@ core::Status ServerRuntime::simulate_players(simulation::SimulationContext& cont
         }
         transform->previous = transform->current;
         transform->current.position = player->state.position;
-        transform->current.rotation_degrees =
-            {static_cast<double>(player->state.pitch_centidegrees) * 0.01,
-             static_cast<double>(player->state.yaw_centidegrees) * 0.01, 0.0};
+        transform->current.rotation_degrees = {
+            static_cast<double>(player->state.pitch_centidegrees) * 0.01,
+            static_cast<double>(player->state.yaw_centidegrees) * 0.01, 0.0};
         if (player->state.position != previous_position) {
             ++current_moved_player_count_;
             if (context.events != nullptr) {
@@ -761,9 +776,9 @@ core::Status ServerRuntime::replicate_players() {
                 return core::Status::failure(sequence.error().code, sequence.error().message);
             }
             auto status = host_.send_replication_message(
-                core::NetId::from_value(recipient), movement::make_player_removal_message(
-                                                        removed_player, sequence.value(),
-                                                        current_time_ms_));
+                core::NetId::from_value(recipient),
+                movement::make_player_removal_message(removed_player, sequence.value(),
+                                                      current_time_ms_));
             if (!status) {
                 return status;
             }
@@ -784,10 +799,10 @@ core::Status ServerRuntime::replicate_players() {
             if (!sequence) {
                 return core::Status::failure(sequence.error().code, sequence.error().message);
             }
-            auto status = host_.send_replication_message(
-                core::NetId::from_value(recipient),
-                movement::make_movement_snapshot_message(snapshot, current_time_ms_,
-                                                         sequence.value()));
+            auto status =
+                host_.send_replication_message(core::NetId::from_value(recipient),
+                                               movement::make_movement_snapshot_message(
+                                                   snapshot, current_time_ms_, sequence.value()));
             if (!status) {
                 return status;
             }
@@ -810,8 +825,8 @@ core::Status ServerRuntime::send_initial_chunks(core::NetId client_id) {
                 return core::Status::failure(sequence.error().code, sequence.error().message);
             }
             auto status = host_.send_replication_message(
-                client_id, world::make_chunk_snapshot_slice_message(
-                               slice, sequence.value(), current_time_ms_));
+                client_id, world::make_chunk_snapshot_slice_message(slice, sequence.value(),
+                                                                    current_time_ms_));
             if (!status) {
                 return status;
             }
@@ -844,8 +859,8 @@ core::Status ServerRuntime::send_initial_chunks(core::NetId client_id) {
             return core::Status::failure(sequence.error().code, sequence.error().message);
         }
         auto status = host_.send_replication_message(
-            client_id, movement::make_movement_snapshot_message(
-                           snapshot, current_time_ms_, sequence.value()));
+            client_id,
+            movement::make_movement_snapshot_message(snapshot, current_time_ms_, sequence.value()));
         if (!status) {
             return status;
         }
