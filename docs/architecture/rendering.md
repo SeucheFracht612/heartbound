@@ -13,6 +13,9 @@ Implemented foundation:
   - exposes `RenderDeviceCapabilities`
   - exposes current output extent, completed frame count, latest submission serial, and completed
     submission serial
+  - devices returned by the public `rhi::create_render_device` factory bind every mutating call to
+    the creating thread and return `renderer.render_device_wrong_thread` before touching backend
+    state; read-only capability/stat getters remain callable without a fallible thread check
   - validates resize and frame output extents
   - returns per-frame stats for smoke tests and debug tooling
   - executes `RenderFrameSubmission` records that combine a validated `RenderFramePlan`, camera
@@ -29,6 +32,10 @@ Implemented foundation:
     pipeline layouts without exposing backend pipeline handles
   - can write descriptor bindings for material scalar/color uniform buffers, storage buffers, and
     sampled texture arrays with shared samplers without exposing backend descriptor set handles
+  - rejects empty/unknown descriptor shader-stage masks; `ShaderManager` also checks those masks
+    against stages present in the resident program interface
+  - requires every required descriptor before a draw, rejects duplicate targets within one
+    descriptor-write batch, and leaves descriptor state unchanged when batch validation fails
   - retains the old material-based `bind_mesh_draws()` API only as a deprecated compatibility path;
     it is isolated to the legacy renderer smoke sample and RHI regression tests, while every visible
     application/front-end path uses explicit pipeline handles through `execute_frame()`
@@ -75,8 +82,11 @@ Implemented foundation:
   - can be submitted to an `IRenderDevice` for smoke execution, with backend frame stats preserving
     the validated pass, resource-use, dependency, transition, planned synchronization-barrier, and
     backend-submitted synchronization-barrier counts
-  - gives Vulkan, shader-pack extensions, and debug tooling a tested pass contract before the
-    production renderer exists
+  - is a broader renderer-neutral contract than every backend is required to execute: headless runs
+    arbitrary validated plans, while Vulkan explicitly rejects shapes outside its supported clear
+    and unified-frame schemas before submission
+  - gives shader-pack extensions and debug tooling one validated planning vocabulary without
+    implying that declaration alone implements a Vulkan pass
 
 - Renderer-neutral chunk mesh data
   - `ChunkMesher` extracts CPU-side terrain surface meshes outside the renderer backend
@@ -158,7 +168,9 @@ Implemented foundation:
     color, layer metadata), rotates through buffered storage-table segments, and emits one indexed
     draw per compatible mesh/material/layer batch using `first_instance`
   - opaque, cutout, and transparent object pipelines are prewarmed; transparent instances and
-    batches use stable back-to-front ordering, depth testing, blending, and disabled depth writes
+    batches use stable back-to-front ordering, depth testing, blending, and disabled depth writes;
+    terrain sections and static-object batches are sorted independently before their two lists are
+    concatenated, so there is not yet one global cross-category transparency sort
   - instance capacity is a fixed configuration budget: overflow is delayed/dropped visibly in
     statistics instead of growing frame memory without bound
 
@@ -189,9 +201,9 @@ Implemented foundation:
   - terrain uses a 128-byte vertex/fragment push-constant block: a 64-byte view-projection matrix,
     a 16-byte camera-relative chunk origin, and three 16-byte environment lanes carrying the sun,
     ambient light, and distance-fog parameters
-  - terrain lighting is evaluated in linear space, the unorm scene target receives explicit sRGB
-    encoding, alpha-tested surfaces discard below the material cutoff, and transparent/fluid
-    surfaces blend without writing depth
+  - terrain/static lighting is evaluated in linear space and those shaders explicitly encode into
+    the RGBA8-unorm scene target; alpha-tested surfaces discard below the material cutoff, and
+    transparent/fluid surfaces blend without writing depth
   - the unified terrain frame records sky, opaque, alpha-tested, rich/static, transparent/fluid,
     debug, UI, and present phases; opaque/cutout/transparent terrain use separately prewarmed state
 
@@ -275,19 +287,26 @@ Implemented foundation:
     depth test/write/compare state, blend mode, vertex attributes, and target formats
   - can update private material descriptor sets for uniform scalar/color bindings from uploaded
     uniform buffers and sampled texture bindings from uploaded sampled images
-  - executes the terrain pass and presentation in one command buffer and one queue submission:
-    acquire, draw indexed terrain into offscreen color plus depth, blit color into the acquired
-    swapchain image, transition it to present, and present once
+  - polls frame/upload fences before descriptor mutation and rejects layout replacement, descriptor
+    updates, or release of descriptor-referenced resources while the set is still in flight
+  - executes the fixed unified sky, opaque terrain, alpha-tested terrain, rich/static,
+    transparent/fluid, debug, UI, and present schema in one command buffer and one queue submission:
+    acquire, draw into offscreen color/depth, blit color into the acquired swapchain image,
+    transition it to present, and present once
   - pushes the view-projection matrix and camera-relative chunk origin before each terrain draw
-  - can execute dependency- and transition-planned frame plans structurally while the smoke backend
-    maps them onto its existing clear/offscreen/present primitives
-  - translates planned RHI resource states into private Vulkan image layouts, access masks, and
-    pipeline stages before smoke execution
-  - allocates temporary Vulkan frame images for non-target offscreen frame resources and records
-    their planned `VkImageMemoryBarrier`s before the existing clear primitive
-  - records planned `VkImageMemoryBarrier`s for the smoke-owned swapchain target on present frames,
+  - accepts generic `execute_frame_plan` calls only for one external full-extent RGBA8-unorm clear
+    target plus an optional present pass; `execute_frame` accepts only the exact two-resource,
+    eight-pass unified schema and draw-command pass indices 1 through 6
+  - returns `renderer.vulkan_unsupported_frame_plan` before submission when a valid renderer-neutral
+    plan contains operations this backend cannot execute faithfully
+  - translates the supported plans' RHI resource states into private Vulkan image layouts, access
+    masks, and pipeline stages
+  - records planned `VkImageMemoryBarrier`s for the swapchain target on present frames,
     making submitted barrier counts observable separately from the full frame-plan synchronization
     count without exposing Vulkan handles through the RHI
+  - prefers `B8G8R8A8_SRGB` with the nonlinear sRGB color space for the swapchain and otherwise uses
+    the first supported surface format; HDR, wide-gamut, and display color management are not
+    implemented
   - can allocate private `VkDescriptorSetLayout`, `VkPipelineLayout`, `VkDescriptorPool`, and
     descriptor set objects for material pipeline layouts without exposing their handles
   - requests the Khronos validation layer when configured and enables `VK_EXT_debug_utils`
@@ -377,12 +396,13 @@ occupied cell extent, and uses inline contiguous snapshot/render-table access. T
 can select `--reference-mesher` for an otherwise identical baseline; recorded Debug and Release
 results live in `docs/performance/renderer_milestone_8.md`.
 
-The backend currently supports one draw-producing Vulkan pass per unified submission. General
-multi-pass Vulkan execution, phase-specific terrain pipelines, frame-local descriptor allocation
-for textured materials, compressed texture/KTX2 handling, and RenderDoc capture workflow belong to
-later integration slices. Draw-command and visibility vectors retain their capacity between frames;
-the remaining frame-plan metadata is small and will move into the broader frame allocator as more
-passes are introduced.
+The backend currently supports one Vulkan render sequence with six draw-producing logical phases
+per unified submission, plus the narrower generic clear/present smoke schema. Arbitrary resource
+graphs or additional Vulkan render passes, frame-local descriptor allocation for textured
+materials, compressed texture/KTX2 handling, and a RenderDoc capture workflow belong to later
+integration slices. Draw-command and visibility vectors retain their capacity between frames; the
+remaining frame-plan metadata is small and will move into the broader frame allocator as more passes
+are introduced.
 
 Runtime shader programs use generation-safe `ShaderProgramHandle` values and retain stage entry
 points, dependencies, and an explicit shader-interface contract. The shader manager validates all
@@ -398,10 +418,10 @@ old pipelines if any replacement fails. Rebinding a byte-for-byte equivalent RHI
 idempotent so prewarming and shader replacement do not invalidate unrelated pipelines.
 
 The application build has a real GLSL-to-SPIR-V path: when `glslangValidator`/`glslang` is
-installed, CMake
-recompiles terrain stages after source changes and stages the build-tree artifacts for both the
-smoke application and benchmark. Checked-in, externally validated SPIR-V is the deterministic
-fallback when the tool is unavailable. Normal runtime rendering never compiles shaders. The
+installed, CMake recompiles the terrain, static-mesh, debug-line, and UI vertex/fragment stages after
+source changes and stages the build-tree artifacts for the renderer applications. Checked-in,
+externally validated SPIR-V is the deterministic fallback when the tool is unavailable. Normal
+runtime rendering never compiles shaders. The
 general asset `ShaderCompiler` still has development validators plus a production SPIR-V
 passthrough profile and reports `shader_compiler.production_compiler_unavailable` for Slang/HLSL
 until that compiler backend is linked; shader-pack compilation remains a later extension of that

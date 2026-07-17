@@ -28,6 +28,12 @@ The thread that successfully calls `Renderer::initialize()` is the renderer owne
 scene updates, mesh creation/release, UI submission, rendering, resize, shader reload, and shutdown
 belong to that thread.
 
+The public `rhi::create_render_device` factory independently binds every mutating `IRenderDevice`
+call to the thread that creates the device. An off-thread mutation returns
+`renderer.render_device_wrong_thread` without changing extent, resources, frame counters, or
+submission serials. Read-only capability/stat getters and destruction do not expose fallible thread
+checks; callers must still destroy the renderer/device on its owner thread after worker teardown.
+
 Chunk-mesh workers receive immutable request values and return typed results through the scheduler
 mailbox. They do not perform RHI calls. `DebugRenderer` primitive submission is the sole explicitly
 thread-safe presentation submission path; timed/one-frame primitives are merged on the owner thread.
@@ -91,6 +97,12 @@ SPIR-V magic, size, stage, entry point, vertex inputs, descriptors, and push con
 before module/pipeline creation. Development reload creates and validates replacements before
 retiring the prior valid modules/pipelines. Release gameplay performs no shader compilation.
 
+Descriptor declarations include explicit nonempty shader-stage masks that must be present in the
+program interface. Required bindings must be written before any dependent draw. Descriptor batches
+reject duplicate targets atomically, released resources invalidate their writes, and Vulkan refuses
+layout replacement, set update, or release of a descriptor-referenced resource until the last using
+submission has completed.
+
 Terrain materials use one sampled texture array and one contiguous GPU material table. Vertices or
 sections carry stable material indices. Chunks do not own pipelines or descriptor sets. UI uses a
 two-layer atlas and per-draw validated scissors; debug lines use depth-tested/overlay shared
@@ -100,9 +112,13 @@ pipelines.
 
 The explicit order is sky/background, opaque terrain, alpha-tested terrain, rich/static instances,
 transparent terrain/fluids, debug, UI, and present. Opaque/cutout write depth. Transparent/fluid
-geometry tests but does not write depth and uses stable back-to-front section ordering. UI always
-passes depth without writing it. Terrain lighting is linear; the final unorm scene color is encoded
-for sRGB display, and distance fog hides the visible-radius boundary.
+geometry tests but does not write depth. Terrain sections are sorted back-to-front, and transparent
+static instances/batches are independently sorted back-to-front before that second list is appended;
+there is no global cross-category transparency ordering yet. UI always passes depth without writing
+it. Terrain/static lighting is linear and those shaders manually encode into the RGBA8-unorm scene
+target; Vulkan prefers an sRGB nonlinear swapchain surface but can fall back to the first supported
+format. HDR, wide-gamut, and display color management are outside V1. Distance fog hides the
+visible-radius boundary.
 
 ## Resize and minimization
 
@@ -128,6 +144,12 @@ The published target and reproduction commands are in
 ## Failure behavior
 
 - stale/invalid draw packets and scissors are rejected before backend execution;
+- unsupported generic Vulkan frame plans return `renderer.vulkan_unsupported_frame_plan` before
+  advancing frame counters or submission serials; only clear/optional-present and the exact unified
+  frame schema are executable there, while headless remains the arbitrary-plan reference;
+- invalid batched buffer/descriptor updates and unknown releases preserve prior device state;
+- required descriptor omissions, wrong resource usage, released resources, and in-flight Vulkan
+  descriptor mutation are rejected before draws or destructive resource changes;
 - missing or stale texture/mesh handles resolve to visible error assets;
 - failed shader hot reload keeps the prior valid program and pipelines;
 - initial required shader-set load failure is a visible startup error (there is no hidden release
