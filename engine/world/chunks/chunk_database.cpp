@@ -462,22 +462,75 @@ core::Status ChunkDatabase::apply_saved_edits_impl(std::span<const VoxelEditReco
     }
     auto* staged_dirty = staged_dirty_regions ? &*staged_dirty_regions : nullptr;
     auto staged_edit_log = staged.build_replaced_saved_edit_history(edits, canonical_edits);
+
+    std::set<ChunkCoord> touched_chunks;
+    for (const auto& edit : canonical_edits) {
+        touched_chunks.insert(edit.chunk_coord);
+    }
+    std::vector<VoxelEditRecord> replaced_edit_history;
+    for (const auto& existing : staged.edit_log_) {
+        if (touched_chunks.contains(existing.chunk_coord)) {
+            replaced_edit_history.push_back(existing);
+        }
+    }
+    const auto replaced_edits = canonicalize_saved_edits(replaced_edit_history);
+
+    const auto mark_rebuild = [&staged, staged_dirty](const VoxelEditRecord& edit) {
+        if (staged_dirty != nullptr) {
+            auto dirty_status = staged.mark_chunk_rebuild_regions(
+                *staged_dirty, edit.chunk_coord, "saved voxel edit delta");
+            if (!dirty_status) {
+                return dirty_status;
+            }
+        }
+        return staged.mark_neighbor_dirty_if_boundary(edit.chunk_coord, edit.voxel_coord,
+                                                      staged_dirty);
+    };
+
+    // Each touched chunk receives a complete persisted delta. Restore the prior retained delta to
+    // its baseline first so records omitted by the replacement do not remain live without history.
+    for (const auto& existing : replaced_edits) {
+        auto* chunk = staged.find(existing.chunk_coord);
+        if (chunk == nullptr) {
+            return core::Status::failure(
+                "chunk_database.edit_history_mismatch",
+                "retained voxel edit history references a missing resident chunk");
+        }
+        auto current = chunk->get(existing.voxel_coord);
+        if (!current) {
+            return core::Status::failure(current.error().code, current.error().message);
+        }
+        if (current.value() != existing.next) {
+            return core::Status::failure(
+                "chunk_database.edit_history_mismatch",
+                "retained voxel edit history does not match the resident chunk state");
+        }
+        status = chunk->apply_saved_cell(existing.voxel_coord, existing.previous);
+        if (!status) {
+            return status;
+        }
+        status = mark_rebuild(existing);
+        if (!status) {
+            return status;
+        }
+    }
+
     for (const auto& edit : canonical_edits) {
         auto& chunk = staged.get_or_create(edit.chunk_coord);
+        auto current = chunk.get(edit.voxel_coord);
+        if (!current) {
+            return core::Status::failure(current.error().code, current.error().message);
+        }
+        if (current.value() != edit.previous) {
+            return core::Status::failure(
+                "chunk_database.saved_edit_base_mismatch",
+                "saved edit history does not match the resident terrain baseline");
+        }
         status = chunk.apply_saved_cell(edit.voxel_coord, edit.next);
         if (!status) {
             return status;
         }
-
-        if (staged_dirty != nullptr) {
-            status = staged.mark_chunk_rebuild_regions(*staged_dirty, edit.chunk_coord,
-                                                       "saved voxel edit delta");
-            if (!status) {
-                return status;
-            }
-        }
-        status =
-            staged.mark_neighbor_dirty_if_boundary(edit.chunk_coord, edit.voxel_coord, staged_dirty);
+        status = mark_rebuild(edit);
         if (!status) {
             return status;
         }

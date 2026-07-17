@@ -233,6 +233,20 @@ void test_saved_edit_batch_validation_is_atomic() {
     assert(status.error().code == "chunk_database.saved_edit_chain_mismatch");
     assert(!chunks.contains(invalid_chain_coord));
     assert(chunks.edit_log().empty());
+
+    const heartstead::world::ChunkCoord incompatible_base_coord{9, 0, 0};
+    auto& incompatible_base = chunks.get_or_create(incompatible_base_coord);
+    assert(incompatible_base.apply_saved_cell({2, 2, 2}, {7, 0}));
+    incompatible_base.clear_all_dirty();
+    const std::vector<heartstead::world::VoxelEditRecord> incompatible_base_edit{
+        {incompatible_base_coord, {2, 2, 2}, heartstead::world::VoxelCell::air(), {8, 0}},
+    };
+    status = chunks.apply_saved_edits(incompatible_base_edit);
+    assert(!status);
+    assert(status.error().code == "chunk_database.saved_edit_base_mismatch");
+    auto preserved = chunks.get(incompatible_base_coord, {2, 2, 2});
+    assert(preserved && preserved.value() == heartstead::world::VoxelCell(7, 0));
+    assert(chunks.edit_log().empty());
 }
 
 void test_chunk_mutations_preflight_and_compact_edit_history() {
@@ -273,6 +287,17 @@ void test_chunk_mutations_preflight_and_compact_edit_history() {
     assert(restored_chunks.edit_log().front().chunk_coord == restored_coord);
     assert(restored_chunks.edit_log().front().previous == world::VoxelCell::air());
     assert(restored_chunks.edit_log().front().next == previous);
+
+    const std::vector<world::VoxelEditRecord> replacement_delta{
+        {restored_coord, {3, 3, 3}, world::VoxelCell::air(), {5, 0}},
+    };
+    assert(restored_chunks.apply_saved_edits(replacement_delta));
+    auto removed_edit = restored_chunks.get(restored_coord, {2, 2, 2});
+    auto replacement_edit = restored_chunks.get(restored_coord, {3, 3, 3});
+    assert(removed_edit && removed_edit.value().is_air());
+    assert(replacement_edit && replacement_edit.value() == world::VoxelCell(5, 0));
+    assert(restored_chunks.edit_log().size() == 1);
+    assert(restored_chunks.edit_log().front().voxel_coord == (world::VoxelCoord{3, 3, 3}));
 
     world::VoxelChunk incompatible_base({11, 0, 0});
     incompatible_base.fill({7, 0});
