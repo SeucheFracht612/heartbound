@@ -95,7 +95,18 @@ std::size_t ChunkDatabase::chunk_count() const noexcept {
 }
 
 bool ChunkDatabase::erase(ChunkCoord coord) {
-    return chunks_.erase(coord) > 0;
+    if (chunks_.erase(coord) == 0) {
+        return false;
+    }
+    for (const auto neighbor : face_neighbors(coord)) {
+        auto* chunk = find(neighbor);
+        if (chunk != nullptr) {
+            chunk->mark_dirty(ChunkDirtyFlag::mesh);
+            chunk->mark_dirty(ChunkDirtyFlag::collision);
+            chunk->mark_dirty(ChunkDirtyFlag::lighting);
+        }
+    }
+    return true;
 }
 
 core::Status ChunkDatabase::insert_generated(VoxelChunk chunk) {
@@ -258,10 +269,35 @@ core::Status ChunkDatabase::insert_generated_impl(VoxelChunk chunk,
                                      "generated chunk already exists");
     }
 
+    if (dirty_regions != nullptr) {
+        auto status = mark_chunk_rebuild_regions(*dirty_regions, coord, "generated chunk");
+        if (!status) {
+            return status;
+        }
+        for (const auto neighbor : face_neighbors(coord)) {
+            if (find(neighbor) == nullptr) {
+                continue;
+            }
+            status = mark_chunk_rebuild_regions(*dirty_regions, neighbor,
+                                                "neighbor chunk became resident");
+            if (!status) {
+                return status;
+            }
+        }
+    }
+
+    chunk.mark_dirty(ChunkDirtyFlag::mesh);
+    chunk.mark_dirty(ChunkDirtyFlag::collision);
+    chunk.mark_dirty(ChunkDirtyFlag::lighting);
     chunk.assign_load_generation(allocate_load_generation());
     chunks_.emplace(coord, std::move(chunk));
-    if (dirty_regions != nullptr) {
-        return mark_chunk_rebuild_regions(*dirty_regions, coord, "generated chunk");
+    for (const auto neighbor : face_neighbors(coord)) {
+        auto* resident = find(neighbor);
+        if (resident != nullptr) {
+            resident->mark_dirty(ChunkDirtyFlag::mesh);
+            resident->mark_dirty(ChunkDirtyFlag::collision);
+            resident->mark_dirty(ChunkDirtyFlag::lighting);
+        }
     }
     return core::Status::ok();
 }
@@ -498,6 +534,15 @@ std::vector<ChunkCoord> ChunkDatabase::boundary_neighbors(ChunkCoord chunk_coord
             result.push_back({chunk_coord.x, chunk_coord.y, chunk_coord.z + 1});
         }
     }
+    return result;
+}
+
+std::vector<ChunkCoord> ChunkDatabase::face_neighbors(ChunkCoord chunk_coord) {
+    auto result = boundary_neighbors(chunk_coord, {0, 0, 0});
+    auto positive =
+        boundary_neighbors(chunk_coord, {VoxelChunk::edge_length - 1, VoxelChunk::edge_length - 1,
+                                         VoxelChunk::edge_length - 1});
+    result.insert(result.end(), positive.begin(), positive.end());
     return result;
 }
 

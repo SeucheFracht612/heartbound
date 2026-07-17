@@ -208,6 +208,38 @@ void test_saved_edit_batch_validation_is_atomic() {
     assert(chunks.edit_log().empty());
 }
 
+void test_chunk_residency_changes_invalidate_shared_seams() {
+    using namespace heartstead;
+
+    world::ChunkDatabase chunks;
+    dirty::DirtyRegionTracker dirty_regions;
+    std::vector<world::VoxelCell> solid_cells(world::VoxelChunk::total_cells,
+                                              world::VoxelCell{1, 0});
+    world::VoxelChunk left({0, 0, 0});
+    assert(left.load_generated_cells(solid_cells));
+    assert(chunks.insert_generated(std::move(left), dirty_regions));
+
+    chunks.clear_all_dirty();
+    dirty_regions.clear();
+    world::VoxelChunk right({1, 0, 0});
+    assert(right.load_generated_cells(std::move(solid_cells)));
+    assert(chunks.insert_generated(std::move(right), dirty_regions));
+
+    const auto* remeshed_left = chunks.find({0, 0, 0});
+    assert(remeshed_left != nullptr);
+    assert(remeshed_left->dirty().contains(world::ChunkDirtyFlag::mesh));
+    assert(remeshed_left->dirty().contains(world::ChunkDirtyFlag::collision));
+    assert(remeshed_left->dirty().contains(world::ChunkDirtyFlag::lighting));
+    const auto mesh_regions = dirty_regions.consume_kind(dirty::DirtyRegionKind::chunk_mesh);
+    assert(mesh_regions.size() == 1);
+    assert((mesh_regions.front().bounds.min == dirty::DirtyRegionCoord{0, 0, 0}));
+    assert((mesh_regions.front().bounds.max == dirty::DirtyRegionCoord{1, 0, 0}));
+
+    chunks.clear_all_dirty();
+    assert(chunks.erase({1, 0, 0}));
+    assert(chunks.find({0, 0, 0})->dirty().contains(world::ChunkDirtyFlag::mesh));
+}
+
 void test_stream_reload_preserves_one_canonical_delta() {
     TerrainFixture fixture;
     heartstead::world::WorldState state;
@@ -412,6 +444,7 @@ int main() {
     test_worldgen_features_only_belong_to_their_surface_chunk();
     test_chunk_interest_planning_is_bounded();
     test_saved_edit_batch_validation_is_atomic();
+    test_chunk_residency_changes_invalidate_shared_seams();
     test_stream_reload_preserves_one_canonical_delta();
     test_world_set_voxel_rejects_unloaded_chunk();
     test_process_advance_all_is_atomic();

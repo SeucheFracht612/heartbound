@@ -94,6 +94,7 @@ class ChunkDatabase {
                                std::string reason);
     [[nodiscard]] static std::vector<ChunkCoord> boundary_neighbors(ChunkCoord chunk_coord,
                                                                     VoxelCoord voxel_coord);
+    [[nodiscard]] static std::vector<ChunkCoord> face_neighbors(ChunkCoord chunk_coord);
 
     std::unordered_map<ChunkCoord, VoxelChunk, ChunkCoordHash> chunks_;
     std::vector<VoxelEditRecord> edit_log_;
