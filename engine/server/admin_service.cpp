@@ -3,6 +3,7 @@
 #include "engine/core/filesystem.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <limits>
 #include <ranges>
@@ -32,6 +33,28 @@ constexpr std::uintmax_t max_profile_import_bytes = 4U * 1024U * 1024U;
         start = end + 1;
     }
     return result;
+}
+
+[[nodiscard]] bool path_is_within(const std::filesystem::path& path,
+                                  const std::filesystem::path& directory) {
+    const auto relative = path.lexically_relative(directory);
+    if (relative.empty() || relative.is_absolute()) {
+        return false;
+    }
+    const auto first = relative.begin();
+    return first != relative.end() && *first != "..";
+}
+
+[[nodiscard]] core::Result<std::filesystem::path>
+canonical_path(const std::filesystem::path& path, std::string_view label) {
+    std::error_code error;
+    auto canonical = std::filesystem::weakly_canonical(path, error);
+    if (error) {
+        return core::Result<std::filesystem::path>::failure(
+            "admin.backup_path_failed",
+            "could not resolve " + std::string(label) + " path: " + error.message());
+    }
+    return core::Result<std::filesystem::path>::success(std::move(canonical));
 }
 
 } // namespace
@@ -167,7 +190,7 @@ core::Status ServerAdminService::kick(core::NetId client_id, std::string reason,
     if (player == nullptr)
         return core::Status::failure("admin.player_not_connected", "player is not connected");
     const auto uuid = player->profile.player_uuid.value();
-    auto status = audit("KICK", actor, world_time, {{"player_uuid", uuid}, {"reason", reason}});
+    auto status = audit("kick", actor, world_time, {{"player_uuid", uuid}, {"reason", reason}});
     if (!status)
         return status;
     return server_.leave(client_id, world_time);
@@ -189,7 +212,7 @@ core::Status ServerAdminService::ban(core::NetId client_id, std::string reason,
         bans_.pop_back();
         return status;
     }
-    status = audit("BAN", actor, world_time,
+    status = audit("ban", actor, world_time,
                    {{"player_uuid", record.player_uuid->value()}, {"reason", record.reason}});
     if (!status)
         return status;
@@ -208,7 +231,7 @@ core::Status ServerAdminService::unban(const player_profiles::PlayerUuid& uuid,
         bans_ = old_bans;
         return status;
     }
-    return audit("UNBAN", std::move(actor), world_time, {{"player_uuid", uuid.value()}});
+    return audit("unban", std::move(actor), world_time, {{"player_uuid", uuid.value()}});
 }
 
 core::Status ServerAdminService::grant_role(const player_profiles::PlayerUuid& uuid,
@@ -232,7 +255,7 @@ core::Status ServerAdminService::grant_role(const player_profiles::PlayerUuid& u
     auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
-    return audit("PERMISSION_GRANT", std::move(actor), world_time,
+    return audit("permission_grant", std::move(actor), world_time,
                  {{"player_uuid", uuid.value()}, {"role", std::move(role)}});
 }
 
@@ -255,7 +278,7 @@ core::Status ServerAdminService::revoke_role(const player_profiles::PlayerUuid& 
     auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
-    return audit("PERMISSION_REVOKE", std::move(actor), world_time,
+    return audit("permission_revoke", std::move(actor), world_time,
                  {{"player_uuid", uuid.value()}, {"role", std::string(role)}});
 }
 
@@ -286,7 +309,7 @@ core::Status ServerAdminService::reset_map(const player_profiles::PlayerUuid& uu
     auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
-    return audit("MAP_RESET", std::move(actor), world_time,
+    return audit("map_reset", std::move(actor), world_time,
                  {{"player_uuid", uuid.value()},
                   {"layer", layer ? std::string(*layer) : "all"},
                   {"removed_regions", std::to_string(removed_regions)}});
@@ -309,7 +332,7 @@ core::Status ServerAdminService::export_profile(const player_profiles::PlayerUui
     if (!output)
         return core::Status::failure("admin.profile_export_failed",
                                      "could not write profile export");
-    return audit("PROFILE_EXPORT", std::move(actor), world_time,
+    return audit("profile_export", std::move(actor), world_time,
                  {{"player_uuid", uuid.value()}, {"destination", destination.generic_string()}});
 }
 
@@ -333,7 +356,7 @@ core::Status ServerAdminService::import_profile(const std::filesystem::path& sou
     auto status = server_.replace_profile(std::move(profile).value());
     if (!status)
         return status;
-    return audit("PROFILE_IMPORT", std::move(actor), world_time,
+    return audit("profile_import", std::move(actor), world_time,
                  {{"player_uuid", uuid.value()}, {"source", source.generic_string()}});
 }
 
@@ -344,30 +367,91 @@ ServerAdminService::create_backup(std::string label, simulation::WorldTick world
         return core::Result<std::filesystem::path>::failure("admin.invalid_backup_label",
                                                             "backup label must be a local id");
     }
-    auto timestamp = server_logs::utc_now_iso8601();
-    std::ranges::replace(timestamp, ':', '-');
-    const auto destination = config_.backup_root / (timestamp + "_" + label);
-    const auto relative = config_.backup_root.lexically_normal().lexically_relative(
-        config_.world_root.lexically_normal());
-    if (!relative.empty() && *relative.begin() != "..") {
+    std::error_code error;
+    std::filesystem::create_directories(config_.backup_root, error);
+    if (error) {
+        return core::Result<std::filesystem::path>::failure("admin.backup_failed",
+                                                            error.message());
+    }
+    if (!std::filesystem::is_directory(config_.world_root, error) || error) {
+        return core::Result<std::filesystem::path>::failure(
+            "admin.backup_world_missing", "backup source world is not a readable directory");
+    }
+
+    auto canonical_world = canonical_path(config_.world_root, "world");
+    auto canonical_backup = canonical_path(config_.backup_root, "backup root");
+    if (!canonical_world || !canonical_backup) {
+        const auto& path_error = !canonical_world ? canonical_world.error() : canonical_backup.error();
+        return core::Result<std::filesystem::path>::failure(path_error.code, path_error.message);
+    }
+    if (path_is_within(canonical_backup.value(), canonical_world.value())) {
         return core::Result<std::filesystem::path>::failure(
             "admin.backup_inside_world", "backup root must not be inside the world being copied");
     }
-    std::error_code error;
-    std::filesystem::create_directories(config_.backup_root, error);
-    if (!error) {
-        std::filesystem::copy(config_.world_root, destination,
-                              std::filesystem::copy_options::recursive |
-                                  std::filesystem::copy_options::copy_symlinks,
-                              error);
+
+    auto timestamp = server_logs::utc_now_iso8601();
+    std::ranges::replace(timestamp, ':', '-');
+    std::filesystem::path destination;
+    std::filesystem::path staging;
+    for (std::uint32_t suffix = 0; suffix < 1'000; ++suffix) {
+        auto name = timestamp + "_" + label;
+        if (suffix != 0) {
+            name += "_" + std::to_string(suffix);
+        }
+        destination = canonical_backup.value() / name;
+        staging = destination;
+        staging += ".tmp";
+        const bool destination_exists = std::filesystem::exists(destination, error);
+        if (error) {
+            break;
+        }
+        const bool staging_exists = std::filesystem::exists(staging, error);
+        if (error) {
+            break;
+        }
+        if (!destination_exists && !staging_exists) {
+            break;
+        }
+        destination.clear();
+        staging.clear();
     }
-    if (error)
+    if (error || destination.empty()) {
+        return core::Result<std::filesystem::path>::failure(
+            "admin.backup_name_exhausted",
+            error ? error.message() : "could not allocate a unique backup directory name");
+    }
+
+    std::filesystem::copy(canonical_world.value(), staging,
+                          std::filesystem::copy_options::recursive |
+                              std::filesystem::copy_options::copy_symlinks,
+                          error);
+    if (error) {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(staging, cleanup_error);
         return core::Result<std::filesystem::path>::failure("admin.backup_failed", error.message());
-    auto status = audit("BACKUP_CREATED", std::move(actor), world_time,
+    }
+
+    std::filesystem::rename(staging, destination, error);
+    if (error) {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(staging, cleanup_error);
+        return core::Result<std::filesystem::path>::failure("admin.backup_publish_failed",
+                                                            error.message());
+    }
+
+    auto status = audit("backup_created", std::move(actor), world_time,
                         {{"path", destination.generic_string()}});
-    if (!status)
+    if (!status) {
+        std::error_code cleanup_error;
+        std::filesystem::remove_all(destination, cleanup_error);
+        if (cleanup_error) {
+            return core::Result<std::filesystem::path>::failure(
+                "admin.backup_audit_rollback_failed",
+                status.error().message + "; backup cleanup failed: " + cleanup_error.message());
+        }
         return core::Result<std::filesystem::path>::failure(status.error().code,
                                                             status.error().message);
+    }
     return core::Result<std::filesystem::path>::success(destination);
 }
 

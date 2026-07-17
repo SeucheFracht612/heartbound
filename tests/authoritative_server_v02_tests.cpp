@@ -1,9 +1,11 @@
 #include "engine/server/authoritative_server.hpp"
+#include "engine/server/admin_service.hpp"
 
 #include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 
@@ -105,9 +107,61 @@ void test_join_profile_discovery_chat_and_leave_lifecycle() {
     std::filesystem::remove_all(root, ignored);
 }
 
+void test_admin_backups_publish_complete_unique_directories_outside_the_world() {
+    const auto root = temporary_root();
+    const auto world_root = root / "world";
+    const auto server_root = root / "server";
+    const auto backup_root = root / "backups";
+    std::filesystem::create_directories(world_root);
+    {
+        std::ofstream state(world_root / "state.txt", std::ios::trunc);
+        state << "authoritative-state";
+        state.close();
+        assert(state);
+    }
+
+    heartstead::server::AuthoritativeServerConfig server_config;
+    server_config.world_root = world_root;
+    server_config.server_root = server_root;
+    heartstead::server::AuthoritativeServer server(server_config);
+    assert(server.start());
+
+    {
+        heartstead::server::AdminServiceConfig admin_config;
+        admin_config.world_root = world_root;
+        admin_config.server_root = server_root;
+        admin_config.backup_root = backup_root;
+        heartstead::server::ServerAdminService admin(admin_config, server);
+
+        auto first = admin.create_backup("manual", 10, "console");
+        auto second = admin.create_backup("manual", 11, "console");
+        assert(first && second && first.value() != second.value());
+        assert(std::filesystem::is_regular_file(first.value() / "state.txt"));
+        assert(std::filesystem::is_regular_file(second.value() / "state.txt"));
+        assert(!std::filesystem::exists(first.value().string() + ".tmp"));
+        assert(!std::filesystem::exists(second.value().string() + ".tmp"));
+    }
+
+    {
+        heartstead::server::AdminServiceConfig unsafe_config;
+        unsafe_config.world_root = world_root;
+        unsafe_config.server_root = server_root;
+        unsafe_config.backup_root = world_root / "nested_backups";
+        heartstead::server::ServerAdminService unsafe_admin(unsafe_config, server);
+        auto rejected = unsafe_admin.create_backup("unsafe", 12, "console");
+        assert(!rejected);
+        assert(rejected.error().code == "admin.backup_inside_world");
+    }
+
+    assert(server.stop(13));
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
 } // namespace
 
 int main() {
     test_join_profile_discovery_chat_and_leave_lifecycle();
+    test_admin_backups_publish_complete_unique_directories_outside_the_world();
     return 0;
 }
