@@ -7,6 +7,7 @@
 #include "engine/world/world_commands.hpp"
 #include "engine/world/world_snapshot.hpp"
 #include "game/features/interaction/voxel_commands.hpp"
+#include "game/features/interaction/voxel_interaction_module.hpp"
 
 #include <algorithm>
 #include <limits>
@@ -80,46 +81,6 @@ core::Status ServerRuntime::initialize() {
                 return core::Status::failure(input.error().code, input.error().message);
             }
             return found->second.pending_inputs.push(std::move(input).value());
-        },
-    });
-    if (!status) {
-        return status;
-    }
-    status = commands_.register_command(net::CommandDescriptor{
-        std::string(interaction::place_voxel_command_type), true, true,
-        [this](const net::CommandEnvelope& command, const net::CommandExecutionContext& context,
-               world::WorldOperation& operation) {
-            const auto* player = player_for_client(command.sender);
-            if (player == nullptr) {
-                return core::Status::failure("server_runtime.player_not_connected",
-                                             "voxel command sender has no active player");
-            }
-            auto decoded = interaction::VoxelCommandTextCodec::decode_place(command.payload);
-            if (!decoded) {
-                return core::Status::failure(decoded.error().code, decoded.error().message);
-            }
-            return interaction::execute_place_voxel(decoded.value(), player->state, command,
-                                                     context, operation);
-        },
-    });
-    if (!status) {
-        return status;
-    }
-    status = commands_.register_command(net::CommandDescriptor{
-        std::string(interaction::remove_voxel_command_type), true, true,
-        [this](const net::CommandEnvelope& command, const net::CommandExecutionContext& context,
-               world::WorldOperation& operation) {
-            const auto* player = player_for_client(command.sender);
-            if (player == nullptr) {
-                return core::Status::failure("server_runtime.player_not_connected",
-                                             "voxel command sender has no active player");
-            }
-            auto decoded = interaction::VoxelCommandTextCodec::decode_remove(command.payload);
-            if (!decoded) {
-                return core::Status::failure(decoded.error().code, decoded.error().message);
-            }
-            return interaction::execute_remove_voxel(decoded.value(), player->state, command,
-                                                      context, operation);
         },
     });
     if (!status) {
@@ -230,6 +191,24 @@ core::Status ServerRuntime::initialize() {
     });
     if (!status) {
         return status;
+    }
+    status = gameplay_modules_.add(std::make_shared<interaction::VoxelInteractionModule>(
+        [this](core::NetId client_id) { return player_for_client(client_id); }));
+    if (!status) {
+        return status;
+    }
+    for (auto& module : desc_.gameplay_modules) {
+        status = gameplay_modules_.add(std::move(module));
+        if (!status) {
+            return status;
+        }
+    }
+    GameplayRegistrationContext registration_context{
+        *desc_.prototypes, entities_, commands_, scheduler_, component_registry_,
+        serialization_registry_, replication_registry_, presentation_registry_};
+    auto registered = gameplay_modules_.register_all(registration_context);
+    if (!registered) {
+        return core::Status::failure(registered.error().code, registered.error().message);
     }
     return scheduler_.finalize();
 }
@@ -369,6 +348,26 @@ movement::PlayerControllerStore& ServerRuntime::players() noexcept {
 
 const movement::PlayerControllerStore& ServerRuntime::players() const noexcept {
     return players_;
+}
+
+const GameplayModuleRegistry& ServerRuntime::gameplay_modules() const noexcept {
+    return gameplay_modules_;
+}
+
+const ComponentRegistry& ServerRuntime::component_registry() const noexcept {
+    return component_registry_;
+}
+
+const SerializationRegistry& ServerRuntime::serialization_registry() const noexcept {
+    return serialization_registry_;
+}
+
+const ReplicationRegistry& ServerRuntime::replication_registry() const noexcept {
+    return replication_registry_;
+}
+
+const PresentationRegistry& ServerRuntime::presentation_registry() const noexcept {
+    return presentation_registry_;
 }
 
 movement::PlayerControllerRecord* ServerRuntime::player_for_client(core::NetId client_id) noexcept {

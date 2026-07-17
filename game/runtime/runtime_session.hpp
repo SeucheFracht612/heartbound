@@ -10,6 +10,7 @@
 #include "engine/simulation/fixed_step.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "game/features/interaction/voxel_commands.hpp"
+#include "game/framework/gameplay_module.hpp"
 #include "game/runtime/client_runtime.hpp"
 #include "game/runtime/server_runtime.hpp"
 
@@ -30,6 +31,7 @@ struct RuntimeConfiguration {
     bool headless = true;
     simulation::FixedStepConfig fixed_step{};
     physics::PhysicsBackend physics_backend = physics::PhysicsBackend::headless;
+    std::vector<std::shared_ptr<IGameplayModule>> gameplay_modules;
 
     [[nodiscard]] core::Status validate() const;
 };

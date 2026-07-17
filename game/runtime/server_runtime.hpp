@@ -11,6 +11,7 @@
 #include "engine/world/replication_delta.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/world_state.hpp"
+#include "game/framework/gameplay_module.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -26,6 +27,7 @@ struct ServerRuntimeDesc {
     const modding::PrototypeRegistry* prototypes = nullptr;
     const world::VoxelPalette* voxel_palette = nullptr;
     std::optional<save::SaveSnapshot> initial_snapshot;
+    std::vector<std::shared_ptr<IGameplayModule>> gameplay_modules;
 };
 
 struct ServerRuntimeTickStats {
@@ -68,6 +70,11 @@ class ServerRuntime final {
     [[nodiscard]] const simulation::TickEvents& events() const noexcept;
     [[nodiscard]] movement::PlayerControllerStore& players() noexcept;
     [[nodiscard]] const movement::PlayerControllerStore& players() const noexcept;
+    [[nodiscard]] const GameplayModuleRegistry& gameplay_modules() const noexcept;
+    [[nodiscard]] const ComponentRegistry& component_registry() const noexcept;
+    [[nodiscard]] const SerializationRegistry& serialization_registry() const noexcept;
+    [[nodiscard]] const ReplicationRegistry& replication_registry() const noexcept;
+    [[nodiscard]] const PresentationRegistry& presentation_registry() const noexcept;
     [[nodiscard]] movement::PlayerControllerRecord*
     player_for_client(core::NetId client_id) noexcept;
     [[nodiscard]] const movement::PlayerControllerRecord*
@@ -101,6 +108,11 @@ class ServerRuntime final {
     simulation::TickEvents events_;
     movement::PlayerController player_controller_;
     movement::PlayerControllerStore players_;
+    ComponentRegistry component_registry_;
+    SerializationRegistry serialization_registry_;
+    ReplicationRegistry replication_registry_;
+    PresentationRegistry presentation_registry_;
+    GameplayModuleRegistry gameplay_modules_;
     std::unordered_map<std::uint64_t, PlayerConnection> player_connections_;
     std::vector<world::VoxelEditRecord> pending_saved_voxel_edits_;
     net::HostSessionTickResult current_commands_;

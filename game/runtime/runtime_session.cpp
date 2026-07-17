@@ -86,6 +86,7 @@ core::Status RuntimeSession::initialize() {
         server_desc.prototypes = prototypes_;
         server_desc.voxel_palette = voxel_palette_;
         server_desc.initial_snapshot = request_.initial_snapshot;
+        server_desc.gameplay_modules = config_.gameplay_modules;
         auto server = ServerRuntime::create(std::move(server_desc));
         if (!server) {
             return core::Status::failure(server.error().code, server.error().message);

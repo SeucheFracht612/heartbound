@@ -10,6 +10,60 @@ using namespace heartstead;
 
 namespace {
 
+struct TestFeatureComponent {
+    std::uint32_t value = 0;
+};
+
+class TestGameplayModule final : public game::IGameplayModule {
+  public:
+    [[nodiscard]] std::string_view module_id() const noexcept override {
+        return "test.feature";
+    }
+
+    [[nodiscard]] core::Status
+    register_components(game::ComponentRegistry& registry) override {
+        return registry.register_component<TestFeatureComponent>("test.feature_component");
+    }
+
+    [[nodiscard]] core::Status
+    register_commands(game::GameplayRegistrationContext& context) override {
+        return context.commands.register_command({
+            "test.feature.ping", false, true,
+            [](const net::CommandEnvelope&, const net::CommandExecutionContext&,
+               world::WorldOperation&) { return core::Status::ok(); },
+        });
+    }
+
+    [[nodiscard]] core::Status
+    register_systems(game::GameplayRegistrationContext& context) override {
+        return context.scheduler.register_system({
+            "test.feature.update", simulation::SimulationPhase::gameplay,
+            {"runtime.physics"},
+            [this](simulation::SimulationContext&) {
+                ++update_count;
+                return core::Status::ok();
+            },
+        });
+    }
+
+    [[nodiscard]] core::Status
+    register_serializers(game::SerializationRegistry& registry) override {
+        return registry.register_schema({"test.feature.state", 1});
+    }
+
+    [[nodiscard]] core::Status
+    register_replication(game::ReplicationRegistry& registry) override {
+        return registry.register_replication({"test.feature.delta", 1, true});
+    }
+
+    [[nodiscard]] core::Status
+    register_presentation(game::PresentationRegistry& registry) override {
+        return registry.register_adapter({"test.feature.presentation", 1});
+    }
+
+    std::uint32_t update_count = 0;
+};
+
 std::filesystem::path source_root() {
     return std::filesystem::path(HEARTSTEAD_TEST_SOURCE_DIR);
 }
@@ -267,6 +321,35 @@ void test_session_save_and_reload_restores_authoritative_state() {
     std::filesystem::remove_all(save_root);
 }
 
+void test_gameplay_modules_extend_runtime_through_registration_contract() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    auto module = std::make_shared<TestGameplayModule>();
+    game::RuntimeConfiguration config;
+    config.gameplay_modules.push_back(module);
+    assert(runtime.start_session(config, make_session_request(report)));
+    const auto* server = runtime.session()->server();
+    assert(server != nullptr);
+    const auto& module_report = server->gameplay_modules().report();
+    assert(module_report.module_ids.size() == 2);
+    assert(module_report.module_ids.front() == "base.voxel_interaction");
+    assert(module_report.module_ids.back() == "test.feature");
+    assert(module_report.component_count == 1);
+    assert(module_report.command_count == 3);
+    assert(module_report.system_count == 1);
+    assert(module_report.serializer_count == 3);
+    assert(module_report.replication_count == 2);
+    assert(module_report.presentation_adapter_count == 2);
+    assert(runtime.submit_command("test.feature.ping", {}, 10));
+    auto frame = runtime.run_frame({16'667, 17});
+    assert(frame && frame.value().server_ticks.size() == 1);
+    assert(frame.value().server_ticks.front().commands.command_reports.size() == 1);
+    assert(frame.value().server_ticks.front().commands.command_reports.front().success);
+    assert(module->update_count == 1);
+    assert(runtime.shutdown());
+}
+
 void test_runtime_configuration_rejects_invalid_compositions() {
     game::RuntimeConfiguration empty;
     empty.create_server = false;
@@ -293,6 +376,7 @@ int main() {
     test_authoritative_player_input_moves_and_replicates();
     test_typed_voxel_commands_validate_and_replicate();
     test_session_save_and_reload_restores_authoritative_state();
+    test_gameplay_modules_extend_runtime_through_registration_contract();
     test_runtime_configuration_rejects_invalid_compositions();
     return 0;
 }

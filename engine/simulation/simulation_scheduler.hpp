@@ -71,6 +71,7 @@ class SimulationScheduler {
     [[nodiscard]] core::Result<SimulationTickStats> run_tick(SimulationContext context);
 
     [[nodiscard]] bool is_finalized() const noexcept;
+    [[nodiscard]] std::size_t registered_system_count() const noexcept;
     [[nodiscard]] std::span<const SimulationSystemTiming> timings() const noexcept;
     [[nodiscard]] std::vector<std::string_view> ordered_system_names() const;
 

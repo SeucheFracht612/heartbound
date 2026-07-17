@@ -162,6 +162,10 @@ bool SimulationScheduler::is_finalized() const noexcept {
     return finalized_;
 }
 
+std::size_t SimulationScheduler::registered_system_count() const noexcept {
+    return systems_.size();
+}
+
 std::span<const SimulationSystemTiming> SimulationScheduler::timings() const noexcept {
     return timings_;
 }

@@ -6,6 +6,8 @@ target_sources(
   PRIVATE
     features/interaction/voxel_raycast.cpp
     features/interaction/voxel_commands.cpp
+    features/interaction/voxel_interaction_module.cpp
+    framework/gameplay_module.cpp
     runtime/client_runtime.cpp
     runtime/game_inspection.cpp
     runtime/game_runtime.cpp
@@ -18,6 +20,8 @@ target_sources(
     FILES
       features/interaction/voxel_raycast.hpp
       features/interaction/voxel_commands.hpp
+      features/interaction/voxel_interaction_module.hpp
+      framework/gameplay_module.hpp
       runtime/client_runtime.hpp
       runtime/game_inspection.hpp
       runtime/game_runtime.hpp
