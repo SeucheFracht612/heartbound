@@ -29,7 +29,7 @@ Implemented foundation:
   - is created through `create_transport_host`
 
 - `TransportEndpoint`
-  - names the bind address and port for a production host transport
+  - names the numeric IPv4 bind address and port for the socket-backed foundation host
   - is validated before an external backend can be selected
   - allows port `0` for local tools/tests that need the OS to assign a free bind port
   - keeps network endpoints out of gameplay object identity and save identity
@@ -211,6 +211,11 @@ Implemented foundation:
     max payload bytes, max clients, and unreliable-channel policy
   - reports runtime availability through backend info, including sandbox/OS socket denial
   - creates a POSIX UDP packet host when sockets are available
+  - keeps the historical public backend name `external_library`, although the current
+    implementation is project-owned POSIX socket code rather than a third-party library
+  - creates every accepted client endpoint itself as a loopback UDP socket in the host process
+  - accepts server-bound packets only when both the claimed client `NetId` and the datagram source
+    endpoint match one of those host-created sockets
   - carries `TransportPacketCodec` payloads, using `TransportPacketFragmentCodec` when a
     backend packet budget is smaller than a command/replication/control packet
   - reassembles incoming fragments before decoding envelopes
@@ -238,4 +243,6 @@ replay-adjacent tooling, packet fragmentation/reassembly contracts, and integrat
 acknowledgement/retry behavior can be tested before or alongside a dedicated networking library.
 The current reliability layer is a bounded deterministic ACK/resend/drop primitive; it is not
 congestion control, rollback, NAT traversal, matchmaking, encryption, or a substitute for a proven
-production networking library.
+production networking library. In particular, binding the POSIX host to a non-loopback address does
+not make arbitrary remote clients joinable: there is no remote accept/identity assignment or
+authentication handshake, and `RuntimeSession` still rejects a remote-client-only composition.

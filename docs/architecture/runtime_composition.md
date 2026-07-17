@@ -14,7 +14,7 @@ technology into an authoritative simulation and client presentation.
 | Development game | yes | yes | in-memory | application-owned |
 | Single-player | yes | yes | in-memory | application-owned |
 | Listen server foundation | yes | yes | in-memory today | application-owned |
-| Dedicated server | yes | no | configured host backend | none |
+| Dedicated server | yes | no | configuration-selected; executable defaults in-memory | none |
 | Headless integration test | yes | optional | in-memory | none |
 
 The development executable uses the same local server/client path as headless tests. The dedicated
@@ -22,6 +22,11 @@ server creates no platform window, renderer, audio, or presentation world. A rem
 session is deliberately rejected until connection establishment for the external transport is
 wired into `RuntimeSession`; the protocol and transport backend remain separate so this does not
 change gameplay commands or systems.
+
+The current `heartstead_dedicated_server` executable is a bounded headless runner for smoke tests
+and server-path validation. It uses the in-memory transport, advances 120 fixed ticks by default
+(`--ticks N` selects another positive count), prints a summary, and exits. It is not yet a
+long-running service or remotely joinable server process.
 
 Applications own platform graphics and audio services. `GameRuntime` owns content references,
 session lifetime, the fixed-step clock, and the local runtime composition. It never exposes Vulkan
@@ -126,7 +131,7 @@ pipeline as other mods.
 ## Persistence
 
 `capture_save_snapshot()` exports only authoritative state. `save_to()` commits it through the
-generation-safe file database, and `start_session_from_save()` validates the snapshot against the
+generation-staged file database, and `start_session_from_save()` validates the snapshot against the
 active content before creating a session. Feature persistence callbacks can append or validate
 typed snapshot state; restore callbacks run only after the authoritative stores have been imported.
 A callback failure aborts capture or load with the registration name in the diagnostic.

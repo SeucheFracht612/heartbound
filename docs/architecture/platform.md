@@ -43,7 +43,7 @@ Implemented foundation:
     primary-output metadata when `HEARTSTEAD_ENABLE_XRANDR` is enabled and the extension is linked
   - falls back to Xlib screens as `DisplayInfo` records
   - returns X11 native window handles for renderer surface creation
-  - owns, serves, and retrieves UTF-8/STRING clipboard text through the X11 `CLIPBOARD`
+  - owns, serves, and retrieves byte text through the X11 `CLIPBOARD`
     selection, including bounded large direct property reads and ICCCM `INCR` incremental
     transfers
   - maps X11 configure, close, key, text, pointer motion, mouse button, and wheel events into the
@@ -74,18 +74,24 @@ engine/game code to query:
 - `input_snapshot`
 
 Public event injection goes through `queue_event`, which validates event kind, target
-window, window dimensions, key identity, mouse button identity, wheel deltas, and text payloads
-before updating retained platform state. Backend-generated lifecycle events such as
+window, window dimensions, key identity, mouse button identity, finite wheel deltas, and that text
+payloads are non-empty before updating retained platform state. It does not validate UTF-8.
+Backend-generated lifecycle events such as
 `window_created` remain owned by platform window creation/destruction.
 
 The `native` backend reports `platform.native_unavailable` when the optional X11 backend
 is not compiled or no display is available. The platform layer exposes native handles but
-does not create renderer resources. Vulkan surface creation belongs to the renderer backend,
-and swapchain/presentation work remains a later slice. The X11 backend can own and serve
-clipboard text it sets, and it can retrieve text owned by another application through synchronous
-selection conversion for `UTF8_STRING`, `STRING`, or `TEXT` targets. Large native clipboard
-payloads are bounded and can use direct property draining or ICCCM `INCR` incremental transfers
-instead of failing the platform contract solely because the text does not fit in one X request.
+does not create renderer resources. Vulkan surface, swapchain, and presentation ownership already
+belong to the renderer backend. The X11 backend can own and serve clipboard bytes it sets, and it
+can retrieve bytes owned by another application through synchronous selection conversion for
+`UTF8_STRING`, `STRING`, or `TEXT` targets. It prefers `UTF8_STRING`, but fallback `STRING`/`TEXT`
+bytes and key text produced by `XLookupString` are not transcoded or UTF-8 validated. Callers that
+require UTF-8 must validate the returned/input bytes themselves.
+
+External X11 clipboard retrieval is a blocking call. Each selection request has a short timeout,
+an incremental transfer resets a bounded timeout as chunks arrive, and received native payloads
+are capped at 64 MiB. The deterministic headless clipboard is only an in-process string store and
+does not apply that native transfer cap.
 
 The platform layer should remain below rendering, gameplay, modding, save, and network
 systems. Meaningful world state must still flow through server-authoritative commands

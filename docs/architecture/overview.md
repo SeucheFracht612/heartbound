@@ -78,10 +78,11 @@ The repository currently implements the initial engine-owned foundation:
   boundary
 - physics world boundary with backend capabilities, headless integration, AABB query/contact
   plumbing, deterministic dynamic-body response and sleeping, and Jolt backend placeholder
-- backend-selectable network transport boundary with in-memory host implementation, POSIX UDP
-  packet host when sockets are available, endpoint config, reliable command sequence enforcement,
-  packet fragmentation/reassembly, integrated deterministic reliable acknowledgement/retry/drop
-  maintenance, and capability reporting
+- backend-selectable network transport boundary with in-memory host implementation and a POSIX UDP
+  foundation host for host-owned loopback client endpoints when sockets are available, plus
+  endpoint config, reliable command sequence enforcement, packet fragmentation/reassembly,
+  integrated deterministic reliable acknowledgement/retry/drop maintenance, and capability
+  reporting
 - host-session lifecycle for local authoritative command processing
 - scripting runtime boundary with capability-gated calls, sandbox resource limits, disabled
   backend, restricted Luau foundation backend, and registered host API/event validation for

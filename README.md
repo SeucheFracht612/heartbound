@@ -42,10 +42,11 @@ Implemented in this repository:
   Vulkan rendering through offscreen color/depth targets into an X11 swapchain
 - physics world boundary with backend capabilities, headless integration, AABB query/contact
   plumbing, deterministic dynamic-body response and sleeping, and Jolt backend placeholder
-- backend-selectable network transport boundary with in-memory host implementation, POSIX UDP
-  packet host when sockets are available, endpoint config, reliable command sequence enforcement,
-  packet fragmentation/reassembly, integrated deterministic reliable acknowledgement/retry/drop
-  maintenance, and capability reporting
+- backend-selectable network transport boundary with in-memory host implementation and a POSIX UDP
+  foundation host for host-owned loopback client endpoints when sockets are available, plus
+  endpoint config, reliable command sequence enforcement, packet fragmentation/reassembly,
+  integrated deterministic reliable acknowledgement/retry/drop maintenance, and capability
+  reporting
 - host-session lifecycle for local authoritative command processing
 - scripting runtime boundary with capability-gated calls, sandbox resource limits, disabled
   backend, restricted Luau foundation backend, and registered host API/event validation for
@@ -262,6 +263,15 @@ Run the native Vulkan terrain milestone (requires X11 and a present-capable Vulk
 Use WASD and Space to move, hold the right mouse button to look, and press Escape or close the
 window to exit. See [`docs/dev/build_instructions.md`](docs/dev/build_instructions.md) for shader
 rebuild commands and validation details.
+
+Run the bounded dedicated-server smoke path (120 ticks by default):
+
+```bash
+./build/default-debug/apps/dedicated_server/heartstead_dedicated_server --ticks 120
+```
+
+This executable currently uses the in-memory transport, prints its final authoritative tick, and
+exits. It is not a long-running or remotely joinable server daemon.
 
 Run an uncapped deterministic renderer benchmark (headless by default, add `--vulkan` for GPU
 timestamps and a native window):
