@@ -62,7 +62,8 @@ Implemented in this repository:
 - deterministic mod prototype fingerprints for save compatibility metadata, including patches
 - material prototype loading into renderer material definitions
 - material asset-reference validation against active asset catalog records
-- scenario definition materialization and selected-scenario runtime startup checks
+- scenario definition materialization plus authoritative new-world startup, saved-scenario
+  recovery, spawn/loadout/cargo application, and mismatch rejection
 - item and cargo definition materialization from content prototypes
 - entity definition materialization from dynamic object prototypes
 - voxel palette construction from terrain voxel prototypes
@@ -104,8 +105,12 @@ Implemented in this repository:
 - generation-safe entity/component lifecycle and replicated destruction tombstones
 - authoritative player movement plus validated place/remove voxel commands
 - distinct replicated client, retained presentation, and immutable render-snapshot state
-- gameplay module registration with typed domain-service interfaces
-- authoritative save/reload and reusable headless session integration harness
+- executable gameplay module registration with typed domain-service, persistence, client
+  replication, and retained-presentation interfaces
+- authoritative save/reload with feature capture/restore hooks and a reusable headless session
+  integration harness
+- live runtime diagnostics for composition, world/client/presentation state and per-system timings,
+  with terminal fault capture after partially executed frame synchronization
 - game runtime startup from aggregate content validation
 - game-owned default script host API registry for server/client/migration scripting stages,
   validated by the engine scripting boundary

@@ -106,12 +106,17 @@ At startup each module may:
 4. register command handlers;
 5. register fixed-phase systems;
 6. register versioned serializers;
-7. register replication payload contracts;
-8. register presentation adapter contracts.
+7. register typed persistence capture and restore callbacks;
+8. register replication payload contracts and client apply callbacks;
+9. register presentation synchronization callbacks.
 
-All names and interface types are duplicate checked. The complete registration report is available
-from `ServerRuntime::gameplay_modules()` for diagnostics. The built-in voxel interaction feature is
-registered through this contract rather than special-cased command installation.
+The callbacks are executable boundaries, not labels. Client replication dispatch invokes the
+registered feature handler after world-owned records are applied, and presentation synchronization
+invokes every retained feature adapter. Registration rejects persistence, replication, or
+presentation entries that do not name a real handler. All names and interface types are duplicate
+checked. The complete registration report is available from `ServerRuntime::gameplay_modules()`
+for diagnostics. The built-in voxel interaction feature is registered through this contract rather
+than special-cased command installation.
 
 Cross-feature calls use `DomainServiceRegistry`. A feature registers a narrow interface type and
 other features request that type; they do not reach into private component arrays or domain stores.
@@ -122,9 +127,16 @@ pipeline as other mods.
 
 `capture_save_snapshot()` exports only authoritative state. `save_to()` commits it through the
 generation-safe file database, and `start_session_from_save()` validates the snapshot against the
-active content before creating a session. On load, persistent stores and players are restored first;
-scenario generation establishes the base spawn chunk, then saved chunk edit deltas are reapplied.
-The client receives the resulting authoritative state through normal initial replication.
+active content before creating a session. Feature persistence callbacks can append or validate
+typed snapshot state; restore callbacks run only after the authoritative stores have been imported.
+A callback failure aborts capture or load with the registration name in the diagnostic.
+
+For a new world, the selected materialized `ScenarioDefinition` records its id, start region, and
+spawn mode in authoritative state, creates the starting terrain and cargo, and grants each new
+player the declared starting item stacks. A save carries the scenario id and reload resolves it
+automatically. Loading imports saved terrain, cargo, inventories, entities, and mod state rather
+than applying the new-world bootstrap again, and rejects an explicitly conflicting scenario. The
+client receives the resulting authoritative state through normal initial replication.
 
 Render objects, GPU buffers, client interpolation, physics broadphase caches, and presentation
 state are never saved. Disk writing is currently an explicit caller operation. Moving compression
@@ -146,6 +158,12 @@ presentation state, and destroys the session. Renderer shutdown remains applicat
 performed before the native window closes. Startup is transactional: invalid content, duplicate
 module contracts, scheduler cycles, incompatible saves, transport failures, or missing player
 content return a typed error and do not yield a partially running session.
+
+An error after a frame has begun authoritative or client synchronization is terminal for that
+session because event/delta intake may already have advanced. `RuntimeSession` records the original
+typed fault, rejects subsequent frames and commands, exposes the fault through `GameInspector`, and
+still permits deterministic shutdown. Snapshot capture failures do not fault the session because
+they operate on a disposable snapshot and perform no disk commit.
 
 No globals or service locator participate in the frame path. Dependencies are constructor inputs,
 registration contexts, or narrowly scoped tick contexts.

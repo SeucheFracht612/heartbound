@@ -153,5 +153,12 @@ process ids, coordinates, persistence, sleeping/forced state, per-subject LOD de
 timestamp deltas, due-tick state, frame-plan counts, and counter mismatches in manually
 constructed or corrupted plans.
 
+Game runtime inspection reports the active server/client composition, fixed-tick configuration,
+authoritative world and chunk counts, generation-safe entity/component/tombstone counts, command
+and replication queues, presentation proxy counts, gameplay-module registration totals, and
+per-system last/total timings. A synchronization failure records its original typed error as a
+terminal session fault and exposes it as both fields and an error issue, so a failed feature
+replication or presentation callback cannot disappear behind a later successful-looking frame.
+
 Inspection output is not the final tool UI. It is the common data shape future debug
 overlays, inspectors, replay reports, and save tools can render.

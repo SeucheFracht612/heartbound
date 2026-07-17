@@ -29,6 +29,9 @@ Implemented foundation:
   - requires the selected scenario's materialized `ScenarioDefinition` when started from
     aggregate content validation
   - records the selected scenario start region and spawn mode in the startup report
+  - materializes the selected scenario again at session creation, records its identity in
+    authoritative state, and applies its new-world spawn, item, and cargo bootstrap exactly once
+  - restores the saved scenario automatically and rejects explicit save/scenario mismatches
   - verifies that required engine-level prototype families are present, including materials
     and scenarios
   - registers the default Heartstead script host API surface for server runtime, client runtime,
@@ -57,6 +60,12 @@ The runtime now also composes a fixed-tick local server/client session, typed ga
 generation-safe entity lifecycle, player movement, authoritative voxel interaction, replication,
 retained client presentation, save/reload, and a headless session harness. The normative ownership
 and lifecycle contract is in [`runtime_composition.md`](runtime_composition.md).
+
+Gameplay module serializer, persistence, replication, and presentation registrations are active
+runtime contracts. Persistence callbacks participate in snapshot capture/restore, replication
+callbacks consume typed client events, and presentation callbacks update retained proxies. Live
+session inspection reports composition, world/entity/chunk counts, module counts, per-system
+timings, client queue state, presentation state, and terminal frame faults.
 
 The layer boundary remains:
 
