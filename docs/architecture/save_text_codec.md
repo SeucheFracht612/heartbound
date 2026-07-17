@@ -6,7 +6,8 @@ alongside the binary snapshot codec.
 
 Implemented foundation:
 
-- magic header
+- snapshot magic header: the writer emits `heartstead.save_snapshot_text.v2`; the decoder accepts
+  the explicitly supported v1 and v2 headers
 - schema version
 - game version
 - world seed

@@ -57,11 +57,10 @@ This is intended for early persistence tests, golden files, and inspector tools.
 
 `WorldSnapshotBridge` exports authoritative `WorldState` data into these typed sections
 and imports snapshots back into world state. Runtime-only identities such as entity
-runtime handles and session net ids are regenerated on import. Saved chunk edit deltas
-are applied through a load-specific chunk path: the voxel cells and exportable edit log are
-restored, but chunks are not marked save-dirty or replication-dirty merely because the save was
-loaded. The raw bridge path creates an empty chunk when no resident baseline exists; streamed world
-loading must instead generate the deterministic baseline and use
+runtime handles and session net ids are regenerated on import. Its raw chunk restoration path
+applies edit deltas without marking chunks save-dirty or replication-dirty merely because state was
+imported. That path applies to an already resident baseline; if no chunk exists, it creates an empty
+one. Normal streamed world loading must generate the deterministic baseline first and use
 `insert_generated_with_saved_edits` so the first saved `previous` cell is checked against it.
 
 `SaveBinaryCodec` can encode and decode the current `SaveSnapshot` as a versioned binary
