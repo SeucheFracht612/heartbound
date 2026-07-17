@@ -39,6 +39,21 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
                             std::make_move_iterator(results.end()));
     auto movement_messages =
         session_.drain_replication_messages(movement::movement_snapshot_payload_type);
+    auto assignments =
+        session_.drain_replication_messages(movement::player_assignment_payload_type);
+    for (const auto& assignment_message : assignments) {
+        auto assignment = movement::player_assignment_from_transport(assignment_message);
+        if (!assignment) {
+            return core::Result<ClientRuntimeStats>::failure(assignment.error().code,
+                                                             assignment.error().message);
+        }
+        if (local_player_net_id_.is_valid() && local_player_net_id_ != assignment.value()) {
+            return core::Result<ClientRuntimeStats>::failure(
+                "client_runtime.player_reassigned",
+                "connected client received a conflicting local player assignment");
+        }
+        local_player_net_id_ = assignment.value();
+    }
     std::uint32_t movement_snapshot_count = 0;
     for (const auto& message : movement_messages) {
         auto snapshot = movement::movement_snapshot_from_transport(message);
@@ -100,6 +115,14 @@ const movement::PlayerControllerSnapshot*
 ClientRuntime::player_snapshot(core::NetId player_net_id) const noexcept {
     const auto found = movement_snapshots_.find(player_net_id.value());
     return found == movement_snapshots_.end() ? nullptr : &found->second;
+}
+
+core::NetId ClientRuntime::local_player_net_id() const noexcept {
+    return local_player_net_id_;
+}
+
+const movement::PlayerControllerSnapshot* ClientRuntime::local_player_snapshot() const noexcept {
+    return player_snapshot(local_player_net_id_);
 }
 
 std::vector<const movement::PlayerControllerSnapshot*> ClientRuntime::movement_snapshots() const {

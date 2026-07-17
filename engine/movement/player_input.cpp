@@ -207,4 +207,13 @@ void PlayerInputSampler::set_look_sensitivity(double centidegrees_per_pixel) noe
     }
 }
 
+void PlayerInputSampler::set_orientation(double yaw_centidegrees,
+                                         double pitch_centidegrees) noexcept {
+    if (!std::isfinite(yaw_centidegrees) || !std::isfinite(pitch_centidegrees)) {
+        return;
+    }
+    yaw_centidegrees_ = std::remainder(yaw_centidegrees, 36'000.0);
+    pitch_centidegrees_ = std::clamp(pitch_centidegrees, -8'900.0, 8'900.0);
+}
+
 } // namespace heartstead::movement

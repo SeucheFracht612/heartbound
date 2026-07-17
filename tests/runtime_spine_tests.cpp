@@ -126,6 +126,8 @@ void test_authoritative_player_input_moves_and_replicates() {
     const auto* player_before = session->server()->player_for_client(client_id);
     assert(player_before != nullptr);
     const auto player_net_id = player_before->net_id;
+    assert(session->client()->local_player_net_id() == player_net_id);
+    assert(session->client()->local_player_snapshot() != nullptr);
     const auto start = player_before->state.position;
 
     movement::PlayerInputFrame input;

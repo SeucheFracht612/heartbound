@@ -548,4 +548,30 @@ movement_snapshot_from_transport(const net::TransportEnvelope& envelope,
     return PlayerControllerSnapshotTextCodec::decode(envelope.message.payload, config);
 }
 
+net::TransportMessage make_player_assignment_message(core::NetId player_net_id,
+                                                      std::uint64_t sequence,
+                                                      std::int64_t timestamp_ms) {
+    return {net::TransportMessageKind::replication, net::TransportChannel::reliable, sequence,
+            std::string(player_assignment_payload_type), std::to_string(player_net_id.value()),
+            timestamp_ms};
+}
+
+core::Result<core::NetId>
+player_assignment_from_transport(const net::TransportEnvelope& envelope) {
+    if (envelope.message.kind != net::TransportMessageKind::replication ||
+        envelope.message.channel != net::TransportChannel::reliable ||
+        envelope.message.payload_type != player_assignment_payload_type) {
+        return core::Result<core::NetId>::failure(
+            "player_assignment.invalid_transport",
+            "transport envelope is not a player assignment");
+    }
+    auto value = parse_number<std::uint64_t>(envelope.message.payload, "player_net_id");
+    if (!value || value.value() == 0) {
+        return core::Result<core::NetId>::failure(
+            !value ? value.error().code : "player_assignment.invalid_player",
+            !value ? value.error().message : "assigned player net id must be valid");
+    }
+    return core::Result<core::NetId>::success(core::NetId::from_value(value.value()));
+}
+
 } // namespace heartstead::movement

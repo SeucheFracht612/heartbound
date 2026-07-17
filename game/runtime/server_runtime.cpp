@@ -603,6 +603,39 @@ core::Status ServerRuntime::send_initial_chunks(core::NetId client_id) {
             }
         }
     }
+    const auto* local_player = player_for_client(client_id);
+    if (local_player == nullptr) {
+        return core::Status::failure("server_runtime.player_record_missing",
+                                     "connected client has no player assignment");
+    }
+    auto assignment_sequence = reserve_custom_replication_sequence();
+    if (!assignment_sequence) {
+        return core::Status::failure(assignment_sequence.error().code,
+                                     assignment_sequence.error().message);
+    }
+    auto assignment_status = host_.send_replication_message(
+        client_id, movement::make_player_assignment_message(
+                       local_player->net_id, assignment_sequence.value(), current_time_ms_));
+    if (!assignment_status) {
+        return assignment_status;
+    }
+    for (const auto* player : players_.records()) {
+        movement::PlayerControllerSnapshot snapshot;
+        snapshot.player_net_id = player->net_id;
+        snapshot.state = player->state;
+        snapshot.last_processed_input_sequence = player->state.last_input_sequence;
+        snapshot.collision_world_revision = collision_world_revision();
+        auto sequence = reserve_custom_replication_sequence();
+        if (!sequence) {
+            return core::Status::failure(sequence.error().code, sequence.error().message);
+        }
+        auto status = host_.send_replication_message(
+            client_id, movement::make_movement_snapshot_message(
+                           snapshot, current_time_ms_, sequence.value()));
+        if (!status) {
+            return status;
+        }
+    }
     return core::Status::ok();
 }
 

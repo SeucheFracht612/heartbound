@@ -18,6 +18,7 @@ inline constexpr std::uint16_t player_controller_snapshot_version = 1;
 inline constexpr std::string_view movement_input_payload_type = "movement.input.v1";
 inline constexpr std::string_view movement_snapshot_payload_type = "movement.snapshot.v1";
 inline constexpr std::string_view movement_input_bundle_payload_type = "movement.input_bundle.v1";
+inline constexpr std::string_view player_assignment_payload_type = "movement.player_assignment.v1";
 
 struct PlayerInputBundle {
     std::vector<PlayerInputFrame> frames;
@@ -111,5 +112,10 @@ make_movement_snapshot_message(const PlayerControllerSnapshot& snapshot,
 [[nodiscard]] core::Result<PlayerControllerSnapshot>
 movement_snapshot_from_transport(const net::TransportEnvelope& envelope,
                                  const PlayerMovementConfig& config = {});
+[[nodiscard]] net::TransportMessage make_player_assignment_message(core::NetId player_net_id,
+                                                                   std::uint64_t sequence,
+                                                                   std::int64_t timestamp_ms);
+[[nodiscard]] core::Result<core::NetId>
+player_assignment_from_transport(const net::TransportEnvelope& envelope);
 
 } // namespace heartstead::movement

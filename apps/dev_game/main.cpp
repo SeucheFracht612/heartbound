@@ -1,79 +1,408 @@
 #include "engine/content/content_validation.hpp"
+#include "engine/core/logging.hpp"
+#include "engine/input/input_action.hpp"
+#include "engine/movement/player_camera.hpp"
+#include "engine/movement/player_input.hpp"
+#include "engine/platform/platform.hpp"
+#include "engine/renderer/renderer.hpp"
+#include "engine/renderer/shaders/spirv_loader.hpp"
+#include "game/features/interaction/voxel_raycast.hpp"
 #include "game/runtime/game_runtime.hpp"
 
+#include <algorithm>
+#include <array>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <optional>
+#include <string>
 #include <string_view>
+#include <thread>
+#include <vector>
 
 namespace {
 
-std::uint32_t parse_frame_count(int argc, char** argv) {
-    if (argc != 3 || std::string_view(argv[1]) != "--frames") {
-        return 120;
+using namespace heartstead;
+
+struct LaunchOptions {
+    bool headless = false;
+    std::optional<std::uint32_t> maximum_frames;
+};
+
+LaunchOptions parse_options(int argc, char** argv) {
+    LaunchOptions options;
+    for (int index = 1; index < argc; ++index) {
+        const auto argument = std::string_view(argv[index]);
+        if (argument == "--headless") {
+            options.headless = true;
+        } else if (argument == "--frames" && index + 1 < argc) {
+            const auto value = std::string_view(argv[++index]);
+            std::uint32_t frames = 0;
+            const auto [end, error] =
+                std::from_chars(value.data(), value.data() + value.size(), frames);
+            if (error == std::errc{} && end == value.data() + value.size() && frames > 0) {
+                options.maximum_frames = frames;
+                // CI smoke runs historically use only --frames and must not require a display.
+                options.headless = true;
+            }
+        }
     }
-    std::uint32_t frames = 0;
-    const auto value = std::string_view(argv[2]);
-    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), frames);
-    return error == std::errc{} && end == value.data() + value.size() && frames > 0 ? frames : 120;
+    return options;
 }
 
-int fail(const heartstead::core::Error& error) {
+int fail(const core::Error& error) {
     std::cerr << error.code << ": " << error.message << '\n';
     return 1;
 }
 
-} // namespace
+int fail(std::string message) {
+    std::cerr << message << '\n';
+    return 1;
+}
 
-int main(int argc, char** argv) {
-    const auto content = heartstead::content::ContentValidation::validate(
-        std::filesystem::path(HEARTSTEAD_SOURCE_ROOT));
-    if (content.has_errors()) {
-        std::cerr << "content validation failed\n";
-        return 1;
-    }
-    auto runtime = heartstead::game::GameRuntime::initialize(
-        heartstead::game::GameRuntimeConfig{}, content);
-    if (!runtime) {
-        return fail(runtime.error());
-    }
-    auto metadata = heartstead::content::save_metadata_from_content_report(
-        content, "development", 0x4845415254535445ULL);
+core::Result<game::GameRuntime>
+create_runtime(const content::ContentValidationReport& content_report) {
+    return game::GameRuntime::initialize(game::GameRuntimeConfig{}, content_report);
+}
+
+core::Status start_runtime(game::GameRuntime& runtime,
+                           const content::ContentValidationReport& content_report,
+                           bool headless) {
+    auto metadata = content::save_metadata_from_content_report(
+        content_report, "development", 0x4845415254535445ULL);
     if (!metadata) {
-        return fail(metadata.error());
+        return core::Status::failure(metadata.error().code, metadata.error().message);
     }
-
-    heartstead::game::RuntimeConfiguration config;
+    game::RuntimeConfiguration config;
     config.create_server = true;
     config.create_client = true;
+    config.create_renderer = !headless;
     config.use_in_memory_transport = true;
-    config.headless = true;
-    heartstead::game::SessionRequest request;
+    config.headless = headless;
+    game::SessionRequest request;
     request.metadata = std::move(metadata).value();
-    auto status = runtime.value().start_session(config, std::move(request));
-    if (!status) {
-        return fail(status.error());
-    }
+    return runtime.start_session(config, std::move(request));
+}
 
-    const auto frame_count = parse_frame_count(argc, argv);
+int run_headless(game::GameRuntime& runtime, std::uint32_t frame_count) {
     std::uint64_t simulated_us = 0;
-    heartstead::game::RuntimeFrameStats last_frame;
+    game::RuntimeFrameStats last_frame;
     for (std::uint32_t frame = 0; frame < frame_count; ++frame) {
         simulated_us += 16'667;
-        auto result = runtime.value().run_frame(
+        auto result = runtime.run_frame(
             {16'667, static_cast<std::int64_t>(simulated_us / 1000U)});
         if (!result) {
             return fail(result.error());
         }
         last_frame = std::move(result).value();
     }
-
     std::cout << "development runtime: frames=" << frame_count
               << " authoritative_tick=" << last_frame.authoritative_world_tick
               << " local_client="
-              << (runtime.value().session()->client()->is_connected() ? "connected" : "offline")
+              << (runtime.session()->client()->is_connected() ? "connected" : "offline")
               << '\n';
-    status = runtime.value().shutdown();
+    auto status = runtime.shutdown();
     return status ? 0 : fail(status.error());
+}
+
+struct ShaderSet {
+    std::vector<std::uint32_t> terrain_vertex;
+    std::vector<std::uint32_t> terrain_fragment;
+    std::vector<std::uint32_t> static_vertex;
+    std::vector<std::uint32_t> static_fragment;
+    std::vector<std::uint32_t> debug_vertex;
+    std::vector<std::uint32_t> debug_fragment;
+    std::vector<std::uint32_t> ui_vertex;
+    std::vector<std::uint32_t> ui_fragment;
+};
+
+core::Result<ShaderSet> load_shaders() {
+    const auto root = std::filesystem::path{HEARTSTEAD_DEV_GAME_ASSET_DIR} / "shaders";
+    const std::array paths{
+        root / "terrain.vert.spv",    root / "terrain.frag.spv",
+        root / "static_mesh.vert.spv", root / "static_mesh.frag.spv",
+        root / "debug_line.vert.spv", root / "debug_line.frag.spv",
+        root / "ui.vert.spv",         root / "ui.frag.spv",
+    };
+    std::array<core::Result<std::vector<std::uint32_t>>, 8> loaded{
+        renderer::shaders::load_spirv_file(paths[0]),
+        renderer::shaders::load_spirv_file(paths[1]),
+        renderer::shaders::load_spirv_file(paths[2]),
+        renderer::shaders::load_spirv_file(paths[3]),
+        renderer::shaders::load_spirv_file(paths[4]),
+        renderer::shaders::load_spirv_file(paths[5]),
+        renderer::shaders::load_spirv_file(paths[6]),
+        renderer::shaders::load_spirv_file(paths[7]),
+    };
+    for (std::size_t index = 0; index < loaded.size(); ++index) {
+        if (!loaded[index]) {
+            return core::Result<ShaderSet>::failure(
+                loaded[index].error().code,
+                "failed to load " + paths[index].string() + ": " + loaded[index].error().message);
+        }
+    }
+    ShaderSet result;
+    result.terrain_vertex = std::move(loaded[0]).value();
+    result.terrain_fragment = std::move(loaded[1]).value();
+    result.static_vertex = std::move(loaded[2]).value();
+    result.static_fragment = std::move(loaded[3]).value();
+    result.debug_vertex = std::move(loaded[4]).value();
+    result.debug_fragment = std::move(loaded[5]).value();
+    result.ui_vertex = std::move(loaded[6]).value();
+    result.ui_fragment = std::move(loaded[7]).value();
+    return core::Result<ShaderSet>::success(std::move(result));
+}
+
+core::Status submit_gameplay_ui(renderer::UiRenderer& ui,
+                                renderer::rhi::RenderExtent extent) {
+    const auto center_x = static_cast<float>(extent.width) * 0.5F;
+    const auto center_y = static_cast<float>(extent.height) * 0.5F;
+    auto status = ui.submit_quad({{center_x - 1.0F, center_y - 8.0F},
+                                  {center_x + 1.0F, center_y + 8.0F},
+                                  {}, {1.0F, 1.0F}, {1.0F, 1.0F, 1.0F, 0.9F}});
+    if (!status) {
+        return status;
+    }
+    status = ui.submit_quad({{center_x - 8.0F, center_y - 1.0F},
+                             {center_x + 8.0F, center_y + 1.0F},
+                             {}, {1.0F, 1.0F}, {1.0F, 1.0F, 1.0F, 0.9F}});
+    if (!status) {
+        return status;
+    }
+
+    constexpr float slot_size = 42.0F;
+    constexpr float slot_gap = 4.0F;
+    constexpr float slot_count = 9.0F;
+    const auto total_width = slot_count * slot_size + (slot_count - 1.0F) * slot_gap;
+    const auto start_x = center_x - total_width * 0.5F;
+    const auto y = static_cast<float>(extent.height) - slot_size - 18.0F;
+    for (std::uint32_t slot = 0; slot < 9; ++slot) {
+        const auto x = start_x + static_cast<float>(slot) * (slot_size + slot_gap);
+        const auto color = slot == 0 ? std::array{0.85F, 0.72F, 0.24F, 0.9F}
+                                     : std::array{0.08F, 0.10F, 0.13F, 0.78F};
+        status = ui.submit_quad({{x, y}, {x + slot_size, y + slot_size}, {}, {1.0F, 1.0F}, color});
+        if (!status) {
+            return status;
+        }
+    }
+    return core::Status::ok();
+}
+
+renderer::RenderCamera render_camera_from(const movement::PlayerCameraFrame& frame) {
+    renderer::RenderCamera camera;
+    camera.floating_origin = frame.floating_origin;
+    camera.local_position = {static_cast<float>(frame.position.local_offset.x),
+                             static_cast<float>(frame.position.local_offset.y),
+                             static_cast<float>(frame.position.local_offset.z)};
+    camera.view = frame.view;
+    camera.projection = frame.projection;
+    camera.view_projection = frame.view_projection;
+    return camera;
+}
+
+int run_native(game::GameRuntime& runtime, const content::ContentValidationReport& content_report,
+               const LaunchOptions& options) {
+    using namespace renderer::rhi;
+    auto active_platform = platform::create_platform({platform::PlatformBackend::native});
+    if (!active_platform) {
+        return fail(active_platform.error());
+    }
+    RenderExtent extent{1280, 720};
+    auto window = active_platform.value()->create_window(
+        {"Heartstead Development Game", extent.width, extent.height, true});
+    if (!window) {
+        return fail(window.error());
+    }
+    auto native_handle = active_platform.value()->native_window_handle(window.value());
+    if (!native_handle) {
+        return fail("native platform did not expose a Vulkan window handle");
+    }
+    RenderDeviceDesc device_desc;
+    device_desc.backend = RenderBackend::vulkan;
+    device_desc.application_name = "Heartstead Development Game";
+    device_desc.initial_extent = extent;
+    device_desc.present_mode = PresentMode::fifo;
+    device_desc.enable_validation = true;
+    device_desc.native_window = *native_handle;
+    auto device = create_render_device(device_desc);
+    if (!device) {
+        return fail(device.error());
+    }
+    auto shaders = load_shaders();
+    if (!shaders) {
+        return fail(shaders.error());
+    }
+    renderer::RendererInitDesc renderer_desc;
+    renderer_desc.device = std::move(device).value();
+    renderer_desc.terrain_vertex_spirv = std::move(shaders.value().terrain_vertex);
+    renderer_desc.terrain_fragment_spirv = std::move(shaders.value().terrain_fragment);
+    renderer_desc.static_mesh_vertex_spirv = std::move(shaders.value().static_vertex);
+    renderer_desc.static_mesh_fragment_spirv = std::move(shaders.value().static_fragment);
+    renderer_desc.debug_vertex_spirv = std::move(shaders.value().debug_vertex);
+    renderer_desc.debug_fragment_spirv = std::move(shaders.value().debug_fragment);
+    renderer_desc.ui_vertex_spirv = std::move(shaders.value().ui_vertex);
+    renderer_desc.ui_fragment_spirv = std::move(shaders.value().ui_fragment);
+    renderer_desc.voxel_palette = &content_report.voxel_palette;
+    renderer::Renderer renderer;
+    auto status = renderer.initialize(std::move(renderer_desc));
+    if (!status) {
+        return fail(status.error());
+    }
+
+    status = active_platform.value()->set_cursor_capture(window.value(), true);
+    if (!status) {
+        return fail(status.error());
+    }
+    auto actions = input::InputActionMap::gameplay_defaults();
+    movement::PlayerInputSampler input_sampler;
+    input_sampler.set_orientation(0.0, -2'000.0);
+    movement::PlayerCameraRig camera_rig;
+    const auto clay = core::PrototypeId::parse("base:voxels/clay");
+    if (!clay.has_value()) {
+        return fail("base clay prototype is unavailable");
+    }
+
+    auto previous_time = std::chrono::steady_clock::now();
+    std::uint64_t frame_count = 0;
+    std::uint64_t input_tick = 0;
+    while (!active_platform.value()->should_quit() &&
+           (!options.maximum_frames.has_value() || frame_count < *options.maximum_frames)) {
+        active_platform.value()->begin_frame();
+        while (auto event = active_platform.value()->poll_event()) {
+            if (event->kind == platform::PlatformEventKind::quit_requested ||
+                event->kind == platform::PlatformEventKind::window_closed) {
+                active_platform.value()->request_quit();
+            } else if (event->kind == platform::PlatformEventKind::window_resized &&
+                       event->window_id == window.value()) {
+                extent = {event->width, event->height};
+                if (extent.is_valid()) {
+                    status = renderer.resize(extent);
+                    if (!status) {
+                        return fail(status.error());
+                    }
+                }
+            }
+        }
+        const auto now = std::chrono::steady_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - previous_time);
+        previous_time = now;
+        const auto frame_us = static_cast<std::uint64_t>(
+            std::clamp<std::int64_t>(elapsed.count(), 1, 100'000));
+        auto input_snapshot = active_platform.value()->input_snapshot(window.value());
+        if (!input_snapshot) {
+            return fail("platform did not provide an input snapshot");
+        }
+        const auto action_frame = actions.evaluate(*input_snapshot);
+        if (action_frame[input::InputAction::close_or_pause].pressed) {
+            active_platform.value()->request_quit();
+        }
+        auto player_input = input_sampler.sample(*input_snapshot, ++input_tick);
+        status = runtime.session()->submit_player_input(player_input,
+                                                        active_platform.value()->clock().now_ms());
+        if (!status) {
+            return fail(status.error());
+        }
+        auto runtime_frame = runtime.run_frame(
+            {frame_us, active_platform.value()->clock().now_ms()});
+        if (!runtime_frame) {
+            return fail(runtime_frame.error());
+        }
+        const auto* player = runtime.session()->client()->local_player_snapshot();
+        if (player == nullptr) {
+            return fail("client has no assigned player snapshot");
+        }
+        if (extent.is_valid()) {
+            auto camera_frame = camera_rig.evaluate(player->state,
+                                                    movement::PlayerCameraPerspective::first_person,
+                                                    extent.width, extent.height);
+            if (!camera_frame) {
+                return fail(camera_frame.error());
+            }
+            if (action_frame[input::InputAction::primary_action].pressed ||
+                action_frame[input::InputAction::secondary_action].pressed) {
+                auto selection = game::interaction::raycast_voxels(
+                    runtime.session()->client()->world().chunks(),
+                    {camera_frame.value().position, camera_frame.value().forward, 6.0});
+                if (!selection) {
+                    return fail(selection.error());
+                }
+                if (selection.value().hit.has_value()) {
+                    if (action_frame[input::InputAction::primary_action].pressed) {
+                        status = runtime.session()->submit_remove_voxel(
+                            {selection.value().hit->block},
+                            active_platform.value()->clock().now_ms());
+                    } else {
+                        status = runtime.session()->submit_place_voxel(
+                            {selection.value().hit->adjacent_block, *clay},
+                            active_platform.value()->clock().now_ms());
+                    }
+                    if (!status) {
+                        return fail(status.error());
+                    }
+                }
+            }
+            auto camera = render_camera_from(camera_frame.value());
+            status = renderer.synchronize_chunks(runtime.session()->client()->world(), camera);
+            if (!status) {
+                return fail(status.error());
+            }
+            if (auto* ui = renderer.ui_renderer(); ui != nullptr) {
+                status = submit_gameplay_ui(*ui, extent);
+                if (!status) {
+                    return fail(status.error());
+                }
+            }
+            auto rendered = renderer.render_frame(
+                {camera, static_cast<float>(runtime_frame.value().fixed_step.interpolation_alpha),
+                 static_cast<float>(frame_us) / 1'000'000.0F});
+            if (!rendered) {
+                return fail(rendered.error());
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        ++frame_count;
+    }
+
+    status = renderer.shutdown();
+    if (!status) {
+        return fail(status.error());
+    }
+    status = runtime.shutdown();
+    if (!status) {
+        return fail(status.error());
+    }
+    if (const auto* state = active_platform.value()->find_window(window.value());
+        state != nullptr && state->open) {
+        status = active_platform.value()->close_window(window.value());
+        if (!status) {
+            return fail(status.error());
+        }
+    }
+    return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    const auto options = parse_options(argc, argv);
+    const auto content_report = heartstead::content::ContentValidation::validate(
+        std::filesystem::path(HEARTSTEAD_SOURCE_ROOT));
+    if (content_report.has_errors()) {
+        return fail("content validation failed");
+    }
+    auto runtime = create_runtime(content_report);
+    if (!runtime) {
+        return fail(runtime.error());
+    }
+    auto status = start_runtime(runtime.value(), content_report, options.headless);
+    if (!status) {
+        return fail(status.error());
+    }
+    if (options.headless) {
+        return run_headless(runtime.value(), options.maximum_frames.value_or(120));
+    }
+    return run_native(runtime.value(), content_report, options);
 }

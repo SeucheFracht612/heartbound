@@ -44,6 +44,8 @@ class ClientRuntime final {
     [[nodiscard]] std::span<const net::HostSessionCommandResult> command_results() const noexcept;
     [[nodiscard]] const movement::PlayerControllerSnapshot*
     player_snapshot(core::NetId player_net_id) const noexcept;
+    [[nodiscard]] core::NetId local_player_net_id() const noexcept;
+    [[nodiscard]] const movement::PlayerControllerSnapshot* local_player_snapshot() const noexcept;
     [[nodiscard]] std::vector<const movement::PlayerControllerSnapshot*>
     movement_snapshots() const;
     void clear_command_results() noexcept;
@@ -68,6 +70,7 @@ class ClientRuntime final {
     net::ClientSession session_;
     std::vector<net::HostSessionCommandResult> command_results_;
     std::unordered_map<std::uint64_t, movement::PlayerControllerSnapshot> movement_snapshots_;
+    core::NetId local_player_net_id_;
     std::map<world::ChunkCoord, ChunkSnapshotAssembly> chunk_snapshot_assemblies_;
     std::map<world::ChunkCoord, std::pair<world::ChunkIdentity, std::uint64_t>> remote_chunks_;
     std::uint32_t messages_since_sync_ = 0;

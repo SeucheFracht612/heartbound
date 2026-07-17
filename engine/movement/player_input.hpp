@@ -66,6 +66,7 @@ class PlayerInputSampler {
     [[nodiscard]] PlayerInputFrame sample(const platform::WindowInputSnapshot& snapshot,
                                           std::uint64_t tick, bool include_pressed = true);
     void set_look_sensitivity(double centidegrees_per_pixel) noexcept;
+    void set_orientation(double yaw_centidegrees, double pitch_centidegrees) noexcept;
 
   private:
     PlayerInputBindings bindings_;
