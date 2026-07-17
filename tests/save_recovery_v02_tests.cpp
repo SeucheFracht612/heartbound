@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 namespace {
 
@@ -85,10 +86,32 @@ void test_placeholders_round_trip_and_load_without_mod() {
     assert(exported.value().missing_prototypes.size() == 2);
 }
 
+void test_recovery_is_kind_correct_and_idempotent() {
+    auto snapshot = missing_mod_snapshot();
+    heartstead::modding::GenericPrototype wrong_kind;
+    wrong_kind.kind = heartstead::modding::PrototypeKinds::item;
+    wrong_kind.id = id("removedmod:build_pieces/storm_furnace");
+    wrong_kind.display_name = "Wrong-kind collision";
+    heartstead::modding::PrototypeRegistry registry;
+    assert(!registry.build({std::move(wrong_kind)}).has_errors());
+
+    auto first_recovery = heartstead::save::preserve_missing_prototypes(snapshot, registry);
+    assert(first_recovery);
+    assert(snapshot.build_pieces.empty());
+    assert(snapshot.missing_prototypes.size() == 2);
+    const auto recovered_snapshot = heartstead::save::SaveTextCodec::encode_snapshot(snapshot);
+
+    auto second_recovery = heartstead::save::preserve_missing_prototypes(snapshot, registry);
+    assert(second_recovery);
+    assert(second_recovery.value().placeholder_count == 2);
+    assert(heartstead::save::SaveTextCodec::encode_snapshot(snapshot) == recovered_snapshot);
+}
+
 } // namespace
 
 int main() {
     test_missing_objects_become_opaque_placeholders();
     test_placeholders_round_trip_and_load_without_mod();
+    test_recovery_is_kind_correct_and_idempotent();
     return 0;
 }

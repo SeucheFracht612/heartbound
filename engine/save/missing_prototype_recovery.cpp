@@ -14,8 +14,7 @@ namespace {
 [[nodiscard]] bool missing_kind(const modding::PrototypeRegistry& prototypes,
                                 const core::PrototypeId& id, std::string_view kind) {
     const auto* prototype = prototypes.find(id);
-    (void)kind;
-    return prototype == nullptr;
+    return prototype == nullptr || prototype->kind != kind;
 }
 
 template <typename AddRecord>
@@ -27,10 +26,15 @@ template <typename AddRecord>
     return SaveTextCodec::encode_snapshot(single);
 }
 
-void add_placeholder(SaveSnapshot& snapshot, world::MissingPrototypeKind kind,
-                     std::uint64_t stable_id, const core::PrototypeId& prototype_id,
-                     world::WorldPosition position, core::SaveId owner_id, std::string blob,
-                     std::string warning) {
+using MissingPlaceholderKey = std::pair<world::MissingPrototypeKind, std::uint64_t>;
+
+void add_placeholder(SaveSnapshot& snapshot, std::set<MissingPlaceholderKey>& placeholder_keys,
+                     world::MissingPrototypeKind kind, std::uint64_t stable_id,
+                     const core::PrototypeId& prototype_id, world::WorldPosition position,
+                     core::SaveId owner_id, std::string blob, std::string warning) {
+    if (!placeholder_keys.emplace(kind, stable_id).second) {
+        return;
+    }
     snapshot.missing_prototypes.push_back(
         {kind, stable_id, prototype_id, position, owner_id, std::move(blob), std::move(warning)});
 }
@@ -40,6 +44,19 @@ void add_placeholder(SaveSnapshot& snapshot, world::MissingPrototypeKind kind,
 core::Result<MissingPrototypeRecoveryReport>
 preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegistry& prototypes) {
     MissingPrototypeRecoveryReport report;
+    std::set<MissingPlaceholderKey> placeholder_keys;
+    for (const auto& missing : snapshot.missing_prototypes) {
+        auto status = missing.validate();
+        if (!status) {
+            return core::Result<MissingPrototypeRecoveryReport>::failure(status.error().code,
+                                                                         status.error().message);
+        }
+        if (!placeholder_keys.emplace(missing.kind, missing.stable_id).second) {
+            return core::Result<MissingPrototypeRecoveryReport>::failure(
+                "save_recovery.duplicate_placeholder",
+                "missing-prototype recovery snapshot contains a duplicate placeholder key");
+        }
+    }
     std::set<std::uint64_t> missing_owner_ids;
     std::map<std::uint64_t, core::PrototypeId> missing_owner_prototypes;
     std::map<std::uint64_t, world::WorldPosition> build_positions;
@@ -49,8 +66,8 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
             continue;
         }
         add_placeholder(
-            snapshot, world::MissingPrototypeKind::build_piece, build.object_id.value(),
-            build.prototype_id, build.transform.position, {},
+            snapshot, placeholder_keys, world::MissingPrototypeKind::build_piece,
+            build.object_id.value(), build.prototype_id, build.transform.position, {},
             record_blob(snapshot,
                         [&build](SaveSnapshot& single) { single.build_pieces.push_back(build); }),
             "build piece prototype is unavailable");
@@ -67,7 +84,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
             continue;
         }
         add_placeholder(
-            snapshot, world::MissingPrototypeKind::entity, entity.save_id.value(),
+            snapshot, placeholder_keys, world::MissingPrototypeKind::entity, entity.save_id.value(),
             entity.prototype_id, entity.transform.position, {},
             record_blob(snapshot,
                         [&entity](SaveSnapshot& single) { single.entities.push_back(entity); }),
@@ -86,7 +103,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
             continue;
         }
         add_placeholder(
-            snapshot, world::MissingPrototypeKind::cargo, cargo.cargo_id.value(),
+            snapshot, placeholder_keys, world::MissingPrototypeKind::cargo, cargo.cargo_id.value(),
             cargo.prototype_id, cargo.position, {},
             record_blob(snapshot,
                         [&cargo](SaveSnapshot& single) { single.cargo_records.push_back(cargo); }),
@@ -104,7 +121,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
         if (!missing_kind(prototypes, workpiece.prototype_id, modding::PrototypeKinds::workpiece)) {
             continue;
         }
-        add_placeholder(snapshot, world::MissingPrototypeKind::workpiece,
+        add_placeholder(snapshot, placeholder_keys, world::MissingPrototypeKind::workpiece,
                         workpiece.workpiece_id.value(), workpiece.prototype_id, {}, {},
                         record_blob(snapshot,
                                     [&workpiece](SaveSnapshot& single) {
@@ -131,7 +148,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
         const auto position = build_positions.contains(assembly.root_build_piece_id.value())
                                   ? build_positions.at(assembly.root_build_piece_id.value())
                                   : world::WorldPosition{};
-        add_placeholder(snapshot, world::MissingPrototypeKind::assembly,
+        add_placeholder(snapshot, placeholder_keys, world::MissingPrototypeKind::assembly,
                         assembly.assembly_id.value(), assembly.prototype_id, position,
                         assembly.root_build_piece_id,
                         record_blob(snapshot,
@@ -165,7 +182,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
         const auto prototype = missing_stack != nullptr
                                    ? missing_stack->prototype_id
                                    : missing_owner_prototypes.at(inventory.owner_id.value());
-        add_placeholder(snapshot, world::MissingPrototypeKind::inventory,
+        add_placeholder(snapshot, placeholder_keys, world::MissingPrototypeKind::inventory,
                         inventory.owner_id.value(), prototype, {}, inventory.owner_id,
                         record_blob(snapshot,
                                     [&inventory](SaveSnapshot& single) {
@@ -187,8 +204,8 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
             continue;
         }
         add_placeholder(
-            snapshot, world::MissingPrototypeKind::process, process.process_id.value(),
-            process.prototype_id, {}, process.owner_id,
+            snapshot, placeholder_keys, world::MissingPrototypeKind::process,
+            process.process_id.value(), process.prototype_id, {}, process.owner_id,
             record_blob(snapshot,
                         [&process](SaveSnapshot& single) { single.processes.push_back(process); }),
             owner_missing ? "process owner prototype is unavailable"
@@ -212,8 +229,8 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
                                   ? build_positions.at(fire.fire_id.value())
                                   : world::WorldPosition{};
         add_placeholder(
-            snapshot, world::MissingPrototypeKind::fire, fire.fire_id.value(), fire.prototype_id,
-            position, fire.fire_id,
+            snapshot, placeholder_keys, world::MissingPrototypeKind::fire, fire.fire_id.value(),
+            fire.prototype_id, position, fire.fire_id,
             record_blob(snapshot, [&fire](SaveSnapshot& single) { single.fires.push_back(fire); }),
             owner_missing ? "fire owner prototype is unavailable"
                           : "fire prototype is unavailable");
