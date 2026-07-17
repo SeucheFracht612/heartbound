@@ -5210,6 +5210,14 @@ void test_dirty_region_tracker() {
     assert(dirty_inspection.find_field("first_region_bounds")->value == "0|0|0..4|2|2");
     assert(dirty_inspection.find_field("first_region_reason")->value == "dig");
 
+    DirtyRegionTracker transitive;
+    assert(transitive.mark_single(DirtyRegionKind::chunk_mesh, {0, 0, 0}, "left"));
+    assert(transitive.mark_single(DirtyRegionKind::chunk_mesh, {4, 0, 0}, "right"));
+    assert(transitive.mark(DirtyRegionKind::chunk_mesh, {{1, 0, 0}, {3, 0, 0}}, "bridge"));
+    assert(transitive.size() == 1);
+    assert((transitive.regions().front().bounds.min == DirtyRegionCoord{0, 0, 0}));
+    assert((transitive.regions().front().bounds.max == DirtyRegionCoord{4, 0, 0}));
+
     const auto expanded = tracker.regions().front().bounds.expanded(1);
     assert(expanded);
     assert(expanded.value().min.x == -1);

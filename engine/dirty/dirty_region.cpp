@@ -20,8 +20,7 @@ namespace {
     return min_a <= saturated_increment(max_b) && min_b <= saturated_increment(max_a);
 }
 
-[[nodiscard]] std::int64_t saturated_subtract(std::int64_t value,
-                                              std::uint32_t amount) noexcept {
+[[nodiscard]] std::int64_t saturated_subtract(std::int64_t value, std::uint32_t amount) noexcept {
     constexpr auto min = std::numeric_limits<std::int64_t>::min();
     const auto delta = static_cast<std::int64_t>(amount);
     if (value < min + delta) {
@@ -82,14 +81,45 @@ core::Status DirtyRegionTracker::mark(DirtyRegionKind kind, DirtyRegionBounds bo
                                      "dirty region bounds are invalid");
     }
 
-    for (auto& region : regions_) {
-        if (region.kind == kind && region.bounds.overlaps_or_touches(bounds)) {
-            region.bounds = region.bounds.merged_with(bounds);
-            if (region.reason.empty()) {
-                region.reason = std::move(reason);
+    std::vector<bool> merge_regions(regions_.size(), false);
+    bool expanded = true;
+    while (expanded) {
+        expanded = false;
+        for (std::size_t index = 0; index < regions_.size(); ++index) {
+            if (merge_regions[index] || regions_[index].kind != kind ||
+                !regions_[index].bounds.overlaps_or_touches(bounds)) {
+                continue;
             }
-            return core::Status::ok();
+            merge_regions[index] = true;
+            bounds = bounds.merged_with(regions_[index].bounds);
+            expanded = true;
         }
+    }
+
+    const auto survivor = std::ranges::find(merge_regions, true);
+    if (survivor != merge_regions.end()) {
+        const auto survivor_index = static_cast<std::size_t>(survivor - merge_regions.begin());
+        auto merged_reason = regions_[survivor_index].reason;
+        if (merged_reason.empty()) {
+            for (std::size_t index = survivor_index + 1; index < regions_.size(); ++index) {
+                if (merge_regions[index] && !regions_[index].reason.empty()) {
+                    merged_reason = regions_[index].reason;
+                    break;
+                }
+            }
+        }
+        if (merged_reason.empty()) {
+            merged_reason = std::move(reason);
+        }
+
+        regions_[survivor_index].bounds = bounds;
+        regions_[survivor_index].reason = std::move(merged_reason);
+        for (std::size_t index = regions_.size(); index-- > survivor_index + 1;) {
+            if (merge_regions[index]) {
+                regions_.erase(regions_.begin() + static_cast<std::ptrdiff_t>(index));
+            }
+        }
+        return core::Status::ok();
     }
 
     regions_.push_back(DirtyRegion{kind, bounds, std::move(reason), next_sequence_});
