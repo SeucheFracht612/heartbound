@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
         }
 
         heartstead::server_logs::FileServerLog logs{std::filesystem::path(argv[1])};
-        auto entries = logs.query_current(*category, filter);
+        auto entries = logs.query_all(*category, filter);
         if (!entries) {
             std::cerr << entries.error().code << ": " << entries.error().message << '\n';
             return 1;

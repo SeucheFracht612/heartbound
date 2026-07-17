@@ -5,6 +5,7 @@
 #include "engine/simulation/world_time.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -15,6 +16,8 @@
 #include <vector>
 
 namespace heartstead::server_logs {
+
+inline constexpr std::size_t server_log_max_query_bytes = 512U * 1024U * 1024U;
 
 enum class ServerLogCategory {
     general,
@@ -48,18 +51,26 @@ struct ServerLogFilter {
     std::string message_contains;
     std::string server_session;
 
+    [[nodiscard]] core::Status validate() const;
     [[nodiscard]] bool matches(const ServerLogEntry& entry) const noexcept;
 };
 
 struct ServerLogConfig {
     std::uintmax_t rotate_after_bytes = 16U * 1024U * 1024U;
     bool rotate_daily = true;
+
+    [[nodiscard]] core::Status validate() const;
+};
+
+struct ServerLogArchiveDecodeOptions {
+    std::size_t maximum_output_bytes = server_log_max_query_bytes;
 };
 
 class ServerLogArchiveCodec {
   public:
     [[nodiscard]] static std::vector<std::uint8_t> encode(std::string_view text);
-    [[nodiscard]] static core::Result<std::string> decode(std::span<const std::uint8_t> bytes);
+    [[nodiscard]] static core::Result<std::string>
+    decode(std::span<const std::uint8_t> bytes, ServerLogArchiveDecodeOptions options = {});
 };
 
 class ServerLogLineCodec {
@@ -74,6 +85,7 @@ class FileServerLog {
 
     [[nodiscard]] const std::filesystem::path& server_root() const noexcept;
     [[nodiscard]] std::filesystem::path current_path(ServerLogCategory category) const;
+    [[nodiscard]] core::Status initialize();
     [[nodiscard]] core::Status append(ServerLogCategory category, ServerLogEntry entry);
     [[nodiscard]] core::Result<std::vector<ServerLogEntry>>
     query_current(ServerLogCategory category, const ServerLogFilter& filter = {}) const;

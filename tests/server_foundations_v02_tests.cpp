@@ -15,6 +15,8 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -22,6 +24,32 @@ namespace {
     const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
     return std::filesystem::temp_directory_path() /
            ("heartstead_" + std::string(label) + "_" + std::to_string(nonce));
+}
+
+[[nodiscard]] heartstead::server_logs::ServerLogEntry
+log_entry(std::string timestamp, heartstead::simulation::WorldTick world_time,
+          std::string message = {}) {
+    heartstead::server_logs::ServerLogEntry entry;
+    entry.real_timestamp_utc = std::move(timestamp);
+    entry.world_time = world_time;
+    entry.world_calendar = "Day 1";
+    entry.event_type = "test_event";
+    entry.server_session = "test_session";
+    entry.message = std::move(message);
+    return entry;
+}
+
+void write_archive(const std::filesystem::path& path,
+                   const heartstead::server_logs::ServerLogEntry& entry) {
+    auto text = heartstead::server_logs::ServerLogLineCodec::encode(entry);
+    text.push_back('\n');
+    const auto bytes = heartstead::server_logs::ServerLogArchiveCodec::encode(text);
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    assert(output);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+    output.close();
+    assert(output);
 }
 
 void test_authoritative_world_time_and_save_round_trip() {
@@ -225,6 +253,171 @@ void test_append_only_admin_and_chat_logs() {
     std::filesystem::remove_all(root.parent_path());
 }
 
+void test_server_log_rotation_and_archive_ordering() {
+    using namespace heartstead;
+    using namespace heartstead::server_logs;
+
+    const auto root = temporary_root("log_rotation") / "server";
+    FileServerLog logs(root, {.rotate_after_bytes = 1024U * 1024U, .rotate_daily = true});
+    assert(logs.append(ServerLogCategory::general,
+                       log_entry("2026-07-16T23:59:59.999Z", 1, "before")));
+    assert(
+        logs.append(ServerLogCategory::general, log_entry("2026-07-17T00:00:00.000Z", 2, "after")));
+
+    auto current = logs.query_current(ServerLogCategory::general);
+    assert(current && current.value().size() == 1);
+    assert(current.value().front().world_time == 2);
+    auto all = logs.query_all(ServerLogCategory::general);
+    assert(all && all.value().size() == 2);
+    assert(all.value()[0].world_time == 1);
+    assert(all.value()[1].world_time == 2);
+
+    std::ifstream index(root / "logs" / "rotated" / "index.log", std::ios::binary);
+    std::string index_line;
+    assert(index && std::getline(index, index_line));
+    assert(index_line.contains("|server|2026-07-16|2026-07-17|"));
+    std::filesystem::remove_all(root.parent_path());
+
+    const auto ordered_root = temporary_root("log_archive_order") / "server";
+    const auto rotated = ordered_root / "logs" / "rotated";
+    std::filesystem::create_directories(rotated);
+    write_archive(rotated / "20260717T120000000Z.chat.10.log.hsz",
+                  log_entry("2026-07-17T12:00:00.010Z", 10));
+    write_archive(rotated / "20260717T120000000Z.chat.2.log.hsz",
+                  log_entry("2026-07-17T12:00:00.002Z", 2));
+    write_archive(rotated / "20260717T120000000Z.server.1.log.hsz",
+                  log_entry("2026-07-17T12:00:00.001Z", 99));
+    FileServerLog ordered_logs(ordered_root);
+    auto ordered = ordered_logs.query_all(ServerLogCategory::chat);
+    assert(ordered && ordered.value().size() == 2);
+    assert(ordered.value()[0].world_time == 2);
+    assert(ordered.value()[1].world_time == 10);
+    std::filesystem::remove_all(ordered_root.parent_path());
+}
+
+void test_server_log_corruption_limits_and_filters_fail_closed() {
+    using namespace heartstead;
+    using namespace heartstead::server_logs;
+
+    ServerLogConfig invalid_config;
+    invalid_config.rotate_after_bytes = 0;
+    assert(!invalid_config.validate());
+    invalid_config.rotate_after_bytes = std::numeric_limits<std::uintmax_t>::max();
+    assert(!invalid_config.validate());
+    FileServerLog invalid_logs(temporary_root("invalid_log_config"), invalid_config);
+    assert(!invalid_logs.initialize());
+
+    const auto compressed = ServerLogArchiveCodec::encode("aaaa");
+    auto decode_limited = ServerLogArchiveCodec::decode(compressed, {.maximum_output_bytes = 3});
+    assert(!decode_limited);
+    assert(decode_limited.error().code == "server_log.archive_too_large");
+
+    ServerLogFilter reversed_real_time;
+    reversed_real_time.real_time_from_utc = "2026-07-18T00:00:00.000Z";
+    reversed_real_time.real_time_to_utc = "2026-07-17T00:00:00.000Z";
+    assert(!reversed_real_time.validate());
+    ServerLogFilter reversed_world_time;
+    reversed_world_time.world_time_from = 2;
+    reversed_world_time.world_time_to = 1;
+    assert(!reversed_world_time.validate());
+
+    auto oversized = log_entry("2026-07-17T00:00:00.000Z", 1);
+    for (std::size_t index = 0; index < 17; ++index) {
+        oversized.metadata.emplace("field_" + std::to_string(index), std::string(64U * 1024U, 'a'));
+    }
+    const auto oversized_status = oversized.validate();
+    assert(!oversized_status);
+    assert(oversized_status.error().code == "server_log.line_too_large");
+
+    const auto blank_root = temporary_root("log_blank") / "server";
+    std::filesystem::create_directories(blank_root / "logs");
+    {
+        std::ofstream output(blank_root / "logs" / "current.log", std::ios::binary);
+        output << ServerLogLineCodec::encode(log_entry("2026-07-17T00:00:00.000Z", 1)) << "\n\n";
+    }
+    FileServerLog blank_logs(blank_root);
+    auto blank_current = blank_logs.query_current(ServerLogCategory::general);
+    assert(!blank_current && blank_current.error().code == "server_log.invalid_line");
+    auto blank_all = blank_logs.query_all(ServerLogCategory::general);
+    assert(!blank_all && blank_all.error().code == "server_log.invalid_line");
+    auto invalid_filter_query =
+        blank_logs.query_current(ServerLogCategory::general, reversed_real_time);
+    assert(!invalid_filter_query &&
+           invalid_filter_query.error().code == "server_log.invalid_filter");
+    auto invalid_category = blank_logs.query_current(static_cast<ServerLogCategory>(99));
+    assert(!invalid_category && invalid_category.error().code == "server_log.invalid_category");
+    std::filesystem::remove_all(blank_root.parent_path());
+
+    const auto malformed_root = temporary_root("log_bad_archive") / "server";
+    const auto malformed_rotated = malformed_root / "logs" / "rotated";
+    std::filesystem::create_directories(malformed_rotated);
+    write_archive(malformed_rotated / "forged.chat.payload.hsz",
+                  log_entry("2026-07-17T00:00:00.000Z", 1));
+    FileServerLog malformed_logs(malformed_root);
+    auto malformed_initialization = malformed_logs.initialize();
+    assert(!malformed_initialization &&
+           malformed_initialization.error().code == "server_log.invalid_archive_name");
+    auto malformed = malformed_logs.query_all(ServerLogCategory::chat);
+    assert(!malformed && malformed.error().code == "server_log.invalid_archive_name");
+    std::filesystem::remove_all(malformed_root.parent_path());
+}
+
+void test_server_logs_reject_symbolic_links_and_oversized_current_files() {
+    using namespace heartstead;
+    using namespace heartstead::server_logs;
+
+    const auto parent = temporary_root("log_symlink");
+    const auto root = parent / "server";
+    std::filesystem::create_directories(root / "logs");
+    const auto outside = parent / "outside.log";
+    {
+        std::ofstream output(outside, std::ios::binary);
+        output << ServerLogLineCodec::encode(log_entry("2026-07-17T00:00:00.000Z", 1)) << '\n';
+    }
+    std::error_code link_error;
+    std::filesystem::create_symlink(outside, root / "logs" / "current.log", link_error);
+    if (!link_error) {
+        FileServerLog linked_logs(root);
+        auto linked_initialization = linked_logs.initialize();
+        assert(!linked_initialization &&
+               linked_initialization.error().code == "server_log.unsafe_symlink");
+        auto linked_query = linked_logs.query_current(ServerLogCategory::general);
+        assert(!linked_query && linked_query.error().code == "server_log.unsafe_symlink");
+        auto linked_append = linked_logs.append(ServerLogCategory::general,
+                                                log_entry("2026-07-17T00:00:01.000Z", 2));
+        assert(!linked_append && linked_append.error().code == "server_log.unsafe_symlink");
+    }
+    std::filesystem::remove_all(parent);
+
+    const auto rotated_parent = temporary_root("log_rotated_symlink");
+    const auto rotated_root = rotated_parent / "server";
+    const auto outside_directory = rotated_parent / "outside";
+    std::filesystem::create_directories(rotated_root / "logs");
+    std::filesystem::create_directory(outside_directory);
+    link_error.clear();
+    std::filesystem::create_directory_symlink(outside_directory, rotated_root / "logs" / "rotated",
+                                              link_error);
+    if (!link_error) {
+        FileServerLog linked_rotated_logs(rotated_root);
+        auto linked_initialization = linked_rotated_logs.initialize();
+        assert(!linked_initialization &&
+               linked_initialization.error().code == "server_log.unsafe_symlink");
+        auto linked_query = linked_rotated_logs.query_all(ServerLogCategory::general);
+        assert(!linked_query && linked_query.error().code == "server_log.unsafe_symlink");
+    }
+    std::filesystem::remove_all(rotated_parent);
+
+    const auto large_root = temporary_root("log_large_current") / "server";
+    FileServerLog large_logs(large_root);
+    assert(large_logs.append(ServerLogCategory::general, log_entry("2026-07-17T00:00:00.000Z", 1)));
+    std::filesystem::resize_file(large_logs.current_path(ServerLogCategory::general),
+                                 server_log_max_query_bytes + 1U);
+    auto oversized_append =
+        large_logs.append(ServerLogCategory::general, log_entry("2026-07-17T00:00:01.000Z", 2));
+    assert(!oversized_append && oversized_append.error().code == "server_log.file_too_large");
+    std::filesystem::remove_all(large_root.parent_path());
+}
+
 void test_log_sink_may_reconfigure_itself() {
     using namespace heartstead::core;
     bool called = false;
@@ -245,6 +438,9 @@ int main() {
     test_layered_server_map_discovery();
     test_server_side_player_profile_persistence();
     test_append_only_admin_and_chat_logs();
+    test_server_log_rotation_and_archive_ordering();
+    test_server_log_corruption_limits_and_filters_fail_closed();
+    test_server_logs_reject_symbolic_links_and_oversized_current_files();
     test_log_sink_may_reconfigure_itself();
     return 0;
 }

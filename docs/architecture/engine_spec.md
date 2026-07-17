@@ -222,8 +222,20 @@ independent of clients. Chat is written before or atomically with broadcast.
 server/logs/current.log
 server/logs/chat/current.log
 server/logs/audit/current.log
-server/logs/rotated/<timestamp>.<category>.log.zst
+server/logs/rotated/<timestamp>.<category>.<sequence>.log.hsz
+server/logs/rotated/index.log
 ```
+
+The current implementation uses the engine-owned, lossless `HSLZ1` archive codec; `.hsz` is not a
+zstd stream. Queries scan structurally valid archive names in timestamp/numeric-sequence order and
+then the current file. Reads, expanded archives, result counts, directory scans, and archive counts
+are bounded. Log roots, category directories, current files, archive files, temporary files, and
+the rotation index reject symbolic links. Rotation publishes a complete archive before removing the
+current file, detects concurrent source growth, and removes a newly published archive if the current
+file cannot be removed so a query cannot return duplicate history. The index is atomically replaced
+after a successful rotation; archives remain the authoritative query source if index publication
+fails. Authoritative-server startup creates and opens every category log and the index, then validates
+the bounded archive catalog before the transport host starts accepting clients.
 
 ## 14. Server authority and replication
 

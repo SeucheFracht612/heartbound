@@ -1,5 +1,5 @@
-#include "engine/server/authoritative_server.hpp"
 #include "engine/server/admin_service.hpp"
+#include "engine/server/authoritative_server.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -19,8 +19,8 @@ namespace {
 
 void test_join_profile_discovery_chat_and_leave_lifecycle() {
     const auto root = temporary_root();
-    const auto uuid = heartstead::player_profiles::PlayerUuid::parse(
-        "123e4567-e89b-12d3-a456-426614174000");
+    const auto uuid =
+        heartstead::player_profiles::PlayerUuid::parse("123e4567-e89b-12d3-a456-426614174000");
     assert(uuid);
 
     heartstead::server::AuthoritativeServerConfig config;
@@ -32,7 +32,7 @@ void test_join_profile_discovery_chat_and_leave_lifecycle() {
     assert(server.start());
 
     heartstead::server::PlayerJoinRequest request{*uuid, "Settler", "203.0.113.42:7777",
-                                                   "wrong-hash"};
+                                                  "wrong-hash"};
     auto mismatch = server.join(request, 100);
     assert(!mismatch);
     assert(mismatch.error().code == "authoritative_server.content_mismatch");
@@ -68,8 +68,7 @@ void test_join_profile_discovery_chat_and_leave_lifecycle() {
     assert(std::ranges::any_of(chat_message.value(), [](const auto& envelope) {
         return envelope.message.payload_type == "chat";
     }));
-    auto chat_log = server.logs().query_current(
-        heartstead::server_logs::ServerLogCategory::chat);
+    auto chat_log = server.logs().query_current(heartstead::server_logs::ServerLogCategory::chat);
     assert(chat_log && chat_log.value().size() == 1);
     assert(chat_log.value().front().message == "hello settlement");
 
@@ -84,8 +83,8 @@ void test_join_profile_discovery_chat_and_leave_lifecycle() {
     assert(rejoined);
     auto restored_messages = server.host_session().drain_client_messages(rejoined.value());
     assert(restored_messages);
-    const auto restored_map_message = std::ranges::find_if(
-        restored_messages.value(), [](const auto& envelope) {
+    const auto restored_map_message =
+        std::ranges::find_if(restored_messages.value(), [](const auto& envelope) {
             return envelope.message.payload_type == "map_discovery";
         });
     assert(restored_map_message != restored_messages.value().end());
@@ -97,8 +96,8 @@ void test_join_profile_discovery_chat_and_leave_lifecycle() {
 
     heartstead::server_logs::ServerLogFilter join_filter;
     join_filter.event_type = "join";
-    auto joins = server.logs().query_current(
-        heartstead::server_logs::ServerLogCategory::general, join_filter);
+    auto joins = server.logs().query_current(heartstead::server_logs::ServerLogCategory::general,
+                                             join_filter);
     assert(joins && joins.value().size() == 2);
     assert(joins.value().front().metadata.at("address_hash").starts_with("stable64:"));
     assert(!joins.value().front().metadata.at("address_hash").contains("203.0.113.42"));
@@ -158,10 +157,48 @@ void test_admin_backups_publish_complete_unique_directories_outside_the_world() 
     std::filesystem::remove_all(root, ignored);
 }
 
+void test_server_start_preflights_log_storage_and_session_identity() {
+    const auto root = temporary_root();
+    heartstead::server::AuthoritativeServerConfig invalid_session_config;
+    invalid_session_config.world_root = root / "world";
+    invalid_session_config.server_root = root / "server";
+    invalid_session_config.server_session.assign(129, 's');
+    heartstead::server::AuthoritativeServer invalid_session_server(invalid_session_config);
+    auto invalid_session = invalid_session_server.start();
+    assert(!invalid_session);
+    assert(invalid_session.error().code == "authoritative_server.invalid_config");
+    assert(!invalid_session_server.is_running());
+
+    const auto unsafe_server_root = root / "unsafe_server";
+    std::filesystem::create_directories(unsafe_server_root / "logs" / "audit");
+    const auto outside = root / "outside.log";
+    {
+        std::ofstream output(outside);
+        output << "outside";
+    }
+    std::error_code link_error;
+    std::filesystem::create_symlink(outside, unsafe_server_root / "logs" / "audit" / "current.log",
+                                    link_error);
+    if (!link_error) {
+        heartstead::server::AuthoritativeServerConfig unsafe_config;
+        unsafe_config.world_root = root / "unsafe_world";
+        unsafe_config.server_root = unsafe_server_root;
+        heartstead::server::AuthoritativeServer unsafe_server(unsafe_config);
+        auto unsafe_start = unsafe_server.start();
+        assert(!unsafe_start);
+        assert(unsafe_start.error().code == "server_log.unsafe_symlink");
+        assert(!unsafe_server.is_running());
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
 } // namespace
 
 int main() {
     test_join_profile_discovery_chat_and_leave_lifecycle();
     test_admin_backups_publish_complete_unique_directories_outside_the_world();
+    test_server_start_preflights_log_storage_and_session_identity();
     return 0;
 }

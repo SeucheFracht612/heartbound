@@ -31,11 +31,15 @@ AuthoritativeServer::AuthoritativeServer(AuthoritativeServerConfig config)
       logs_(config_.server_root.empty() ? config_.world_root / "server" : config_.server_root) {}
 
 core::Status AuthoritativeServer::start() {
-    if (config_.world_root.empty() || config_.server_session.empty()) {
+    if (config_.world_root.empty() || config_.server_session.empty() ||
+        config_.server_session.size() > 128U) {
         return core::Status::failure("authoritative_server.invalid_config",
-                                     "server requires world root and session id");
+                                     "server requires a world root and a 1..128 byte session id");
     }
     auto status = config_.world_time.validate();
+    if (!status)
+        return status;
+    status = logs_.initialize();
     if (!status)
         return status;
     return host_.start();
@@ -94,7 +98,11 @@ core::Result<core::NetId> AuthoritativeServer::join(const PlayerJoinRequest& req
             {},
             {},
             {{"client_fingerprint", request.client_content_fingerprint}}};
-        (void)logs_.append(server_logs::ServerLogCategory::audit, std::move(mismatch));
+        auto log_status = logs_.append(server_logs::ServerLogCategory::audit, std::move(mismatch));
+        if (!log_status) {
+            return core::Result<core::NetId>::failure(log_status.error().code,
+                                                      log_status.error().message);
+        }
         return core::Result<core::NetId>::failure(
             "authoritative_server.content_mismatch",
             "client content fingerprint does not match server");

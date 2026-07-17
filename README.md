@@ -169,7 +169,7 @@ Implemented in this repository:
 - server-side player profile persistence with stable UUIDs, display-name history, roles,
   spawn/bed state, markers, portable flags/settings, and layered map-discovery region bitsets
 - server-side append/flush log storage for join, leave, and chat records with UTC and world
-  timestamps, escaped fields, current-log queries, and size rotation
+  timestamps, escaped fields, bounded current-plus-archive queries, and size/day rotation
 - command replay log, codec, runner foundation, and replay inspector tool
 - structured debug inspection data for backend capabilities, transactions, core records, room
   records, spatial networks, dirty-region rebuild queues, and mod lifecycle plans
