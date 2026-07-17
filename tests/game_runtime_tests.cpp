@@ -212,6 +212,16 @@ void test_game_runtime_starts_from_base_mod() {
 void test_game_runtime_starts_from_aggregate_content() {
     const auto report = heartstead::content::ContentValidation::validate(source_root());
     assert(!report.has_errors());
+    const auto drying_id = heartstead::core::PrototypeId::parse("base:processes/drying");
+    assert(drying_id.has_value());
+    const heartstead::processes::ProcessDefinition* drying = nullptr;
+    for (const auto& definition : report.process_definitions) {
+        if (definition.prototype_id == drying_id.value()) {
+            drying = &definition;
+            break;
+        }
+    }
+    assert(drying != nullptr && drying->default_required_work_ticks == 3'600);
 
     auto runtime =
         heartstead::game::GameRuntime::initialize(heartstead::game::GameRuntimeConfig{}, report);

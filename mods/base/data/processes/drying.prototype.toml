@@ -1,7 +1,7 @@
 kind = "process"
 id = "base:processes/drying"
 display_name = "Drying"
-default_required_work_ms = "60000"
+default_required_work_ticks = "3600"
 requires_room = "true"
 requires_power = "false"
 required_power_capacity = "1"
