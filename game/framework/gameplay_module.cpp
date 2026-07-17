@@ -102,6 +102,10 @@ core::Status IGameplayModule::register_components(ComponentRegistry&) {
     return core::Status::ok();
 }
 
+core::Status IGameplayModule::register_services(DomainServiceRegistry&) {
+    return core::Status::ok();
+}
+
 core::Status IGameplayModule::register_commands(GameplayRegistrationContext&) {
     return core::Status::ok();
 }
@@ -156,6 +160,9 @@ GameplayModuleRegistry::register_all(GameplayRegistrationContext& context) {
             status = module->register_components(context.components);
         }
         if (status) {
+            status = module->register_services(context.services);
+        }
+        if (status) {
             status = module->register_commands(context);
         }
         if (status) {
@@ -179,6 +186,7 @@ GameplayModuleRegistry::register_all(GameplayRegistrationContext& context) {
         report_.module_ids.emplace_back(module->module_id());
     }
     report_.component_count = context.components.registrations().size();
+    report_.service_count = context.services.registrations().size();
     report_.command_count = context.commands.size() - command_count_before;
     const auto system_count_after = context.scheduler.registered_system_count();
     report_.system_count = system_count_after >= system_count_before

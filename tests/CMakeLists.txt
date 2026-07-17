@@ -26,6 +26,14 @@ target_link_libraries(heartstead_presentation_world_tests PRIVATE Heartstead::Ga
 heartstead_configure_target(heartstead_presentation_world_tests)
 add_test(NAME heartstead_presentation_world_tests COMMAND heartstead_presentation_world_tests)
 
+add_executable(heartstead_headless_session_tests headless_session_tests.cpp)
+target_link_libraries(heartstead_headless_session_tests PRIVATE Heartstead::GameRuntime)
+target_compile_definitions(
+  heartstead_headless_session_tests PRIVATE HEARTSTEAD_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+heartstead_configure_target(heartstead_headless_session_tests)
+add_test(NAME heartstead_headless_session_tests COMMAND heartstead_headless_session_tests)
+
 function(heartstead_add_foundation_test target_name source_file)
   add_executable(${target_name} ${source_file})
   target_link_libraries(${target_name} PRIVATE Heartstead::Engine)

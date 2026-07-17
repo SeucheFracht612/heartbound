@@ -76,6 +76,8 @@ class ServerRuntime final {
     [[nodiscard]] const SerializationRegistry& serialization_registry() const noexcept;
     [[nodiscard]] const ReplicationRegistry& replication_registry() const noexcept;
     [[nodiscard]] const PresentationRegistry& presentation_registry() const noexcept;
+    [[nodiscard]] DomainServiceRegistry& domain_services() noexcept;
+    [[nodiscard]] const DomainServiceRegistry& domain_services() const noexcept;
     [[nodiscard]] movement::PlayerControllerRecord*
     player_for_client(core::NetId client_id) noexcept;
     [[nodiscard]] const movement::PlayerControllerRecord*
@@ -113,6 +115,7 @@ class ServerRuntime final {
     SerializationRegistry serialization_registry_;
     ReplicationRegistry replication_registry_;
     PresentationRegistry presentation_registry_;
+    DomainServiceRegistry domain_services_;
     GameplayModuleRegistry gameplay_modules_;
     std::unordered_map<std::uint64_t, PlayerConnection> player_connections_;
     std::vector<world::VoxelEditRecord> pending_saved_voxel_edits_;

@@ -5,6 +5,7 @@
 #include "engine/modding/prototype_registry.hpp"
 #include "engine/net/server_command.hpp"
 #include "engine/simulation/simulation_scheduler.hpp"
+#include "game/framework/domain_service_registry.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -86,6 +87,7 @@ struct GameplayRegistrationContext {
     SerializationRegistry& serializers;
     ReplicationRegistry& replication;
     PresentationRegistry& presentation;
+    DomainServiceRegistry& services;
 };
 
 class IGameplayModule {
@@ -95,6 +97,7 @@ class IGameplayModule {
     [[nodiscard]] virtual core::Status
     validate_content(const modding::PrototypeRegistry& content) const;
     [[nodiscard]] virtual core::Status register_components(ComponentRegistry& registry);
+    [[nodiscard]] virtual core::Status register_services(DomainServiceRegistry& registry);
     [[nodiscard]] virtual core::Status register_commands(GameplayRegistrationContext& context);
     [[nodiscard]] virtual core::Status register_systems(GameplayRegistrationContext& context);
     [[nodiscard]] virtual core::Status register_serializers(SerializationRegistry& registry);
@@ -105,6 +108,7 @@ class IGameplayModule {
 struct GameplayModuleRegistrationReport {
     std::vector<std::string> module_ids;
     std::size_t component_count = 0;
+    std::size_t service_count = 0;
     std::size_t command_count = 0;
     std::size_t system_count = 0;
     std::size_t serializer_count = 0;

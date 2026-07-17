@@ -8,6 +8,7 @@ target_sources(
     features/interaction/voxel_commands.cpp
     features/interaction/voxel_interaction_module.cpp
     framework/gameplay_module.cpp
+    framework/domain_service_registry.cpp
     presentation/client_presentation.cpp
     presentation/presentation_world.cpp
     runtime/client_runtime.cpp
@@ -16,6 +17,7 @@ target_sources(
     runtime/runtime_session.cpp
     runtime/server_runtime.cpp
     runtime/script_host_commands.cpp
+    testing/headless_session.cpp
   PUBLIC
     FILE_SET HEADERS
     BASE_DIRS ${PROJECT_SOURCE_DIR}
@@ -24,6 +26,7 @@ target_sources(
       features/interaction/voxel_commands.hpp
       features/interaction/voxel_interaction_module.hpp
       framework/gameplay_module.hpp
+      framework/domain_service_registry.hpp
       presentation/client_presentation.hpp
       presentation/presentation_world.hpp
       presentation/render_snapshot.hpp
@@ -33,6 +36,7 @@ target_sources(
       runtime/runtime_session.hpp
       runtime/server_runtime.hpp
       runtime/script_host_commands.hpp
+      testing/headless_session.hpp
 )
 
 target_link_libraries(heartstead_game PUBLIC Heartstead::Engine)

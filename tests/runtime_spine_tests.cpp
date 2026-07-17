@@ -14,6 +14,19 @@ struct TestFeatureComponent {
     std::uint32_t value = 0;
 };
 
+class ITestFeatureService {
+  public:
+    virtual ~ITestFeatureService() = default;
+    [[nodiscard]] virtual std::uint32_t value() const noexcept = 0;
+};
+
+class TestFeatureService final : public ITestFeatureService {
+  public:
+    [[nodiscard]] std::uint32_t value() const noexcept override {
+        return 42;
+    }
+};
+
 class TestGameplayModule final : public game::IGameplayModule {
   public:
     [[nodiscard]] std::string_view module_id() const noexcept override {
@@ -23,6 +36,12 @@ class TestGameplayModule final : public game::IGameplayModule {
     [[nodiscard]] core::Status
     register_components(game::ComponentRegistry& registry) override {
         return registry.register_component<TestFeatureComponent>("test.feature_component");
+    }
+
+    [[nodiscard]] core::Status
+    register_services(game::DomainServiceRegistry& registry) override {
+        return registry.register_service<ITestFeatureService>(
+            "test.feature_service", std::make_shared<TestFeatureService>());
     }
 
     [[nodiscard]] core::Status
@@ -343,11 +362,14 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(module_report.module_ids.front() == "base.voxel_interaction");
     assert(module_report.module_ids.back() == "test.feature");
     assert(module_report.component_count == 1);
+    assert(module_report.service_count == 1);
     assert(module_report.command_count == 3);
     assert(module_report.system_count == 1);
     assert(module_report.serializer_count == 3);
     assert(module_report.replication_count == 2);
     assert(module_report.presentation_adapter_count == 2);
+    const auto* service = server->domain_services().find<ITestFeatureService>();
+    assert(service != nullptr && service->value() == 42);
     assert(runtime.submit_command("test.feature.ping", {}, 10));
     auto frame = runtime.run_frame({16'667, 17});
     assert(frame && frame.value().server_ticks.size() == 1);

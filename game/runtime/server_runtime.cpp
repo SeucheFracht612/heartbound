@@ -205,7 +205,8 @@ core::Status ServerRuntime::initialize() {
     }
     GameplayRegistrationContext registration_context{
         *desc_.prototypes, entities_, commands_, scheduler_, component_registry_,
-        serialization_registry_, replication_registry_, presentation_registry_};
+        serialization_registry_, replication_registry_, presentation_registry_,
+        domain_services_};
     auto registered = gameplay_modules_.register_all(registration_context);
     if (!registered) {
         return core::Status::failure(registered.error().code, registered.error().message);
@@ -375,6 +376,14 @@ const ReplicationRegistry& ServerRuntime::replication_registry() const noexcept 
 
 const PresentationRegistry& ServerRuntime::presentation_registry() const noexcept {
     return presentation_registry_;
+}
+
+DomainServiceRegistry& ServerRuntime::domain_services() noexcept {
+    return domain_services_;
+}
+
+const DomainServiceRegistry& ServerRuntime::domain_services() const noexcept {
+    return domain_services_;
 }
 
 movement::PlayerControllerRecord* ServerRuntime::player_for_client(core::NetId client_id) noexcept {
