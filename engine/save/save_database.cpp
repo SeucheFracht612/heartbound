@@ -65,10 +65,6 @@ struct StagedGenerationEntry {
     return root / "chunks";
 }
 
-[[nodiscard]] std::filesystem::path chunk_index_path(const std::filesystem::path& root) {
-    return chunk_directory(root) / "index.txt";
-}
-
 [[nodiscard]] std::filesystem::path staged_chunk_directory(const std::filesystem::path& root) {
     return root / "chunks.tmp";
 }
@@ -132,6 +128,28 @@ struct StagedGenerationEntry {
 
 [[nodiscard]] core::Status filesystem_failure(std::string code, const std::error_code& error) {
     return core::Status::failure(std::move(code), error.message());
+}
+
+[[nodiscard]] core::Result<std::filesystem::path>
+readable_chunk_directory(const std::filesystem::path& root) {
+    const auto target = chunk_directory(root);
+    std::error_code error;
+    const bool has_target = std::filesystem::exists(target, error);
+    if (error) {
+        return core::Result<std::filesystem::path>::failure("save_database.read_failed",
+                                                            error.message());
+    }
+    if (has_target) {
+        return core::Result<std::filesystem::path>::success(target);
+    }
+
+    const auto backup = backup_chunk_directory(root);
+    const bool has_backup = std::filesystem::exists(backup, error);
+    if (error) {
+        return core::Result<std::filesystem::path>::failure("save_database.read_failed",
+                                                            error.message());
+    }
+    return core::Result<std::filesystem::path>::success(has_backup ? backup : target);
 }
 
 [[nodiscard]] core::Status ensure_parent_directory(const std::filesystem::path& path) {
@@ -271,7 +289,12 @@ struct StagedGenerationEntry {
 
 [[nodiscard]] core::Result<std::vector<ChunkIndexEntry>>
 read_chunk_index(const std::filesystem::path& root) {
-    const auto path = chunk_index_path(root);
+    auto chunks = readable_chunk_directory(root);
+    if (!chunks) {
+        return core::Result<std::vector<ChunkIndexEntry>>::failure(chunks.error().code,
+                                                                   chunks.error().message);
+    }
+    const auto path = chunks.value() / "index.txt";
     std::error_code filesystem_error;
     const bool has_index = std::filesystem::exists(path, filesystem_error);
     if (filesystem_error) {
@@ -403,8 +426,12 @@ write_chunk_index_to_directory(const std::filesystem::path& directory,
 }
 
 [[nodiscard]] core::Result<bool> has_external_chunk_table(const std::filesystem::path& root) {
+    auto chunks = readable_chunk_directory(root);
+    if (!chunks) {
+        return core::Result<bool>::failure(chunks.error().code, chunks.error().message);
+    }
     std::error_code error;
-    const bool exists = std::filesystem::exists(chunk_index_path(root), error);
+    const bool exists = std::filesystem::exists(chunks.value() / "index.txt", error);
     if (error) {
         return core::Result<bool>::failure("save_database.read_failed", error.message());
     }
@@ -548,8 +575,11 @@ active_save_root(const std::filesystem::path& root) {
         if (error) {
             return core::Result<std::string>::failure("save_database.read_failed", error.message());
         }
-        if (!entry.is_directory(error)) {
-            error.clear();
+        const bool is_directory = entry.is_directory(error);
+        if (error) {
+            return core::Result<std::string>::failure("save_database.read_failed", error.message());
+        }
+        if (!is_directory) {
             continue;
         }
         const auto name = entry.path().filename().string();
@@ -593,8 +623,12 @@ collect_generation_directory_stats(const std::filesystem::path& root) {
             return core::Result<GenerationDirectoryStats>::failure("save_database.stats_failed",
                                                                    error.message());
         }
-        if (!entry.is_directory(error)) {
-            error.clear();
+        const bool is_directory = entry.is_directory(error);
+        if (error) {
+            return core::Result<GenerationDirectoryStats>::failure("save_database.stats_failed",
+                                                                   error.message());
+        }
+        if (!is_directory) {
             continue;
         }
 
@@ -633,8 +667,12 @@ collect_committed_generations(const std::filesystem::path& root) {
             return core::Result<std::vector<CommittedGenerationEntry>>::failure(
                 "save_database.prune_failed", error.message());
         }
-        if (!entry.is_directory(error)) {
-            error.clear();
+        const bool is_directory = entry.is_directory(error);
+        if (error) {
+            return core::Result<std::vector<CommittedGenerationEntry>>::failure(
+                "save_database.prune_failed", error.message());
+        }
+        if (!is_directory) {
             continue;
         }
 
@@ -678,8 +716,12 @@ collect_staged_generations(const std::filesystem::path& root) {
             return core::Result<std::vector<StagedGenerationEntry>>::failure(
                 "save_database.recover_failed", error.message());
         }
-        if (!entry.is_directory(error)) {
-            error.clear();
+        const bool is_directory = entry.is_directory(error);
+        if (error) {
+            return core::Result<std::vector<StagedGenerationEntry>>::failure(
+                "save_database.recover_failed", error.message());
+        }
+        if (!is_directory) {
             continue;
         }
 
@@ -704,7 +746,24 @@ collect_staged_generations(const std::filesystem::path& root) {
 }
 
 [[nodiscard]] core::Result<std::string>
-read_chunk_delta_payload(const std::filesystem::path& path) {
+read_chunk_delta_payload(const std::filesystem::path& path,
+                         std::size_t remaining_table_bytes = max_chunk_delta_table_bytes) {
+    std::error_code error;
+    const auto file_bytes = std::filesystem::file_size(path, error);
+    if (error) {
+        return core::Result<std::string>::failure("save_database.read_failed", error.message());
+    }
+    if (file_bytes > max_chunk_delta_file_bytes) {
+        return core::Result<std::string>::failure(
+            "save_database.chunk_delta_too_large",
+            "chunk delta payload exceeds the configured safety limit");
+    }
+    if (file_bytes > remaining_table_bytes) {
+        return core::Result<std::string>::failure(
+            "save_database.chunk_delta_table_too_large",
+            "chunk delta table exceeds the configured aggregate safety limit");
+    }
+
     auto bytes = read_bytes(path, max_chunk_delta_file_bytes, "save_database.chunk_delta_too_large",
                             "chunk delta payload");
     if (!bytes) {
@@ -723,6 +782,11 @@ read_chunk_delta_payload(const std::filesystem::path& path) {
 
 [[nodiscard]] core::Result<std::vector<ChunkEditSaveRecord>>
 read_chunk_deltas_from_root(const std::filesystem::path& save_root) {
+    auto chunks = readable_chunk_directory(save_root);
+    if (!chunks) {
+        return core::Result<std::vector<ChunkEditSaveRecord>>::failure(chunks.error().code,
+                                                                       chunks.error().message);
+    }
     auto entries = read_chunk_index(save_root);
     if (!entries) {
         return core::Result<std::vector<ChunkEditSaveRecord>>::failure(entries.error().code,
@@ -733,7 +797,8 @@ read_chunk_deltas_from_root(const std::filesystem::path& save_root) {
     result.reserve(entries.value().size());
     std::size_t total_payload_bytes = 0;
     for (const auto& entry : entries.value()) {
-        auto payload = read_chunk_delta_payload(chunk_directory(save_root) / entry.filename);
+        auto payload = read_chunk_delta_payload(chunks.value() / entry.filename,
+                                                max_chunk_delta_table_bytes - total_payload_bytes);
         if (!payload) {
             return core::Result<std::vector<ChunkEditSaveRecord>>::failure(payload.error().code,
                                                                            payload.error().message);
@@ -796,6 +861,8 @@ write_chunk_deltas_to_root(const std::filesystem::path& save_root,
 
     std::vector<ChunkIndexEntry> entries;
     entries.reserve(chunk_deltas.size());
+    std::unordered_set<std::string> seen_coordinates;
+    seen_coordinates.reserve(chunk_deltas.size());
 
     std::size_t total_payload_bytes = 0;
     for (const auto& chunk_delta : chunk_deltas) {
@@ -815,11 +882,7 @@ write_chunk_deltas_to_root(const std::filesystem::path& save_root,
         }
         total_payload_bytes += chunk_delta.encoded_edit_delta.size();
         const auto filename = chunk_filename(chunk_delta.coord);
-        const auto found =
-            std::ranges::find_if(entries, [&chunk_delta](const ChunkIndexEntry& entry) {
-                return same_coord(entry.coord, chunk_delta.coord);
-            });
-        if (found != entries.end()) {
+        if (!seen_coordinates.insert(filename).second) {
             return core::Status::failure(
                 "save_database.duplicate_chunk_delta",
                 "bulk chunk delta replacement contains a duplicate chunk coordinate");
@@ -1084,7 +1147,12 @@ FileSaveDatabase::read_chunk_delta(world::ChunkCoord coord) const {
             "save_database.missing_chunk_delta", "chunk delta is not present in save database");
     }
 
-    auto payload = read_chunk_delta_payload(chunk_directory(save_root.value()) / found->filename);
+    auto chunks = readable_chunk_directory(save_root.value());
+    if (!chunks) {
+        return core::Result<ChunkEditSaveRecord>::failure(chunks.error().code,
+                                                          chunks.error().message);
+    }
+    auto payload = read_chunk_delta_payload(chunks.value() / found->filename);
     if (!payload) {
         return core::Result<ChunkEditSaveRecord>::failure(payload.error().code,
                                                           payload.error().message);
@@ -1119,9 +1187,12 @@ core::Result<std::size_t> FileSaveDatabase::compact_chunk_deltas() const {
         referenced_files.insert(entry.filename);
     }
 
-    const auto chunks = chunk_directory(save_root.value());
+    auto chunks = readable_chunk_directory(save_root.value());
+    if (!chunks) {
+        return core::Result<std::size_t>::failure(chunks.error().code, chunks.error().message);
+    }
     std::error_code error;
-    const bool has_chunks = std::filesystem::exists(chunks, error);
+    const bool has_chunks = std::filesystem::exists(chunks.value(), error);
     if (error) {
         return core::Result<std::size_t>::failure("save_database.compact_failed", error.message());
     }
@@ -1130,13 +1201,17 @@ core::Result<std::size_t> FileSaveDatabase::compact_chunk_deltas() const {
     }
 
     std::size_t removed_count = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(chunks, error)) {
+    for (const auto& entry : std::filesystem::directory_iterator(chunks.value(), error)) {
         if (error) {
             return core::Result<std::size_t>::failure("save_database.compact_failed",
                                                       error.message());
         }
-        if (!entry.is_regular_file(error)) {
-            error.clear();
+        const bool is_regular_file = entry.is_regular_file(error);
+        if (error) {
+            return core::Result<std::size_t>::failure("save_database.compact_failed",
+                                                      error.message());
+        }
+        if (!is_regular_file) {
             continue;
         }
 
@@ -1405,9 +1480,14 @@ core::Result<SaveDatabaseStats> FileSaveDatabase::stats() const {
                                                         entries.error().message);
     }
     result.chunk_delta_count = entries.value().size();
+    auto chunks = readable_chunk_directory(save_root.value());
+    if (!chunks) {
+        return core::Result<SaveDatabaseStats>::failure(chunks.error().code,
+                                                        chunks.error().message);
+    }
     for (const auto& entry : entries.value()) {
         result.chunk_delta_bytes +=
-            std::filesystem::file_size(chunk_directory(save_root.value()) / entry.filename, error);
+            std::filesystem::file_size(chunks.value() / entry.filename, error);
         if (error) {
             return core::Result<SaveDatabaseStats>::failure("save_database.stats_failed",
                                                             error.message());

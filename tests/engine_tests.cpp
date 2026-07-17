@@ -2664,8 +2664,8 @@ void test_renderer_rhi() {
     const RenderDescriptorWrite tint_write{
         material.id, "tint", uniform_upload.value().handle, 0, material_uniform_bytes.size(),
     };
-    assert(device.value()->write_descriptors(
-        std::span<const RenderDescriptorWrite>{&tint_write, 1}));
+    assert(
+        device.value()->write_descriptors(std::span<const RenderDescriptorWrite>{&tint_write, 1}));
     const RenderDescriptorWrite invalid_sampled_texture_write{
         material.id,
         "albedo",
@@ -3950,26 +3950,26 @@ void test_job_system() {
     auto exhausting_immediate =
         create_job_system(JobSystemDesc{JobBackend::immediate, 1, 2, maximum_job_id});
     assert(exhausting_immediate);
-    auto final_immediate_job = exhausting_immediate.value()->submit(JobDesc{
-        "id.final.immediate", JobPriority::normal,
-        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    auto final_immediate_job = exhausting_immediate.value()->submit(
+        JobDesc{"id.final.immediate", JobPriority::normal,
+                [](const JobContext&) { return heartstead::core::Status::ok(); }});
     assert(final_immediate_job && final_immediate_job.value().value() == maximum_job_id);
-    auto exhausted_immediate_job = exhausting_immediate.value()->submit(JobDesc{
-        "id.exhausted.immediate", JobPriority::normal,
-        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    auto exhausted_immediate_job = exhausting_immediate.value()->submit(
+        JobDesc{"id.exhausted.immediate", JobPriority::normal,
+                [](const JobContext&) { return heartstead::core::Status::ok(); }});
     assert(!exhausted_immediate_job);
     assert(exhausted_immediate_job.error().code == "jobs.id_range_exhausted");
 
     auto exhausting_pool =
         create_job_system(JobSystemDesc{JobBackend::thread_pool, 1, 2, maximum_job_id});
     assert(exhausting_pool);
-    auto final_threaded_job = exhausting_pool.value()->submit(JobDesc{
-        "id.final.threaded", JobPriority::normal,
-        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    auto final_threaded_job = exhausting_pool.value()->submit(
+        JobDesc{"id.final.threaded", JobPriority::normal,
+                [](const JobContext&) { return heartstead::core::Status::ok(); }});
     assert(final_threaded_job && final_threaded_job.value().value() == maximum_job_id);
-    auto exhausted_threaded_job = exhausting_pool.value()->submit(JobDesc{
-        "id.exhausted.threaded", JobPriority::normal,
-        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    auto exhausted_threaded_job = exhausting_pool.value()->submit(
+        JobDesc{"id.exhausted.threaded", JobPriority::normal,
+                [](const JobContext&) { return heartstead::core::Status::ok(); }});
     assert(!exhausted_threaded_job);
     assert(exhausted_threaded_job.error().code == "jobs.id_range_exhausted");
     assert(wait_for_completed_jobs(*exhausting_pool.value(), 1));
@@ -6495,6 +6495,16 @@ void test_file_save_database_safety() {
     deltas = transaction_database.read_chunk_deltas();
     assert(deltas && deltas.value().size() == 2);
 
+    const auto backup_chunks = active_chunks.parent_path() / "chunks.backup";
+    std::filesystem::rename(active_chunks, backup_chunks);
+    deltas = transaction_database.read_chunk_deltas();
+    assert(deltas && deltas.value().size() == 2);
+    assert(transaction_database.write_chunk_delta({{2, 0, 0}, "recovered"}));
+    assert(std::filesystem::is_directory(active_chunks));
+    assert(!std::filesystem::exists(backup_chunks));
+    const auto recovered = transaction_database.read_chunk_delta({2, 0, 0});
+    assert(recovered && recovered.value().encoded_edit_delta == "recovered");
+
     const auto legacy_root = make_temp_root() / "legacy_chunks";
     write_bytes(legacy_root / "snapshot.hssb",
                 heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot));
@@ -8061,8 +8071,7 @@ void test_world_simulation_subject_derivation() {
     const auto entity_prototype = heartstead::core::PrototypeId::parse("base:entities/cart");
     const auto cargo_prototype = heartstead::core::PrototypeId::parse("base:cargo/heavy_log");
     const auto assembly_prototype = heartstead::core::PrototypeId::parse("base:assemblies/kiln");
-    const auto workpiece_prototype =
-        heartstead::core::PrototypeId::parse("base:workpieces/clay");
+    const auto workpiece_prototype = heartstead::core::PrototypeId::parse("base:workpieces/clay");
     const auto process_prototype = heartstead::core::PrototypeId::parse("base:processes/drying");
     assert(build_prototype);
     assert(entity_prototype);
@@ -8111,9 +8120,9 @@ void test_world_simulation_subject_derivation() {
 
     auto workpiece_grid = heartstead::workpieces::WorkpieceGrid::create({1, 1, 1});
     assert(workpiece_grid);
-    heartstead::world::WorkpieceRecord workpiece{
-        heartstead::core::WorkpieceId::from_value(104), workpiece_prototype.value(),
-        std::move(workpiece_grid).value()};
+    heartstead::world::WorkpieceRecord workpiece{heartstead::core::WorkpieceId::from_value(104),
+                                                 workpiece_prototype.value(),
+                                                 std::move(workpiece_grid).value()};
     workpiece.owner_session = heartstead::core::NetId::from_value(7);
     assert(state.workpieces().insert(std::move(workpiece)));
 
@@ -10156,8 +10165,7 @@ void test_world_command_registry() {
     assert(!duplicate_workpiece_result);
     assert(duplicate_workpiece_result.error().code == "workpiece.cell_occupied");
 
-    auto* unbound_workpiece =
-        state.workpieces().find(heartstead::core::WorkpieceId::from_value(7));
+    auto* unbound_workpiece = state.workpieces().find(heartstead::core::WorkpieceId::from_value(7));
     assert(unbound_workpiece != nullptr);
     unbound_workpiece->owner_session = {};
     auto unbound_workpiece_command = workpiece_command;
@@ -13689,8 +13697,7 @@ void test_world_snapshot_bridge() {
     auto bridge_registry = make_bridge_registry();
     // Legacy snapshots may contain a connection-local NetId. Import must never treat it as a
     // stable owner after a server restart.
-    snapshot.value().workpieces.front().owner_session =
-        heartstead::core::NetId::from_value(999);
+    snapshot.value().workpieces.front().owner_session = heartstead::core::NetId::from_value(999);
     auto imported = heartstead::world::WorldSnapshotBridge::import_validated_snapshot(
         snapshot.value(), bridge_registry, load_config);
     assert(imported);
