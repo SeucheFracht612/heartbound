@@ -9985,9 +9985,11 @@ void test_world_command_registry() {
     assert(workpiece_prototype);
     auto workpiece_grid = heartstead::workpieces::WorkpieceGrid::create({4, 4, 4});
     assert(workpiece_grid);
-    assert(state.workpieces().insert({heartstead::core::WorkpieceId::from_value(7),
-                                      workpiece_prototype.value(),
-                                      std::move(workpiece_grid).value()}));
+    heartstead::world::WorkpieceRecord editable_workpiece{
+        heartstead::core::WorkpieceId::from_value(7), workpiece_prototype.value(),
+        std::move(workpiece_grid).value()};
+    editable_workpiece.owner_session = heartstead::core::NetId::from_value(10);
+    assert(state.workpieces().insert(std::move(editable_workpiece)));
 
     heartstead::net::CommandEnvelope workpiece_command;
     workpiece_command.sequence = 4;
@@ -10021,6 +10023,16 @@ void test_world_command_registry() {
     auto duplicate_workpiece_result = dispatcher.dispatch(workpiece_command, context);
     assert(!duplicate_workpiece_result);
     assert(duplicate_workpiece_result.error().code == "workpiece.cell_occupied");
+
+    auto* unbound_workpiece =
+        state.workpieces().find(heartstead::core::WorkpieceId::from_value(7));
+    assert(unbound_workpiece != nullptr);
+    unbound_workpiece->owner_session = {};
+    auto unbound_workpiece_command = workpiece_command;
+    unbound_workpiece_command.sequence = 499;
+    auto unbound_workpiece_result = dispatcher.dispatch(unbound_workpiece_command, context);
+    assert(!unbound_workpiece_result);
+    assert(unbound_workpiece_result.error().code == "world_command.workpiece_owner_unbound");
 
     const auto item_prototype = heartstead::core::PrototypeId::parse("base:items/raw_clay");
     assert(item_prototype);
@@ -13498,8 +13510,11 @@ void test_world_snapshot_bridge() {
     assert(grid.value().apply({heartstead::workpieces::WorkpieceOperationKind::add_cell,
                                {0, 1, 2},
                                heartstead::workpieces::WorkpieceCell::solid(9)}));
-    assert(state.workpieces().insert({heartstead::core::WorkpieceId::from_value(42),
-                                      workpiece_prototype.value(), std::move(grid).value()}));
+    heartstead::world::WorkpieceRecord saved_workpiece{
+        heartstead::core::WorkpieceId::from_value(42), workpiece_prototype.value(),
+        std::move(grid).value()};
+    saved_workpiece.owner_session = heartstead::core::NetId::from_value(123);
+    assert(state.workpieces().insert(std::move(saved_workpiece)));
 
     heartstead::assemblies::AssemblyRecord assembly;
     assembly.assembly_id = assembly_id.value();
@@ -13530,6 +13545,7 @@ void test_world_snapshot_bridge() {
     assert(snapshot.value().inventories.size() == 1);
     assert(snapshot.value().workpieces.size() == 1);
     assert(!snapshot.value().workpieces.front().encoded_cells.empty());
+    assert(!snapshot.value().workpieces.front().owner_session.is_valid());
     assert(snapshot.value().assemblies.size() == 1);
     assert(snapshot.value().processes.size() == 1);
     assert(snapshot.value().mod_states.size() == 1);
@@ -13539,6 +13555,10 @@ void test_world_snapshot_bridge() {
     load_config.next_runtime_handle = 500;
     load_config.next_entity_net_id = 9000;
     auto bridge_registry = make_bridge_registry();
+    // Legacy snapshots may contain a connection-local NetId. Import must never treat it as a
+    // stable owner after a server restart.
+    snapshot.value().workpieces.front().owner_session =
+        heartstead::core::NetId::from_value(999);
     auto imported = heartstead::world::WorldSnapshotBridge::import_validated_snapshot(
         snapshot.value(), bridge_registry, load_config);
     assert(imported);
@@ -13582,6 +13602,7 @@ void test_world_snapshot_bridge() {
         imported.value().workpieces().find(heartstead::core::WorkpieceId::from_value(42));
     assert(restored_workpiece != nullptr);
     assert(restored_workpiece->grid.occupied_count() == 1);
+    assert(!restored_workpiece->owner_session.is_valid());
 
     auto reexported = heartstead::world::WorldSnapshotBridge::export_snapshot(imported.value());
     assert(reexported);

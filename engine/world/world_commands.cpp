@@ -1361,7 +1361,12 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
         return core::Status::failure("world_command.workpiece_committed",
                                      "committed workpieces cannot be edited");
     }
-    if (record->owner_session.is_valid() && record->owner_session != envelope.sender) {
+    if (!record->owner_session.is_valid()) {
+        return core::Status::failure(
+            "world_command.workpiece_owner_unbound",
+            "workpiece ownership must be rebound to a stable player before editing");
+    }
+    if (record->owner_session != envelope.sender) {
         return core::Status::failure("world_command.workpiece_not_owned",
                                      "workpiece edit sender does not own the active session");
     }
@@ -1431,7 +1436,12 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
         return core::Status::failure("world_command.workpiece_committed",
                                      "workpiece is already committed");
     }
-    if (record->owner_session.is_valid() && record->owner_session != envelope.sender) {
+    if (!record->owner_session.is_valid()) {
+        return core::Status::failure(
+            "world_command.workpiece_owner_unbound",
+            "workpiece ownership must be rebound to a stable player before finishing");
+    }
+    if (record->owner_session != envelope.sender) {
         return core::Status::failure("world_command.workpiece_not_owned",
                                      "workpiece finish sender does not own the active session");
     }

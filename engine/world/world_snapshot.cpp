@@ -207,7 +207,9 @@ core::Result<save::SaveSnapshot> WorldSnapshotBridge::export_snapshot(const Worl
                 ? workpieces::WorkpieceServerStateTextCodec::encode(*workpiece->server_state,
                                                                     workpiece->grid.shape())
                 : std::string{},
-            workpiece->owner_session,
+            // NetIds are connection-local and cannot identify the same player after a reload.
+            // Persist an unbound owner until a stable player identity can explicitly rebind it.
+            core::NetId{},
             workpiece->revision,
             workpiece->committed,
         });
@@ -421,7 +423,7 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
         status = state.workpieces().insert(
             WorkpieceRecord{workpiece.workpiece_id, workpiece.prototype_id, std::move(grid).value(),
                             workpiece.material_prototype_id, std::move(server_state),
-                            workpiece.owner_session, workpiece.revision, workpiece.committed});
+                            core::NetId{}, workpiece.revision, workpiece.committed});
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }
