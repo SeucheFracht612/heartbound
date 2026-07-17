@@ -2,11 +2,56 @@
 
 #include <compare>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
 
 namespace heartstead::core {
+
+template <typename Tag> class GenerationalHandle {
+  public:
+    using index_type = std::uint32_t;
+    using generation_type = std::uint32_t;
+
+    constexpr GenerationalHandle() = default;
+
+    [[nodiscard]] static constexpr GenerationalHandle from_parts(index_type index,
+                                                                 generation_type generation) {
+        return generation == 0 ? GenerationalHandle{} : GenerationalHandle(index, generation);
+    }
+
+    [[nodiscard]] static constexpr GenerationalHandle from_value(std::uint64_t value) {
+        return from_parts(static_cast<index_type>(value & 0xFFFF'FFFFULL),
+                          static_cast<generation_type>(value >> 32U));
+    }
+
+    [[nodiscard]] constexpr index_type index() const noexcept {
+        return index_;
+    }
+
+    [[nodiscard]] constexpr generation_type generation() const noexcept {
+        return generation_;
+    }
+
+    [[nodiscard]] constexpr std::uint64_t value() const noexcept {
+        return (static_cast<std::uint64_t>(generation_) << 32U) |
+               static_cast<std::uint64_t>(index_);
+    }
+
+    [[nodiscard]] constexpr bool is_valid() const noexcept {
+        return generation_ != 0;
+    }
+
+    friend constexpr auto operator<=>(GenerationalHandle, GenerationalHandle) = default;
+
+  private:
+    constexpr GenerationalHandle(index_type index, generation_type generation)
+        : index_(index), generation_(generation) {}
+
+    index_type index_ = 0;
+    generation_type generation_ = 0;
+};
 
 template <typename Tag> class StrongU64Id {
   public:

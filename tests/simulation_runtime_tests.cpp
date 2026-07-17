@@ -40,7 +40,7 @@ void test_tick_events_have_explicit_lifetime() {
     assert(!events.begin_tick(8));
 
     simulation::EntitySpawned spawned;
-    spawned.entity = core::RuntimeHandle::from_value(42);
+    spawned.entity = entities::EntityId::from_parts(42, 3);
     spawned.prototype = *core::PrototypeId::parse("base:entities/player");
     assert(events.entity_spawned.append(spawned));
     assert(events.event_count() == 1);

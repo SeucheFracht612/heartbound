@@ -26,6 +26,7 @@ target_sources(
     dirty/dirty_region.cpp
     entities/entity.cpp
     entities/entity_prototype.cpp
+    entities/entity_world.cpp
     entities/physical_resource.cpp
     items/item_stack.cpp
     items/item_prototype.cpp
@@ -176,7 +177,9 @@ target_sources(
       debug/debug_overlay.hpp
       dirty/dirty_region.hpp
       entities/entity.hpp
+      entities/entity_id.hpp
       entities/entity_prototype.hpp
+      entities/entity_world.hpp
       entities/physical_resource.hpp
       items/item_stack.hpp
       items/item_prototype.hpp

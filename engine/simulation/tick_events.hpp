@@ -2,6 +2,7 @@
 
 #include "engine/core/ids.hpp"
 #include "engine/core/result.hpp"
+#include "engine/entities/entity_id.hpp"
 #include "engine/world/coords/world_coords.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 
@@ -52,12 +53,12 @@ template <typename Event> class EventStream {
 };
 
 struct EntitySpawned {
-    core::RuntimeHandle entity;
+    entities::EntityId entity;
     core::PrototypeId prototype;
 };
 
 struct EntityDestroyed {
-    core::RuntimeHandle entity;
+    entities::EntityId entity;
 };
 
 struct VoxelChanged {
