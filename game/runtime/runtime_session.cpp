@@ -111,8 +111,9 @@ core::Status RuntimeSession::initialize() {
         world::WorldStateDesc client_world;
         client_world.metadata = request_.metadata;
         client_world.voxel_palette = voxel_palette_->manifest();
-        client_ = std::make_unique<ClientRuntime>(connected.value(), std::move(client_world),
-                                                  voxel_palette_);
+        client_ = std::make_unique<ClientRuntime>(
+            connected.value(), std::move(client_world), voxel_palette_,
+            &server_->replication_registry());
         auto status = pump_client_messages();
         if (!status) {
             return status;
@@ -178,6 +179,7 @@ core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput inpu
                                                                  presented.error().message);
             }
             stats.presentation.inserted_objects += presented.value().inserted_objects;
+            stats.presentation.adapter_count += presented.value().adapter_count;
             stats.presentation.updated_objects += presented.value().updated_objects;
             stats.presentation.removed_objects += presented.value().removed_objects;
             stats.presentation.unchanged_objects += presented.value().unchanged_objects;
@@ -258,7 +260,21 @@ core::Result<PresentationSynchronizationStats> RuntimeSession::synchronize_prese
     if (client_ == nullptr) {
         return core::Result<PresentationSynchronizationStats>::success({});
     }
-    return presentation_synchronizer_.synchronize(*client_, presentation_);
+    auto synchronized = presentation_synchronizer_.synchronize(*client_, presentation_);
+    if (!synchronized) {
+        return synchronized;
+    }
+    if (server_ == nullptr) {
+        return synchronized;
+    }
+    auto feature_adapters =
+        server_->presentation_registry().synchronize_all(*client_, presentation_);
+    if (!feature_adapters) {
+        return core::Result<PresentationSynchronizationStats>::failure(
+            feature_adapters.error().code, feature_adapters.error().message);
+    }
+    synchronized.value().merge(feature_adapters.value());
+    return synchronized;
 }
 
 core::Status RuntimeSession::shutdown() {

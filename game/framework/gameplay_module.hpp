@@ -8,6 +8,7 @@
 #include "game/framework/domain_service_registry.hpp"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -16,6 +17,9 @@
 #include <vector>
 
 namespace heartstead::game {
+
+class ClientRuntime;
+class PresentationWorld;
 
 struct ComponentRegistration {
     std::string name;
@@ -53,25 +57,52 @@ struct ReplicationRegistration {
     std::string name;
     std::uint32_t version = 1;
     bool reliable = true;
+    bool client_world_managed = false;
+    std::function<core::Status(const world::OperationEvent&, ClientRuntime&)> client_handler;
+};
+
+struct ClientReplicationDispatchStats {
+    std::uint32_t observed_event_count = 0;
+    std::uint32_t registered_event_count = 0;
+    std::uint32_t world_managed_event_count = 0;
+    std::uint32_t callback_event_count = 0;
+    std::uint32_t unhandled_event_count = 0;
 };
 
 class ReplicationRegistry final {
   public:
     [[nodiscard]] core::Status register_replication(ReplicationRegistration registration);
+    [[nodiscard]] core::Result<ClientReplicationDispatchStats>
+    dispatch(std::span<const world::OperationEvent> events, ClientRuntime& client) const;
     [[nodiscard]] std::span<const ReplicationRegistration> registrations() const noexcept;
 
   private:
     std::vector<ReplicationRegistration> registrations_;
 };
 
+struct PresentationAdapterStats {
+    std::uint32_t adapter_count = 0;
+    std::uint32_t inserted_objects = 0;
+    std::uint32_t updated_objects = 0;
+    std::uint32_t removed_objects = 0;
+    std::uint32_t unchanged_objects = 0;
+
+    void merge(const PresentationAdapterStats& other) noexcept;
+};
+
 struct PresentationRegistration {
     std::string name;
     std::uint32_t version = 1;
+    std::function<core::Result<PresentationAdapterStats>(const ClientRuntime&,
+                                                          PresentationWorld&)>
+        synchronize;
 };
 
 class PresentationRegistry final {
   public:
     [[nodiscard]] core::Status register_adapter(PresentationRegistration registration);
+    [[nodiscard]] core::Result<PresentationAdapterStats>
+    synchronize_all(const ClientRuntime& client, PresentationWorld& presentation) const;
     [[nodiscard]] std::span<const PresentationRegistration> registrations() const noexcept;
 
   private:

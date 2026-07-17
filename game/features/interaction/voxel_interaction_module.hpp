@@ -21,8 +21,6 @@ class VoxelInteractionModule final : public IGameplayModule {
     register_serializers(SerializationRegistry& registry) override;
     [[nodiscard]] core::Status
     register_replication(ReplicationRegistry& registry) override;
-    [[nodiscard]] core::Status
-    register_presentation(PresentationRegistry& registry) override;
 
   private:
     AuthoritativePlayerResolver resolve_player_;

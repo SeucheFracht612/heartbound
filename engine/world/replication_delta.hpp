@@ -178,6 +178,7 @@ struct WorldClientReplicationApplyReport {
     std::uint32_t unmatched_delta_count = 0;
     std::uint32_t total_event_count = 0;
     std::uint32_t total_applied_record_count = 0;
+    std::vector<OperationEvent> observed_events;
     std::vector<WorldClientReplicationBatchApplyReport> batches;
 };
 

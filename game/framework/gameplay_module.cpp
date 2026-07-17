@@ -71,8 +71,44 @@ core::Status ReplicationRegistry::register_replication(ReplicationRegistration r
     if (!status) {
         return status;
     }
+    if (!registration.client_world_managed && !registration.client_handler) {
+        return core::Status::failure(
+            "gameplay_module.replication_handler_missing",
+            "replication registration must be handled by client world state or a feature callback");
+    }
     registrations_.push_back(std::move(registration));
     return core::Status::ok();
+}
+
+core::Result<ClientReplicationDispatchStats>
+ReplicationRegistry::dispatch(std::span<const world::OperationEvent> events,
+                              ClientRuntime& client) const {
+    ClientReplicationDispatchStats stats;
+    stats.observed_event_count = static_cast<std::uint32_t>(events.size());
+    for (const auto& event : events) {
+        const auto found = std::ranges::find_if(registrations_, [&event](const auto& registration) {
+            return registration.name == event.type;
+        });
+        if (found == registrations_.end()) {
+            ++stats.unhandled_event_count;
+            continue;
+        }
+        ++stats.registered_event_count;
+        if (found->client_world_managed) {
+            ++stats.world_managed_event_count;
+        }
+        if (found->client_handler) {
+            auto status = found->client_handler(event, client);
+            if (!status) {
+                return core::Result<ClientReplicationDispatchStats>::failure(
+                    status.error().code,
+                    "client replication handler '" + found->name + "' failed: " +
+                        status.error().message);
+            }
+            ++stats.callback_event_count;
+        }
+    }
+    return core::Result<ClientReplicationDispatchStats>::success(stats);
 }
 
 std::span<const ReplicationRegistration> ReplicationRegistry::registrations() const noexcept {
@@ -85,8 +121,37 @@ core::Status PresentationRegistry::register_adapter(PresentationRegistration reg
     if (!status) {
         return status;
     }
+    if (!registration.synchronize) {
+        return core::Status::failure("gameplay_module.presentation_callback_missing",
+                                     "presentation adapter requires a synchronization callback");
+    }
     registrations_.push_back(std::move(registration));
     return core::Status::ok();
+}
+
+void PresentationAdapterStats::merge(const PresentationAdapterStats& other) noexcept {
+    adapter_count += other.adapter_count;
+    inserted_objects += other.inserted_objects;
+    updated_objects += other.updated_objects;
+    removed_objects += other.removed_objects;
+    unchanged_objects += other.unchanged_objects;
+}
+
+core::Result<PresentationAdapterStats>
+PresentationRegistry::synchronize_all(const ClientRuntime& client,
+                                      PresentationWorld& presentation) const {
+    PresentationAdapterStats combined;
+    for (const auto& registration : registrations_) {
+        auto result = registration.synchronize(client, presentation);
+        if (!result) {
+            return core::Result<PresentationAdapterStats>::failure(
+                result.error().code, "presentation adapter '" + registration.name +
+                                         "' failed: " + result.error().message);
+        }
+        combined.merge(result.value());
+        ++combined.adapter_count;
+    }
+    return core::Result<PresentationAdapterStats>::success(combined);
 }
 
 std::span<const PresentationRegistration> PresentationRegistry::registrations() const noexcept {

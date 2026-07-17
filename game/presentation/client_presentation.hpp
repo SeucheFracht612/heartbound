@@ -2,6 +2,7 @@
 
 #include "engine/core/result.hpp"
 #include "game/presentation/presentation_world.hpp"
+#include "game/framework/gameplay_module.hpp"
 
 #include <cstdint>
 #include <unordered_set>
@@ -10,12 +11,7 @@ namespace heartstead::game {
 
 class ClientRuntime;
 
-struct PresentationSynchronizationStats {
-    std::uint32_t inserted_objects = 0;
-    std::uint32_t updated_objects = 0;
-    std::uint32_t removed_objects = 0;
-    std::uint32_t unchanged_objects = 0;
-};
+struct PresentationSynchronizationStats : PresentationAdapterStats {};
 
 class ClientPresentationSynchronizer final {
   public:

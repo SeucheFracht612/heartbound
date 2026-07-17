@@ -6,6 +6,7 @@
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/replication_delta.hpp"
 #include "engine/world/world_state.hpp"
+#include "game/framework/gameplay_module.hpp"
 
 #include <cstdint>
 #include <array>
@@ -24,12 +25,14 @@ struct ClientRuntimeStats {
     std::uint32_t chunk_snapshot_slice_count = 0;
     std::uint32_t completed_chunk_snapshot_count = 0;
     world::WorldClientReplicationApplyReport replication;
+    ClientReplicationDispatchStats feature_replication;
 };
 
 class ClientRuntime final {
   public:
     ClientRuntime(core::NetId expected_client_id, world::WorldStateDesc world_desc,
-                  const world::VoxelPalette* voxel_palette);
+                  const world::VoxelPalette* voxel_palette,
+                  const ReplicationRegistry* replication_registry = nullptr);
 
     [[nodiscard]] core::Status
     receive(std::span<const net::TransportEnvelope> messages);
@@ -69,6 +72,7 @@ class ClientRuntime final {
 
     world::WorldState world_;
     const world::VoxelPalette* voxel_palette_ = nullptr;
+    const ReplicationRegistry* replication_registry_ = nullptr;
     net::ClientSession session_;
     std::vector<net::HostSessionCommandResult> command_results_;
     std::unordered_map<std::uint64_t, movement::PlayerControllerSnapshot> movement_snapshots_;

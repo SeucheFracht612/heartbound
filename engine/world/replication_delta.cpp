@@ -1371,6 +1371,8 @@ core::Result<WorldClientReplicationApplyReport> apply_client_replication_deltas(
         batch_report.has_global_events = has_global_events(batch);
         batch_report.has_subject_events = has_subject_events(batch);
         report.total_event_count += batch_report.event_count;
+        report.observed_events.insert(report.observed_events.end(), batch.events.begin(),
+                                      batch.events.end());
 
         const auto delta = deltas_by_sequence.find(batch_report.replication_sequence);
         if (delta == deltas_by_sequence.end()) {

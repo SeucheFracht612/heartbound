@@ -67,11 +67,8 @@ core::Status VoxelInteractionModule::register_serializers(SerializationRegistry&
 }
 
 core::Status VoxelInteractionModule::register_replication(ReplicationRegistry& registry) {
-    return registry.register_replication({std::string(world::voxel_changed_event_type), 1, true});
-}
-
-core::Status VoxelInteractionModule::register_presentation(PresentationRegistry& registry) {
-    return registry.register_adapter({"base.chunk_mesh_dirty", 1});
+    return registry.register_replication(
+        {std::string(world::voxel_changed_event_type), 1, true, true, {}});
 }
 
 } // namespace heartstead::game::interaction

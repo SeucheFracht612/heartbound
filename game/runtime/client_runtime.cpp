@@ -7,9 +7,10 @@
 namespace heartstead::game {
 
 ClientRuntime::ClientRuntime(core::NetId expected_client_id, world::WorldStateDesc world_desc,
-                             const world::VoxelPalette* voxel_palette)
+                             const world::VoxelPalette* voxel_palette,
+                             const ReplicationRegistry* replication_registry)
     : world_(std::move(world_desc)), voxel_palette_(voxel_palette),
-      session_(expected_client_id) {}
+      replication_registry_(replication_registry), session_(expected_client_id) {}
 
 core::Status ClientRuntime::receive(std::span<const net::TransportEnvelope> messages) {
     for (const auto& message : messages) {
@@ -33,6 +34,20 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
     if (!replication) {
         return core::Result<ClientRuntimeStats>::failure(replication.error().code,
                                                          replication.error().message);
+    }
+    ClientReplicationDispatchStats feature_replication;
+    if (replication_registry_ != nullptr) {
+        auto dispatched = replication_registry_->dispatch(replication.value().observed_events,
+                                                          *this);
+        if (!dispatched) {
+            return core::Result<ClientRuntimeStats>::failure(dispatched.error().code,
+                                                             dispatched.error().message);
+        }
+        feature_replication = dispatched.value();
+    } else {
+        feature_replication.observed_event_count =
+            static_cast<std::uint32_t>(replication.value().observed_events.size());
+        feature_replication.unhandled_event_count = feature_replication.observed_event_count;
     }
     auto results = session_.drain_command_results();
     const auto result_count = static_cast<std::uint32_t>(results.size());
@@ -90,6 +105,7 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
     stats.chunk_snapshot_slice_count = completed_chunks.value().slice_count;
     stats.completed_chunk_snapshot_count = completed_chunks.value().completed_chunk_count;
     stats.replication = std::move(replication).value();
+    stats.feature_replication = feature_replication;
     messages_since_sync_ = 0;
     return core::Result<ClientRuntimeStats>::success(std::move(stats));
 }

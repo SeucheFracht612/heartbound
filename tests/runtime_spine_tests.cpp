@@ -47,9 +47,27 @@ class TestGameplayModule final : public game::IGameplayModule {
     [[nodiscard]] core::Status
     register_commands(game::GameplayRegistrationContext& context) override {
         return context.commands.register_command({
-            "test.feature.ping", false, true,
-            [](const net::CommandEnvelope&, const net::CommandExecutionContext&,
-               world::WorldOperation&) { return core::Status::ok(); },
+            "test.feature.set", true, true,
+            [](const net::CommandEnvelope&, const net::CommandExecutionContext& command_context,
+               world::WorldOperation& operation) {
+                if (command_context.world_state == nullptr) {
+                    return core::Status::failure("test_feature.world_missing",
+                                                 "test feature requires authoritative world state");
+                }
+                auto status = command_context.world_state->mod_states().insert(
+                    {"test", "feature_visible", "true"});
+                if (!status) {
+                    return status;
+                }
+                status = operation.record_mutation("set test feature visibility");
+                if (!status) {
+                    return status;
+                }
+                operation.mark_save_dirty();
+                operation.mark_replication_dirty();
+                operation.emit_event({"test.feature.delta", {}, "visible"});
+                return core::Status::ok();
+            },
         });
     }
 
@@ -72,15 +90,56 @@ class TestGameplayModule final : public game::IGameplayModule {
 
     [[nodiscard]] core::Status
     register_replication(game::ReplicationRegistry& registry) override {
-        return registry.register_replication({"test.feature.delta", 1, true});
+        return registry.register_replication(
+            {"test.feature.delta", 1, true, false,
+             [this](const world::OperationEvent& event, game::ClientRuntime&) {
+                 if (event.message != "visible") {
+                     return core::Status::failure("test_feature.invalid_delta",
+                                                  "test feature delta is invalid");
+                 }
+                 client_visible = true;
+                 ++client_revision;
+                 return core::Status::ok();
+             }});
     }
 
     [[nodiscard]] core::Status
     register_presentation(game::PresentationRegistry& registry) override {
-        return registry.register_adapter({"test.feature.presentation", 1});
+        return registry.register_adapter(
+            {"test.feature.presentation", 1,
+             [this](const game::ClientRuntime&, game::PresentationWorld& presentation) {
+                 game::PresentationAdapterStats stats;
+                 if (!client_visible) {
+                     return core::Result<game::PresentationAdapterStats>::success(stats);
+                 }
+                 const auto source = core::NetId::from_value(9'001);
+                 const auto* previous = presentation.find_object(source);
+                 game::PresentationObjectUpdate update;
+                 update.source_net_id = source;
+                 update.visual_prototype = *core::PrototypeId::parse("test:feature/marker");
+                 update.transform.position = world::WorldPosition{12.0, 2.0, 12.0};
+                 update.local_bounds = {{-0.25F, -0.25F, -0.25F},
+                                        {0.25F, 0.25F, 0.25F}};
+                 update.source_revision = client_revision;
+                 auto synchronized = presentation.upsert_object(update);
+                 if (!synchronized) {
+                     return core::Result<game::PresentationAdapterStats>::failure(
+                         synchronized.error().code, synchronized.error().message);
+                 }
+                 if (previous == nullptr) {
+                     ++stats.inserted_objects;
+                 } else if (previous->source_revision == client_revision) {
+                     ++stats.unchanged_objects;
+                 } else {
+                     ++stats.updated_objects;
+                 }
+                 return core::Result<game::PresentationAdapterStats>::success(stats);
+             }});
     }
 
     std::uint32_t update_count = 0;
+    std::uint64_t client_revision = 0;
+    bool client_visible = false;
 };
 
 std::filesystem::path source_root() {
@@ -367,15 +426,29 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(module_report.system_count == 1);
     assert(module_report.serializer_count == 3);
     assert(module_report.replication_count == 2);
-    assert(module_report.presentation_adapter_count == 2);
+    assert(module_report.presentation_adapter_count == 1);
     const auto* service = server->domain_services().find<ITestFeatureService>();
     assert(service != nullptr && service->value() == 42);
-    assert(runtime.submit_command("test.feature.ping", {}, 10));
+    assert(runtime.submit_command("test.feature.set", {}, 10));
     auto frame = runtime.run_frame({16'667, 17});
     assert(frame && frame.value().server_ticks.size() == 1);
     assert(frame.value().server_ticks.front().commands.command_reports.size() == 1);
     assert(frame.value().server_ticks.front().commands.command_reports.front().success);
     assert(module->update_count == 1);
+    assert(frame.value().server_ticks.front().commands.command_reports.front()
+               .committed_world_mutation);
+    assert(frame.value().client.feature_replication.callback_event_count == 1);
+    assert(frame.value().client.feature_replication.unhandled_event_count == 0);
+    assert(frame.value().presentation.adapter_count == 2);
+    assert(frame.value().presentation.inserted_objects == 1);
+    assert(module->client_visible && module->client_revision == 1);
+    assert(server->world().mod_states().find("test", "feature_visible") != nullptr);
+    const auto render_snapshot = runtime.capture_render_snapshot();
+    assert(render_snapshot && render_snapshot.value().objects.size() == 2);
+    assert(runtime.session()->presentation()->find_object(core::NetId::from_value(9'001)) !=
+           nullptr);
+    auto save_snapshot = runtime.capture_save_snapshot();
+    assert(save_snapshot && save_snapshot.value().mod_states.size() == 1);
     assert(runtime.shutdown());
 }
 

@@ -11,6 +11,7 @@ core::Result<PresentationSynchronizationStats>
 ClientPresentationSynchronizer::synchronize(const ClientRuntime& client,
                                             PresentationWorld& presentation) {
     PresentationSynchronizationStats stats;
+    stats.adapter_count = 1;
     std::unordered_set<std::uint64_t> current_players;
     const auto player_prototype = core::PrototypeId::parse("base:entities/player");
     if (!player_prototype.has_value()) {
