@@ -6,7 +6,7 @@ Implemented foundation:
 
 - `ProcessDefinition`
   - stable process prototype id
-  - default required work in milliseconds
+  - default required work in authoritative world ticks
   - data-defined room requirement
   - data-defined power requirement and required capacity
   - base quality rate in per-mille
@@ -21,6 +21,7 @@ Implemented foundation:
   - start time and last update time
   - accumulated effective work
   - interruption state
+  - output-claimed state, optional condition function id, and interruption policy
   - validates known process state, work/time consistency, complete-state work, and stale
     interruption reasons
 
@@ -33,6 +34,9 @@ Implemented foundation:
   - advances running processes from timestamps
   - applies room/power/quality modifiers as deterministic per-mille rates
   - supports interruption and resume without granting hidden offline progress
+  - exposes typed lazy-evaluation triggers for chunk load, interaction, render proximity, state
+    change, inspection, and save-load validation; the current foundation records the call boundary
+    but all trigger kinds share the same timestamp advancement behavior
   - can create instances directly from validated `ProcessDefinition` records
   - participates in simulation LOD through process-owner subjects derived from spatial owner
     records, carrying both owner `SaveId` and process `ProcessId` without storing processes as
@@ -55,13 +59,19 @@ Implemented foundation:
 
 - `process.advance_all`
   - server-authoritative command for applying timestamp progress to all running processes
-  - uses the command execution server time, not client time or frame count
+  - uses `WorldState::world_time`, not client time, wall time, the envelope timestamp, or frame
+    count
   - rejects client-supplied process rate modifiers
   - materializes each process prototype definition to get room, power, and quality requirements
   - resolves per-process room and power modifiers from `WorldState` derived rooms and
     owner-scoped power-network ports
   - applies room, power, and quality modifiers through the shared per-mille rate model
   - commits only when at least one process changes state
+
+The canonical units and prototype field are ticks and `default_required_work_ticks`. The C++ data
+types and prototype loader retain the old `_ms` names as source/content compatibility aliases;
+those aliases do not change the values into milliseconds. A save stores the same `u64` world-tick
+domain used by `WorldState`.
 
 This model is intentionally generic. Drying, firing, smoking, smelting, crop growth,
 animal recovery, ward charging, and machine work should specialize it through game

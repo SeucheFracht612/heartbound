@@ -108,11 +108,16 @@ binding. It accepts a deliberately small Luau-like export table:
 ```lua
 return {
   ping = function(value) return value end,
-  notify = function(chunk, voxel, cell)
+  notify = function(chunk, voxel, prototype)
     return emit("world.set_voxel", chunk, voxel, prototype)
   end
 }
 ```
+
+Loader directives are module metadata, not executable source. The loader parses recognized
+`-- heartstead.*` directive lines and replaces their source bytes with spaces before the
+restricted parser or a future VM receives the module. This preserves line offsets without making
+the foundation evaluator understand comments or granting directives runtime meaning.
 
 It validates source shape, exported function names, parameter counts, call stage,
 required permissions, and instruction budgets, then returns simple literal or argument
