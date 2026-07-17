@@ -738,11 +738,11 @@ core::Status HeadlessPlatform::validate_queued_event(const PlatformEvent& event)
 void HeadlessPlatform::apply_input_event(const PlatformEvent& event) {
     if (event.kind == PlatformEventKind::window_focus_lost) {
         for (auto& [_, state] : input_[event.window_id.value()]) {
-            state.released = state.down;
+            state.released |= state.down;
             state.down = false;
         }
         for (auto& [_, state] : mouse_buttons_[event.window_id.value()]) {
-            state.released = state.down;
+            state.released |= state.down;
             state.down = false;
         }
         cursor_captured_[event.window_id.value()] = false;
@@ -755,14 +755,14 @@ void HeadlessPlatform::apply_input_event(const PlatformEvent& event) {
 
     if (event.kind == PlatformEventKind::key_down) {
         auto& state = input_[event.window_id.value()][static_cast<std::uint32_t>(event.key)];
-        state.pressed = !state.down;
+        state.pressed |= !state.down;
         state.down = true;
         return;
     }
 
     if (event.kind == PlatformEventKind::key_up) {
         auto& state = input_[event.window_id.value()][static_cast<std::uint32_t>(event.key)];
-        state.released = state.down;
+        state.released |= state.down;
         state.down = false;
         return;
     }
@@ -788,7 +788,7 @@ void HeadlessPlatform::apply_input_event(const PlatformEvent& event) {
     if (event.kind == PlatformEventKind::mouse_button_down) {
         auto& state =
             mouse_buttons_[event.window_id.value()][static_cast<std::uint32_t>(event.mouse_button)];
-        state.pressed = !state.down;
+        state.pressed |= !state.down;
         state.down = true;
         return;
     }
@@ -796,7 +796,7 @@ void HeadlessPlatform::apply_input_event(const PlatformEvent& event) {
     if (event.kind == PlatformEventKind::mouse_button_up) {
         auto& state =
             mouse_buttons_[event.window_id.value()][static_cast<std::uint32_t>(event.mouse_button)];
-        state.released = state.down;
+        state.released |= state.down;
         state.down = false;
         return;
     }
