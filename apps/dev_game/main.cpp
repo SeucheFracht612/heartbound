@@ -75,7 +75,7 @@ int fail(const core::Error& error) {
     return 1;
 }
 
-int fail(std::string message) {
+int fail(std::string_view message) {
     std::cerr << message << '\n';
     return 1;
 }

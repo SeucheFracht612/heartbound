@@ -131,25 +131,25 @@ struct Options {
                             {12, 12, 300, 54}});
 }
 
-void print_usage() {
-    std::cout << "Usage: heartstead_render_benchmark [options]\n"
-                 "  --scene NAME       flat, mountains, caves, checkerboard, forest, rapid-edits,\n"
-                 "                     flythrough, churn, large-coordinates, resize-minimize\n"
-                 "  --vulkan           Use a native Vulkan window (headless is the default)\n"
-                 "  --headless         Use the deterministic validation backend\n"
-                 "  --frames N         Measured frames (default 300)\n"
-                 "  --warmup N         Unrecorded warm-up frames (default 60)\n"
-                 "  --radius N         Horizontal chunk radius, 0..8 (default 1)\n"
-                 "  --width N          Initial framebuffer width (default 1280)\n"
-                 "  --height N         Initial framebuffer height (default 720)\n"
-                 "  --seed N           Deterministic unsigned 64-bit scene seed\n"
-                 "  --frame-cap N      Sleep to cap at N FPS; 0 is uncapped (default)\n"
-                 "  --output PATH      Result path (default benchmark-SCENE.json)\n"
-                 "  --format json|csv  Result serialization format\n"
-                 "  --reference-mesher Use the correctness-reference terrain mesher\n"
-                 "  --no-validation    Do not request Vulkan validation\n"
-                 "  --list-scenes      Print scene names\n"
-                 "  --help             Print this help\n";
+void print_usage(std::ostream& output) {
+    output << "Usage: heartstead_render_benchmark [options]\n"
+              "  --scene NAME       flat, mountains, caves, checkerboard, forest, rapid-edits,\n"
+              "                     flythrough, churn, large-coordinates, resize-minimize\n"
+              "  --vulkan           Use a native Vulkan window (headless is the default)\n"
+              "  --headless         Use the deterministic validation backend\n"
+              "  --frames N         Measured frames (default 300)\n"
+              "  --warmup N         Unrecorded warm-up frames (default 60)\n"
+              "  --radius N         Horizontal chunk radius, 0..8 (default 1)\n"
+              "  --width N          Initial framebuffer width (default 1280)\n"
+              "  --height N         Initial framebuffer height (default 720)\n"
+              "  --seed N           Deterministic unsigned 64-bit scene seed\n"
+              "  --frame-cap N      Sleep to cap at N FPS; 0 is uncapped (default)\n"
+              "  --output PATH      Result path (default benchmark-SCENE.json)\n"
+              "  --format json|csv  Result serialization format\n"
+              "  --reference-mesher Use the correctness-reference terrain mesher\n"
+              "  --no-validation    Do not request Vulkan validation\n"
+              "  --list-scenes      Print scene names\n"
+              "  --help             Print this help\n";
 }
 
 void print_scenes() {
@@ -356,12 +356,14 @@ int main(int argc, char** argv) {
         using namespace heartstead;
         const auto parsed_options = parse_options(argc, argv);
         if (!parsed_options) {
-            print_usage();
-            return fail(parsed_options.error().message);
+            print_usage(std::cerr);
+            std::cerr << parsed_options.error().code << ": " << parsed_options.error().message
+                      << '\n';
+            return 2;
         }
-        const auto options = parsed_options.value();
+        const auto& options = parsed_options.value();
         if (options.help) {
-            print_usage();
+            print_usage(std::cout);
             return 0;
         }
         if (options.list_scenes) {
