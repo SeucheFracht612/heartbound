@@ -126,6 +126,10 @@ core::Status RuntimeSession::initialize() {
             return core::Status::failure(synchronized.error().code,
                                          synchronized.error().message);
         }
+        auto presented = synchronize_presentation();
+        if (!presented) {
+            return core::Status::failure(presented.error().code, presented.error().message);
+        }
     }
     running_ = true;
     return core::Status::ok();
@@ -168,6 +172,15 @@ core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput inpu
                                                                  synchronized.error().message);
             }
             stats.client = std::move(synchronized).value();
+            auto presented = synchronize_presentation();
+            if (!presented) {
+                return core::Result<RuntimeFrameStats>::failure(presented.error().code,
+                                                                 presented.error().message);
+            }
+            stats.presentation.inserted_objects += presented.value().inserted_objects;
+            stats.presentation.updated_objects += presented.value().updated_objects;
+            stats.presentation.removed_objects += presented.value().removed_objects;
+            stats.presentation.unchanged_objects += presented.value().unchanged_objects;
         }
     }
     return core::Result<RuntimeFrameStats>::success(std::move(stats));
@@ -225,6 +238,11 @@ core::Status RuntimeSession::save_to(const save::FileSaveDatabase& database) con
     return database.write_snapshot(snapshot.value());
 }
 
+RenderSnapshot RuntimeSession::capture_render_snapshot() const {
+    const auto tick = server_ == nullptr ? 0 : server_->world().world_time();
+    return presentation_.extract(tick);
+}
+
 core::Status RuntimeSession::pump_client_messages() {
     if (server_ == nullptr || client_ == nullptr) {
         return core::Status::ok();
@@ -234,6 +252,13 @@ core::Status RuntimeSession::pump_client_messages() {
         return core::Status::failure(messages.error().code, messages.error().message);
     }
     return client_->receive(messages.value());
+}
+
+core::Result<PresentationSynchronizationStats> RuntimeSession::synchronize_presentation() {
+    if (client_ == nullptr) {
+        return core::Result<PresentationSynchronizationStats>::success({});
+    }
+    return presentation_synchronizer_.synchronize(*client_, presentation_);
 }
 
 core::Status RuntimeSession::shutdown() {
@@ -247,6 +272,8 @@ core::Status RuntimeSession::shutdown() {
             result = status;
         }
     }
+    presentation_synchronizer_.clear();
+    presentation_.clear();
     client_.reset();
     if (server_ != nullptr) {
         auto status = server_->stop();
@@ -277,6 +304,14 @@ ClientRuntime* RuntimeSession::client() noexcept {
 
 const ClientRuntime* RuntimeSession::client() const noexcept {
     return client_.get();
+}
+
+PresentationWorld* RuntimeSession::presentation() noexcept {
+    return client_ == nullptr ? nullptr : &presentation_;
+}
+
+const PresentationWorld* RuntimeSession::presentation() const noexcept {
+    return client_ == nullptr ? nullptr : &presentation_;
 }
 
 const RuntimeConfiguration& RuntimeSession::config() const noexcept {

@@ -239,6 +239,7 @@ ServerRuntime::run_tick(std::uint64_t tick, double fixed_delta_seconds, std::int
     current_repeated_input_count_ = 0;
     current_movement_event_count_ = 0;
     current_movement_snapshot_count_ = 0;
+    current_player_tombstone_count_ = 0;
     auto simulation = scheduler_.run_tick(
         {tick, fixed_delta_seconds, &world_, physics_.get(), &events_});
     if (!simulation) {
@@ -254,6 +255,7 @@ ServerRuntime::run_tick(std::uint64_t tick, double fixed_delta_seconds, std::int
     stats.repeated_input_count = current_repeated_input_count_;
     stats.movement_event_count = current_movement_event_count_;
     stats.movement_snapshot_count = current_movement_snapshot_count_;
+    stats.player_tombstone_count = current_player_tombstone_count_;
     return core::Result<ServerRuntimeTickStats>::success(std::move(stats));
 }
 
@@ -286,6 +288,8 @@ core::Status ServerRuntime::disconnect_client(core::NetId client_id) {
     }
     const auto runtime_handle = found->second.runtime_handle;
     const auto entity_id = found->second.entity_id;
+    const auto* player = players_.find(runtime_handle);
+    const auto removed_player_net_id = player == nullptr ? core::NetId{} : player->net_id;
     player_connections_.erase(found);
     (void)players_.erase(runtime_handle);
     const auto* legacy = world_.entities().find(runtime_handle);
@@ -297,6 +301,9 @@ core::Status ServerRuntime::disconnect_client(core::NetId client_id) {
         if (!status) {
             return status;
         }
+    }
+    if (removed_player_net_id.is_valid()) {
+        pending_player_removals_.push_back(removed_player_net_id);
     }
     return core::Status::ok();
 }
@@ -617,6 +624,20 @@ core::Status ServerRuntime::replicate_players() {
     std::ranges::sort(client_ids);
     const auto collision_revision = collision_world_revision();
     for (const auto recipient : client_ids) {
+        for (const auto removed_player : pending_player_removals_) {
+            auto sequence = reserve_custom_replication_sequence();
+            if (!sequence) {
+                return core::Status::failure(sequence.error().code, sequence.error().message);
+            }
+            auto status = host_.send_replication_message(
+                core::NetId::from_value(recipient), movement::make_player_removal_message(
+                                                        removed_player, sequence.value(),
+                                                        current_time_ms_));
+            if (!status) {
+                return status;
+            }
+            ++current_player_tombstone_count_;
+        }
         for (const auto source : client_ids) {
             const auto& connection = player_connections_.at(source);
             const auto* player = players_.find(connection.runtime_handle);
@@ -642,6 +663,7 @@ core::Status ServerRuntime::replicate_players() {
             ++current_movement_snapshot_count_;
         }
     }
+    pending_player_removals_.clear();
     return core::Status::ok();
 }
 

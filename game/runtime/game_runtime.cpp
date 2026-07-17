@@ -522,6 +522,15 @@ core::Status GameRuntime::save_to(const save::FileSaveDatabase& database) const 
     return session_->save_to(database);
 }
 
+core::Result<RenderSnapshot> GameRuntime::capture_render_snapshot() const {
+    if (session_ == nullptr || session_->client() == nullptr) {
+        return core::Result<RenderSnapshot>::failure(
+            "game_runtime.no_client_presentation",
+            "render snapshot extraction requires an active client presentation world");
+    }
+    return core::Result<RenderSnapshot>::success(session_->capture_render_snapshot());
+}
+
 core::Status GameRuntime::shutdown() {
     if (session_ == nullptr) {
         return core::Status::ok();

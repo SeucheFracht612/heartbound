@@ -121,6 +121,7 @@ class GameRuntime {
                                               std::int64_t now_ms = 0);
     [[nodiscard]] core::Result<save::SaveSnapshot> capture_save_snapshot() const;
     [[nodiscard]] core::Status save_to(const save::FileSaveDatabase& database) const;
+    [[nodiscard]] core::Result<RenderSnapshot> capture_render_snapshot() const;
     [[nodiscard]] core::Status shutdown();
     [[nodiscard]] RuntimeSession* session() noexcept;
     [[nodiscard]] const RuntimeSession* session() const noexcept;

@@ -11,6 +11,7 @@
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "game/features/interaction/voxel_commands.hpp"
 #include "game/framework/gameplay_module.hpp"
+#include "game/presentation/client_presentation.hpp"
 #include "game/runtime/client_runtime.hpp"
 #include "game/runtime/server_runtime.hpp"
 
@@ -51,6 +52,7 @@ struct RuntimeFrameStats {
     simulation::FixedStepFrame fixed_step;
     std::vector<ServerRuntimeTickStats> server_ticks;
     ClientRuntimeStats client;
+    PresentationSynchronizationStats presentation;
     std::uint64_t authoritative_world_tick = 0;
 };
 
@@ -75,6 +77,7 @@ class RuntimeSession final {
                                                    std::int64_t now_ms = 0);
     [[nodiscard]] core::Result<save::SaveSnapshot> capture_save_snapshot() const;
     [[nodiscard]] core::Status save_to(const save::FileSaveDatabase& database) const;
+    [[nodiscard]] RenderSnapshot capture_render_snapshot() const;
     [[nodiscard]] core::Status shutdown();
 
     [[nodiscard]] bool is_running() const noexcept;
@@ -82,6 +85,8 @@ class RuntimeSession final {
     [[nodiscard]] const ServerRuntime* server() const noexcept;
     [[nodiscard]] ClientRuntime* client() noexcept;
     [[nodiscard]] const ClientRuntime* client() const noexcept;
+    [[nodiscard]] PresentationWorld* presentation() noexcept;
+    [[nodiscard]] const PresentationWorld* presentation() const noexcept;
     [[nodiscard]] const RuntimeConfiguration& config() const noexcept;
 
   private:
@@ -90,6 +95,7 @@ class RuntimeSession final {
                    const world::VoxelPalette& voxel_palette);
     [[nodiscard]] core::Status initialize();
     [[nodiscard]] core::Status pump_client_messages();
+    [[nodiscard]] core::Result<PresentationSynchronizationStats> synchronize_presentation();
 
     RuntimeConfiguration config_;
     SessionRequest request_;
@@ -98,6 +104,8 @@ class RuntimeSession final {
     simulation::FixedStepClock fixed_step_;
     std::unique_ptr<ServerRuntime> server_;
     std::unique_ptr<ClientRuntime> client_;
+    PresentationWorld presentation_;
+    ClientPresentationSynchronizer presentation_synchronizer_;
     bool running_ = false;
 };
 

@@ -39,6 +39,7 @@ struct ServerRuntimeTickStats {
     std::uint32_t repeated_input_count = 0;
     std::uint32_t movement_event_count = 0;
     std::uint32_t movement_snapshot_count = 0;
+    std::uint32_t player_tombstone_count = 0;
 };
 
 class ServerRuntime final {
@@ -115,6 +116,7 @@ class ServerRuntime final {
     GameplayModuleRegistry gameplay_modules_;
     std::unordered_map<std::uint64_t, PlayerConnection> player_connections_;
     std::vector<world::VoxelEditRecord> pending_saved_voxel_edits_;
+    std::vector<core::NetId> pending_player_removals_;
     net::HostSessionTickResult current_commands_;
     world::WorldReplicationDeltaDeliveryReport current_replication_;
     physics::PhysicsStepStats current_physics_;
@@ -122,6 +124,7 @@ class ServerRuntime final {
     std::uint32_t current_repeated_input_count_ = 0;
     std::uint32_t current_movement_event_count_ = 0;
     std::uint32_t current_movement_snapshot_count_ = 0;
+    std::uint32_t current_player_tombstone_count_ = 0;
     std::int64_t current_time_ms_ = 0;
     bool spawn_area_initialized_ = false;
     std::uint64_t next_custom_replication_sequence_ = 1;

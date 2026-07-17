@@ -23,6 +23,7 @@ core::Status ClientRuntime::receive(std::span<const net::TransportEnvelope> mess
 }
 
 core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
+    player_tombstones_.clear();
     auto completed_chunks = apply_queued_chunk_snapshots();
     if (!completed_chunks) {
         return core::Result<ClientRuntimeStats>::failure(completed_chunks.error().code,
@@ -41,6 +42,8 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
         session_.drain_replication_messages(movement::movement_snapshot_payload_type);
     auto assignments =
         session_.drain_replication_messages(movement::player_assignment_payload_type);
+    auto removals =
+        session_.drain_replication_messages(movement::player_removal_payload_type);
     for (const auto& assignment_message : assignments) {
         auto assignment = movement::player_assignment_from_transport(assignment_message);
         if (!assignment) {
@@ -53,6 +56,15 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
                 "connected client received a conflicting local player assignment");
         }
         local_player_net_id_ = assignment.value();
+    }
+    for (const auto& removal_message : removals) {
+        auto removal = movement::player_removal_from_transport(removal_message);
+        if (!removal) {
+            return core::Result<ClientRuntimeStats>::failure(removal.error().code,
+                                                             removal.error().message);
+        }
+        movement_snapshots_.erase(removal.value().value());
+        player_tombstones_.push_back(removal.value());
     }
     std::uint32_t movement_snapshot_count = 0;
     for (const auto& message : movement_messages) {
@@ -74,6 +86,7 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
     stats.received_message_count = messages_since_sync_;
     stats.command_result_count = result_count;
     stats.movement_snapshot_count = movement_snapshot_count;
+    stats.player_tombstone_count = static_cast<std::uint32_t>(player_tombstones_.size());
     stats.chunk_snapshot_slice_count = completed_chunks.value().slice_count;
     stats.completed_chunk_snapshot_count = completed_chunks.value().completed_chunk_count;
     stats.replication = std::move(replication).value();
@@ -135,6 +148,10 @@ std::vector<const movement::PlayerControllerSnapshot*> ClientRuntime::movement_s
         return lhs->player_net_id.value() < rhs->player_net_id.value();
     });
     return result;
+}
+
+std::span<const core::NetId> ClientRuntime::player_tombstones() const noexcept {
+    return player_tombstones_;
 }
 
 void ClientRuntime::clear_command_results() noexcept {

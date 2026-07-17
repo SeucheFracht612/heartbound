@@ -21,6 +21,11 @@ target_compile_definitions(
 heartstead_configure_target(heartstead_runtime_spine_tests)
 add_test(NAME heartstead_runtime_spine_tests COMMAND heartstead_runtime_spine_tests)
 
+add_executable(heartstead_presentation_world_tests presentation_world_tests.cpp)
+target_link_libraries(heartstead_presentation_world_tests PRIVATE Heartstead::GameRuntime)
+heartstead_configure_target(heartstead_presentation_world_tests)
+add_test(NAME heartstead_presentation_world_tests COMMAND heartstead_presentation_world_tests)
+
 function(heartstead_add_foundation_test target_name source_file)
   add_executable(${target_name} ${source_file})
   target_link_libraries(${target_name} PRIVATE Heartstead::Engine)

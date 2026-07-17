@@ -207,6 +207,13 @@ void test_authoritative_player_input_moves_and_replicates() {
     assert(snapshot != nullptr);
     assert(snapshot->state.position == player_after->state.position);
     assert(snapshot->last_processed_input_sequence == 1);
+    auto render_snapshot = runtime.capture_render_snapshot();
+    assert(render_snapshot);
+    assert(render_snapshot.value().objects.size() == 1);
+    assert(render_snapshot.value().objects.front().source_net_id == player_net_id);
+    assert(render_snapshot.value().objects.front().current_transform.position ==
+           player_after->state.position);
+    assert(render_snapshot.value().objects.front().previous_transform.position == start);
 
     auto repeated = runtime.run_frame({16'667, 34});
     assert(repeated && repeated.value().server_ticks.size() == 1);
@@ -350,6 +357,50 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(runtime.shutdown());
 }
 
+void test_replication_tombstone_removes_presentation_proxy() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    assert(runtime.start_session({}, make_session_request(report)));
+    auto* session = runtime.session();
+    auto* server = session->server();
+    assert(server != nullptr);
+    auto second_client = server->connect_client();
+    assert(second_client);
+    const auto* second_player = server->player_for_client(second_client.value());
+    assert(second_player != nullptr);
+    const auto second_player_net_id = second_player->net_id;
+
+    movement::PlayerInputFrame input;
+    input.tick = 1;
+    input.sequence = 1;
+    input.move_z = 32'767;
+    net::CommandEnvelope command;
+    command.sequence = 1;
+    command.sender = second_client.value();
+    command.type = "player.input";
+    command.payload = movement::PlayerInputTextCodec::encode(input);
+    command.client_time_ms = 10;
+    assert(server->submit_command(second_client.value(), std::move(command)));
+    auto appeared = runtime.run_frame({16'667, 17});
+    assert(appeared);
+    auto snapshot = runtime.capture_render_snapshot();
+    assert(snapshot && snapshot.value().objects.size() == 2);
+    assert(session->presentation()->find_object(second_player_net_id) != nullptr);
+
+    assert(server->disconnect_client(second_client.value()));
+    auto disappeared = runtime.run_frame({16'667, 34});
+    assert(disappeared);
+    assert(disappeared.value().server_ticks.front().player_tombstone_count == 1);
+    assert(disappeared.value().client.player_tombstone_count == 1);
+    assert(disappeared.value().presentation.removed_objects == 1);
+    assert(server->events().entity_destroyed.size() == 1);
+    snapshot = runtime.capture_render_snapshot();
+    assert(snapshot && snapshot.value().objects.size() == 1);
+    assert(session->presentation()->find_object(second_player_net_id) == nullptr);
+    assert(runtime.shutdown());
+}
+
 void test_runtime_configuration_rejects_invalid_compositions() {
     game::RuntimeConfiguration empty;
     empty.create_server = false;
@@ -377,6 +428,7 @@ int main() {
     test_typed_voxel_commands_validate_and_replicate();
     test_session_save_and_reload_restores_authoritative_state();
     test_gameplay_modules_extend_runtime_through_registration_contract();
+    test_replication_tombstone_removes_presentation_proxy();
     test_runtime_configuration_rejects_invalid_compositions();
     return 0;
 }

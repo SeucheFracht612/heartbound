@@ -19,6 +19,7 @@ inline constexpr std::string_view movement_input_payload_type = "movement.input.
 inline constexpr std::string_view movement_snapshot_payload_type = "movement.snapshot.v1";
 inline constexpr std::string_view movement_input_bundle_payload_type = "movement.input_bundle.v1";
 inline constexpr std::string_view player_assignment_payload_type = "movement.player_assignment.v1";
+inline constexpr std::string_view player_removal_payload_type = "movement.player_removal.v1";
 
 struct PlayerInputBundle {
     std::vector<PlayerInputFrame> frames;
@@ -117,5 +118,10 @@ movement_snapshot_from_transport(const net::TransportEnvelope& envelope,
                                                                    std::int64_t timestamp_ms);
 [[nodiscard]] core::Result<core::NetId>
 player_assignment_from_transport(const net::TransportEnvelope& envelope);
+[[nodiscard]] net::TransportMessage make_player_removal_message(core::NetId player_net_id,
+                                                                std::uint64_t sequence,
+                                                                std::int64_t timestamp_ms);
+[[nodiscard]] core::Result<core::NetId>
+player_removal_from_transport(const net::TransportEnvelope& envelope);
 
 } // namespace heartstead::movement

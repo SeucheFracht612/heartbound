@@ -20,6 +20,7 @@ struct ClientRuntimeStats {
     std::uint32_t received_message_count = 0;
     std::uint32_t command_result_count = 0;
     std::uint32_t movement_snapshot_count = 0;
+    std::uint32_t player_tombstone_count = 0;
     std::uint32_t chunk_snapshot_slice_count = 0;
     std::uint32_t completed_chunk_snapshot_count = 0;
     world::WorldClientReplicationApplyReport replication;
@@ -48,6 +49,7 @@ class ClientRuntime final {
     [[nodiscard]] const movement::PlayerControllerSnapshot* local_player_snapshot() const noexcept;
     [[nodiscard]] std::vector<const movement::PlayerControllerSnapshot*>
     movement_snapshots() const;
+    [[nodiscard]] std::span<const core::NetId> player_tombstones() const noexcept;
     void clear_command_results() noexcept;
 
   private:
@@ -70,6 +72,7 @@ class ClientRuntime final {
     net::ClientSession session_;
     std::vector<net::HostSessionCommandResult> command_results_;
     std::unordered_map<std::uint64_t, movement::PlayerControllerSnapshot> movement_snapshots_;
+    std::vector<core::NetId> player_tombstones_;
     core::NetId local_player_net_id_;
     std::map<world::ChunkCoord, ChunkSnapshotAssembly> chunk_snapshot_assemblies_;
     std::map<world::ChunkCoord, std::pair<world::ChunkIdentity, std::uint64_t>> remote_chunks_;
