@@ -1,5 +1,6 @@
 #include "engine/content/content_validation.hpp"
 #include "engine/core/logging.hpp"
+#include "engine/core/process_entry.hpp"
 #include "engine/input/input_action.hpp"
 #include "engine/movement/player_camera.hpp"
 #include "engine/movement/player_input.hpp"
@@ -29,27 +30,44 @@ using namespace heartstead;
 struct LaunchOptions {
     bool headless = false;
     std::optional<std::uint32_t> maximum_frames;
+    bool help = false;
 };
 
-LaunchOptions parse_options(int argc, char** argv) {
+core::Result<LaunchOptions> parse_options(int argc, char** argv) {
     LaunchOptions options;
     for (int index = 1; index < argc; ++index) {
         const auto argument = std::string_view(argv[index]);
-        if (argument == "--headless") {
+        if (argument == "--help" || argument == "-h") {
+            options.help = true;
+        } else if (argument == "--headless") {
             options.headless = true;
-        } else if (argument == "--frames" && index + 1 < argc) {
+        } else if (argument == "--frames") {
+            if (index + 1 >= argc) {
+                return core::Result<LaunchOptions>::failure("dev_game.missing_frame_count",
+                                                            "--frames requires a positive integer");
+            }
             const auto value = std::string_view(argv[++index]);
             std::uint32_t frames = 0;
             const auto [end, error] =
                 std::from_chars(value.data(), value.data() + value.size(), frames);
-            if (error == std::errc{} && end == value.data() + value.size() && frames > 0) {
-                options.maximum_frames = frames;
-                // CI smoke runs historically use only --frames and must not require a display.
-                options.headless = true;
+            if (error != std::errc{} || end != value.data() + value.size() || frames == 0) {
+                return core::Result<LaunchOptions>::failure(
+                    "dev_game.invalid_frame_count", "--frames requires a positive 32-bit integer");
             }
+            options.maximum_frames = frames;
+            // CI smoke runs historically use only --frames and must not require a display.
+            options.headless = true;
+        } else {
+            return core::Result<LaunchOptions>::failure("dev_game.unknown_option",
+                                                        "unknown option: " + std::string(argument));
         }
     }
-    return options;
+    return core::Result<LaunchOptions>::success(std::move(options));
+}
+
+void print_usage(const char* executable, std::ostream& output) {
+    output << "usage: " << executable << " [--headless] [--frames N]\n"
+           << "       --frames implies --headless for deterministic smoke runs\n";
 }
 
 int fail(const core::Error& error) {
@@ -68,10 +86,9 @@ create_runtime(const content::ContentValidationReport& content_report) {
 }
 
 core::Status start_runtime(game::GameRuntime& runtime,
-                           const content::ContentValidationReport& content_report,
-                           bool headless) {
-    auto metadata = content::save_metadata_from_content_report(
-        content_report, "development", 0x4845415254535445ULL);
+                           const content::ContentValidationReport& content_report, bool headless) {
+    auto metadata = content::save_metadata_from_content_report(content_report, "development",
+                                                               0x4845415254535445ULL);
     if (!metadata) {
         return core::Status::failure(metadata.error().code, metadata.error().message);
     }
@@ -91,18 +108,15 @@ int run_headless(game::GameRuntime& runtime, std::uint32_t frame_count) {
     game::RuntimeFrameStats last_frame;
     for (std::uint32_t frame = 0; frame < frame_count; ++frame) {
         simulated_us += 16'667;
-        auto result = runtime.run_frame(
-            {16'667, static_cast<std::int64_t>(simulated_us / 1000U)});
+        auto result = runtime.run_frame({16'667, static_cast<std::int64_t>(simulated_us / 1000U)});
         if (!result) {
             return fail(result.error());
         }
         last_frame = std::move(result).value();
     }
     std::cout << "development runtime: frames=" << frame_count
-              << " authoritative_tick=" << last_frame.authoritative_world_tick
-              << " local_client="
-              << (runtime.session()->client()->is_connected() ? "connected" : "offline")
-              << '\n';
+              << " authoritative_tick=" << last_frame.authoritative_world_tick << " local_client="
+              << (runtime.session()->client()->is_connected() ? "connected" : "offline") << '\n';
     auto status = runtime.shutdown();
     return status ? 0 : fail(status.error());
 }
@@ -121,26 +135,21 @@ struct ShaderSet {
 core::Result<ShaderSet> load_shaders() {
     const auto root = std::filesystem::path{HEARTSTEAD_DEV_GAME_ASSET_DIR} / "shaders";
     const std::array paths{
-        root / "terrain.vert.spv",    root / "terrain.frag.spv",
-        root / "static_mesh.vert.spv", root / "static_mesh.frag.spv",
-        root / "debug_line.vert.spv", root / "debug_line.frag.spv",
-        root / "ui.vert.spv",         root / "ui.frag.spv",
+        root / "terrain.vert.spv",     root / "terrain.frag.spv",    root / "static_mesh.vert.spv",
+        root / "static_mesh.frag.spv", root / "debug_line.vert.spv", root / "debug_line.frag.spv",
+        root / "ui.vert.spv",          root / "ui.frag.spv",
     };
     std::array<core::Result<std::vector<std::uint32_t>>, 8> loaded{
-        renderer::shaders::load_spirv_file(paths[0]),
-        renderer::shaders::load_spirv_file(paths[1]),
-        renderer::shaders::load_spirv_file(paths[2]),
-        renderer::shaders::load_spirv_file(paths[3]),
-        renderer::shaders::load_spirv_file(paths[4]),
-        renderer::shaders::load_spirv_file(paths[5]),
-        renderer::shaders::load_spirv_file(paths[6]),
-        renderer::shaders::load_spirv_file(paths[7]),
+        renderer::shaders::load_spirv_file(paths[0]), renderer::shaders::load_spirv_file(paths[1]),
+        renderer::shaders::load_spirv_file(paths[2]), renderer::shaders::load_spirv_file(paths[3]),
+        renderer::shaders::load_spirv_file(paths[4]), renderer::shaders::load_spirv_file(paths[5]),
+        renderer::shaders::load_spirv_file(paths[6]), renderer::shaders::load_spirv_file(paths[7]),
     };
     for (std::size_t index = 0; index < loaded.size(); ++index) {
         if (!loaded[index]) {
-            return core::Result<ShaderSet>::failure(
-                loaded[index].error().code,
-                "failed to load " + paths[index].string() + ": " + loaded[index].error().message);
+            return core::Result<ShaderSet>::failure(loaded[index].error().code,
+                                                    "failed to load " + paths[index].string() +
+                                                        ": " + loaded[index].error().message);
         }
     }
     ShaderSet result;
@@ -155,19 +164,22 @@ core::Result<ShaderSet> load_shaders() {
     return core::Result<ShaderSet>::success(std::move(result));
 }
 
-core::Status submit_gameplay_ui(renderer::UiRenderer& ui,
-                                renderer::rhi::RenderExtent extent) {
+core::Status submit_gameplay_ui(renderer::UiRenderer& ui, renderer::rhi::RenderExtent extent) {
     const auto center_x = static_cast<float>(extent.width) * 0.5F;
     const auto center_y = static_cast<float>(extent.height) * 0.5F;
     auto status = ui.submit_quad({{center_x - 1.0F, center_y - 8.0F},
                                   {center_x + 1.0F, center_y + 8.0F},
-                                  {}, {1.0F, 1.0F}, {1.0F, 1.0F, 1.0F, 0.9F}});
+                                  {},
+                                  {1.0F, 1.0F},
+                                  {1.0F, 1.0F, 1.0F, 0.9F}});
     if (!status) {
         return status;
     }
     status = ui.submit_quad({{center_x - 8.0F, center_y - 1.0F},
                              {center_x + 8.0F, center_y + 1.0F},
-                             {}, {1.0F, 1.0F}, {1.0F, 1.0F, 1.0F, 0.9F}});
+                             {},
+                             {1.0F, 1.0F},
+                             {1.0F, 1.0F, 1.0F, 0.9F}});
     if (!status) {
         return status;
     }
@@ -285,11 +297,14 @@ int run_native(game::GameRuntime& runtime, const content::ContentValidationRepor
                 }
             }
         }
+        if (active_platform.value()->should_quit()) {
+            break;
+        }
         const auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - previous_time);
         previous_time = now;
-        const auto frame_us = static_cast<std::uint64_t>(
-            std::clamp<std::int64_t>(elapsed.count(), 1, 100'000));
+        const auto frame_us =
+            static_cast<std::uint64_t>(std::clamp<std::int64_t>(elapsed.count(), 1, 100'000));
         auto input_snapshot = active_platform.value()->input_snapshot(window.value());
         if (!input_snapshot) {
             return fail("platform did not provide an input snapshot");
@@ -304,8 +319,8 @@ int run_native(game::GameRuntime& runtime, const content::ContentValidationRepor
         if (!status) {
             return fail(status.error());
         }
-        auto runtime_frame = runtime.run_frame(
-            {frame_us, active_platform.value()->clock().now_ms()});
+        auto runtime_frame =
+            runtime.run_frame({frame_us, active_platform.value()->clock().now_ms()});
         if (!runtime_frame) {
             return fail(runtime_frame.error());
         }
@@ -314,9 +329,9 @@ int run_native(game::GameRuntime& runtime, const content::ContentValidationRepor
             return fail("client has no assigned player snapshot");
         }
         if (extent.is_valid()) {
-            auto camera_frame = camera_rig.evaluate(player->state,
-                                                    movement::PlayerCameraPerspective::first_person,
-                                                    extent.width, extent.height);
+            auto camera_frame =
+                camera_rig.evaluate(player->state, movement::PlayerCameraPerspective::first_person,
+                                    extent.width, extent.height);
             if (!camera_frame) {
                 return fail(camera_frame.error());
             }
@@ -387,22 +402,35 @@ int run_native(game::GameRuntime& runtime, const content::ContentValidationRepor
 } // namespace
 
 int main(int argc, char** argv) {
-    const auto options = parse_options(argc, argv);
-    const auto content_report = heartstead::content::ContentValidation::validate(
-        std::filesystem::path(HEARTSTEAD_SOURCE_ROOT));
-    if (content_report.has_errors()) {
-        return fail("content validation failed");
-    }
-    auto runtime = create_runtime(content_report);
-    if (!runtime) {
-        return fail(runtime.error());
-    }
-    auto status = start_runtime(runtime.value(), content_report, options.headless);
-    if (!status) {
-        return fail(status.error());
-    }
-    if (options.headless) {
-        return run_headless(runtime.value(), options.maximum_frames.value_or(120));
-    }
-    return run_native(runtime.value(), content_report, options);
+    return heartstead::core::run_process_entry(argv[0], [argc, argv] {
+        const auto parsed_options = parse_options(argc, argv);
+        if (!parsed_options) {
+            print_usage(argv[0], std::cerr);
+            std::cerr << parsed_options.error().code << ": " << parsed_options.error().message
+                      << '\n';
+            return 2;
+        }
+        const auto options = parsed_options.value();
+        if (options.help) {
+            print_usage(argv[0], std::cout);
+            return 0;
+        }
+        const auto content_report = heartstead::content::ContentValidation::validate(
+            std::filesystem::path(HEARTSTEAD_SOURCE_ROOT));
+        if (content_report.has_errors()) {
+            return fail("content validation failed");
+        }
+        auto runtime = create_runtime(content_report);
+        if (!runtime) {
+            return fail(runtime.error());
+        }
+        auto status = start_runtime(runtime.value(), content_report, options.headless);
+        if (!status) {
+            return fail(status.error());
+        }
+        if (options.headless) {
+            return run_headless(runtime.value(), options.maximum_frames.value_or(120));
+        }
+        return run_native(runtime.value(), content_report, options);
+    });
 }
