@@ -415,6 +415,50 @@ void test_host_send_failure_blocks_only_the_affected_client() {
            net::TransportMessageKind::replication);
 }
 
+void test_host_backpressures_commands_while_committed_delivery_is_blocked() {
+    FaultInjectingTransportHost* transport = nullptr;
+    auto session = make_fault_injected_session(transport);
+    assert(session.start());
+    auto client = session.connect_client();
+    assert(client && transport != nullptr);
+    assert(session.drain_client_messages(client.value()));
+
+    std::uint32_t dispatch_count = 0;
+    auto dispatcher = make_mutating_dispatcher(dispatch_count);
+    transport->fail_server_send(client.value(), net::TransportMessageKind::command_result, 1, 2);
+    assert(session.send_client_command(
+        client.value(), net::CommandEnvelope{1, client.value(), "test.mutate", "first", 0}));
+
+    auto first_tick = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(first_tick && dispatch_count == 1);
+    assert(first_tick.value().outbound_delivery.pending_message_count == 2);
+
+    assert(session.send_client_command(
+        client.value(), net::CommandEnvelope{2, client.value(), "test.mutate", "second", 0}));
+    auto blocked_tick = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(blocked_tick && dispatch_count == 1);
+    assert(blocked_tick.value().transport_message_count == 0);
+    assert(blocked_tick.value().command_reports.empty());
+    assert(blocked_tick.value().outbound_delivery.failed_attempt_count == 1);
+    assert(blocked_tick.value().outbound_delivery.pending_message_count == 2);
+
+    auto recovered_tick = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(recovered_tick && dispatch_count == 2);
+    assert(recovered_tick.value().transport_message_count == 1);
+    assert(recovered_tick.value().command_reports.size() == 1);
+    assert(recovered_tick.value().outbound_delivery.pending_message_count == 0);
+
+    auto delivered = session.drain_client_messages(client.value());
+    assert(delivered && delivered.value().size() == 4);
+    for (std::size_t index = 0; index < delivered.value().size(); ++index) {
+        assert(delivered.value()[index].message.sequence ==
+               static_cast<std::uint64_t>(index / 2 + 1));
+        assert(delivered.value()[index].message.kind ==
+               (index % 2 == 0 ? net::TransportMessageKind::command_result
+                               : net::TransportMessageKind::replication));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -424,5 +468,6 @@ int main() {
     test_reliable_commands_are_delivered_only_after_gaps_close();
     test_host_retries_responses_without_redispatching_drained_commands();
     test_host_send_failure_blocks_only_the_affected_client();
+    test_host_backpressures_commands_while_committed_delivery_is_blocked();
     return 0;
 }

@@ -279,6 +279,15 @@ core::Result<HostSessionTickResult> HostSession::tick(const ServerCommandDispatc
     tick_result.transport_dropped_reliable_message_count =
         maintenance.value().dropped_reliable_message_count;
 
+    // A committed command must never be dispatched again, and a later command must not make an
+    // already-behind recipient fall farther out of sync. Give deferred reliable output the first
+    // opportunity to drain. If any recipient is still blocked, leave inbound commands in the
+    // transport until the next tick instead of growing the host queue without bound.
+    flush_pending_outbound(tick_result.outbound_delivery);
+    if (tick_result.outbound_delivery.pending_message_count > 0) {
+        return core::Result<HostSessionTickResult>::success(std::move(tick_result));
+    }
+
     auto messages = transport_->drain_server_messages();
     tick_result.transport_message_count = static_cast<std::uint32_t>(messages.size());
 
