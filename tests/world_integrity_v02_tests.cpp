@@ -451,6 +451,11 @@ void test_snapshot_allocator_recovery_is_complete_and_overflow_safe() {
                                    core::PrototypeId::parse("test:workpieces/recovery").value(),
                                    {1, 1, 1},
                                    workpieces::WorkpieceGridTextCodec::encode(grid.value())});
+    build::BuildPieceRecord fire_owner;
+    fire_owner.object_id = core::SaveId::from_value(800);
+    fire_owner.prototype_id =
+        core::PrototypeId::parse("test:build_pieces/fire_owner").value();
+    snapshot.build_pieces.push_back(fire_owner);
     snapshot.fires.push_back({core::SaveId::from_value(800),
                               core::PrototypeId::parse("test:fire/recovery").value(),
                               simulation::FireState::unlit});
@@ -475,6 +480,12 @@ void test_snapshot_allocator_recovery_is_complete_and_overflow_safe() {
     assert(imported);
     assert(imported.value().save_ids().peek_next() == core::SaveId::from_value(901));
     assert(imported.value().process_ids().peek_next() == core::ProcessId::from_value(1'001));
+
+    auto orphaned_fire = snapshot;
+    orphaned_fire.fires.front().fire_id = core::SaveId::from_value(799);
+    auto rejected_orphaned_fire = world::WorldSnapshotBridge::import_snapshot(orphaned_fire);
+    assert(!rejected_orphaned_fire);
+    assert(rejected_orphaned_fire.error().code == "world_snapshot.missing_owner");
 
     auto exhausted_save_ids = snapshot;
     exhausted_save_ids.missing_prototypes[0].stable_id = std::numeric_limits<std::uint64_t>::max();

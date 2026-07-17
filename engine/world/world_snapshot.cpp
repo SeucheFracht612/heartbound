@@ -394,6 +394,11 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
     }
 
     for (const auto& workpiece : snapshot.workpieces) {
+        auto status = track_unique_save_id(
+            save_ids, core::SaveId::from_value(workpiece.workpiece_id.value()), "workpiece");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
         auto grid = workpieces::WorkpieceGridTextCodec::decode(workpiece.encoded_cells);
         if (!grid) {
             return core::Result<WorldState>::failure(grid.error().code, grid.error().message);
@@ -413,7 +418,7 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
             }
             server_state = std::move(decoded_state).value();
         }
-        auto status = state.workpieces().insert(
+        status = state.workpieces().insert(
             WorkpieceRecord{workpiece.workpiece_id, workpiece.prototype_id, std::move(grid).value(),
                             workpiece.material_prototype_id, std::move(server_state),
                             workpiece.owner_session, workpiece.revision, workpiece.committed});
@@ -489,7 +494,11 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
     }
 
     for (const auto& fire : snapshot.fires) {
-        auto status = state.fires().insert(fire);
+        auto status = require_saved_object_id(save_ids, fire.fire_id, "fire");
+        if (!status) {
+            return core::Result<WorldState>::failure(status.error().code, status.error().message);
+        }
+        status = state.fires().insert(fire);
         if (!status) {
             return core::Result<WorldState>::failure(status.error().code, status.error().message);
         }

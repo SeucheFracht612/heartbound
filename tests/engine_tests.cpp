@@ -13578,6 +13578,20 @@ void test_world_snapshot_bridge() {
     duplicate.cargo_records.front().cargo_id = wall_id.value();
     assert(!heartstead::world::WorldSnapshotBridge::import_snapshot(duplicate, load_config));
 
+    auto duplicate_workpiece = snapshot.value();
+    duplicate_workpiece.workpieces.front().workpiece_id =
+        heartstead::core::WorkpieceId::from_value(wall_id.value().value());
+    const auto duplicate_workpiece_validation =
+        heartstead::save::SaveSnapshotValidator::validate(duplicate_workpiece, bridge_registry);
+    assert(!duplicate_workpiece_validation.valid());
+    assert(std::ranges::any_of(duplicate_workpiece_validation.issues, [](const auto& issue) {
+        return issue.code == "save_snapshot.duplicate_save_id";
+    }));
+    auto duplicate_workpiece_import =
+        heartstead::world::WorldSnapshotBridge::import_snapshot(duplicate_workpiece, load_config);
+    assert(!duplicate_workpiece_import);
+    assert(duplicate_workpiece_import.error().code == "world_snapshot.duplicate_save_id");
+
     auto invalid_cargo_hazard = snapshot.value();
     invalid_cargo_hazard.cargo_records.front().hazard_tags = {"bad tag"};
     auto invalid_cargo_hazard_import =

@@ -86,7 +86,6 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
     std::set<std::uint64_t> save_ids;
     std::set<std::uint64_t> build_piece_ids;
     std::set<std::uint64_t> inventory_owner_ids;
-    std::set<std::uint64_t> workpiece_ids;
     std::set<std::uint64_t> process_ids;
     std::set<std::uint64_t> fire_ids;
     std::set<world::ChunkCoord> chunk_edit_coords;
@@ -126,6 +125,9 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
         add_status_issue(validation, fire.validate_record());
         if (!fire_ids.insert(fire.fire_id.value()).second) {
             add_issue(validation, "save_snapshot.duplicate_fire", "duplicate fire id");
+        }
+        if (fire.fire_id.is_valid()) {
+            owner_refs.emplace_back("fire", fire.fire_id);
         }
         require_kind(validation, prototypes, fire.prototype_id, modding::PrototypeKinds::fire);
     }
@@ -189,13 +191,9 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
     }
 
     for (const auto& workpiece : snapshot.workpieces) {
-        if (!workpiece.workpiece_id.is_valid()) {
-            add_issue(validation, "save_snapshot.invalid_workpiece_id",
-                      "workpiece save record needs a stable workpiece id");
-        } else if (!workpiece_ids.insert(workpiece.workpiece_id.value()).second) {
-            add_issue(validation, "save_snapshot.duplicate_workpiece_id",
-                      "duplicate workpiece id " + workpiece.workpiece_id.to_string());
-        }
+        validate_save_id_unique(
+            validation, save_ids, core::SaveId::from_value(workpiece.workpiece_id.value()),
+            "workpiece");
         if (workpiece.encoded_cells.empty()) {
             add_issue(validation, "save_snapshot.empty_workpiece_cells",
                       "workpiece cell payload must not be empty");
