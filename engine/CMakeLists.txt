@@ -117,8 +117,10 @@ target_sources(
     server/authoritative_server.cpp
     server/admin_service.cpp
     simulation/simulation_lod.cpp
+    simulation/fixed_step.cpp
     simulation/fire.cpp
     simulation/fire_prototype.cpp
+    simulation/simulation_scheduler.cpp
     simulation/world_time.cpp
     workpieces/workpiece_codec.cpp
     workpieces/material_crafting.cpp
@@ -272,8 +274,11 @@ target_sources(
       server/authoritative_server.hpp
       server/admin_service.hpp
       simulation/simulation_lod.hpp
+      simulation/fixed_step.hpp
       simulation/fire.hpp
       simulation/fire_prototype.hpp
+      simulation/simulation_scheduler.hpp
+      simulation/tick_events.hpp
       simulation/world_time.hpp
       workpieces/workpiece_codec.hpp
       workpieces/material_crafting.hpp
