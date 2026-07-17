@@ -1,11 +1,14 @@
+#include "engine/net/host_session.hpp"
 #include "engine/net/transport.hpp"
 #include "engine/net/transport_packet.hpp"
 #include "engine/net/transport_reliability.hpp"
 
 #include <cassert>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -15,6 +18,134 @@ using namespace heartstead;
                                                      std::uint64_t sequence, std::string payload) {
     return {kind, net::TransportChannel::reliable, sequence, "test.reliable", std::move(payload),
             0};
+}
+
+class FaultInjectingTransportHost final : public net::ITransportHost {
+  public:
+    explicit FaultInjectingTransportHost(net::InMemoryTransportHostConfig config)
+        : delegate_(config) {}
+
+    void fail_server_send(core::NetId client_id, net::TransportMessageKind kind,
+                          std::uint64_t sequence, std::uint32_t count = 1) {
+        failures_.push_back({client_id, kind, sequence, count});
+    }
+
+    [[nodiscard]] net::TransportBackend backend() const noexcept override {
+        return delegate_.backend();
+    }
+
+    [[nodiscard]] std::string_view backend_name() const noexcept override {
+        return delegate_.backend_name();
+    }
+
+    [[nodiscard]] net::TransportCapabilities capabilities() const noexcept override {
+        return delegate_.capabilities();
+    }
+
+    [[nodiscard]] core::NetId server_id() const noexcept override {
+        return delegate_.server_id();
+    }
+
+    [[nodiscard]] std::size_t connected_client_count() const noexcept override {
+        return delegate_.connected_client_count();
+    }
+
+    [[nodiscard]] bool is_client_connected(core::NetId client_id) const noexcept override {
+        return delegate_.is_client_connected(client_id);
+    }
+
+    [[nodiscard]] std::vector<core::NetId> connected_client_ids() const override {
+        return delegate_.connected_client_ids();
+    }
+
+    [[nodiscard]] core::Result<core::NetId> connect_client() override {
+        return delegate_.connect_client();
+    }
+
+    [[nodiscard]] core::Status disconnect_client(core::NetId client_id) override {
+        return delegate_.disconnect_client(client_id);
+    }
+
+    [[nodiscard]] core::Status send_client_to_server(core::NetId client_id,
+                                                     net::TransportMessage message) override {
+        return delegate_.send_client_to_server(client_id, std::move(message));
+    }
+
+    [[nodiscard]] core::Status send_server_to_client(core::NetId client_id,
+                                                     net::TransportMessage message) override {
+        for (auto& failure : failures_) {
+            if (failure.remaining_count > 0 && failure.client_id == client_id &&
+                failure.kind == message.kind && failure.sequence == message.sequence) {
+                --failure.remaining_count;
+                return core::Status::failure("test.injected_send_failure",
+                                             "injected server send failure");
+            }
+        }
+        return delegate_.send_server_to_client(client_id, std::move(message));
+    }
+
+    [[nodiscard]] core::Result<net::TransportMaintenanceResult>
+    poll_maintenance(std::int64_t now_ms) override {
+        return delegate_.poll_maintenance(now_ms);
+    }
+
+    [[nodiscard]] std::vector<net::TransportEnvelope> drain_server_messages() override {
+        return delegate_.drain_server_messages();
+    }
+
+    [[nodiscard]] core::Result<std::vector<net::TransportEnvelope>>
+    drain_client_messages(core::NetId client_id) override {
+        return delegate_.drain_client_messages(client_id);
+    }
+
+  private:
+    struct SendFailure {
+        core::NetId client_id;
+        net::TransportMessageKind kind = net::TransportMessageKind::command;
+        std::uint64_t sequence = 0;
+        std::uint32_t remaining_count = 0;
+    };
+
+    net::InMemoryTransportHost delegate_;
+    std::vector<SendFailure> failures_;
+};
+
+[[nodiscard]] net::ServerCommandDispatcher make_mutating_dispatcher(std::uint32_t& dispatch_count) {
+    net::ServerCommandDispatcher dispatcher;
+    auto registered = dispatcher.register_command(net::CommandDescriptor{
+        "test.mutate",
+        true,
+        true,
+        [&dispatch_count](const net::CommandEnvelope& envelope, const net::CommandExecutionContext&,
+                          world::WorldOperation& operation) {
+            ++dispatch_count;
+            auto mutation = operation.record_mutation("test mutation " + envelope.payload);
+            if (!mutation) {
+                return mutation;
+            }
+            operation.emit_event({"test.changed", core::SaveId::from_value(1), envelope.payload});
+            operation.mark_replication_dirty();
+            operation.mark_save_dirty();
+            return core::Status::ok();
+        },
+    });
+    assert(registered);
+    return dispatcher;
+}
+
+[[nodiscard]] net::HostSession make_fault_injected_session(FaultInjectingTransportHost*& host) {
+    net::HostSessionConfig config;
+    config.transport.backend = net::TransportBackend::in_memory;
+    config.transport.in_memory =
+        net::InMemoryTransportHostConfig{core::NetId::from_value(1), 4096, 4};
+    return net::HostSession(
+        config,
+        [&host](net::TransportHostDesc desc) -> core::Result<std::unique_ptr<net::ITransportHost>> {
+            auto transport = std::make_unique<FaultInjectingTransportHost>(desc.in_memory);
+            host = transport.get();
+            return core::Result<std::unique_ptr<net::ITransportHost>>::success(
+                std::move(transport));
+        });
 }
 
 void test_tracking_can_be_rolled_back_before_retry() {
@@ -172,6 +303,105 @@ void test_reliable_commands_are_delivered_only_after_gaps_close() {
     assert(stale && stale.value().empty());
 }
 
+void test_host_retries_responses_without_redispatching_drained_commands() {
+    FaultInjectingTransportHost* transport = nullptr;
+    auto session = make_fault_injected_session(transport);
+    assert(session.start());
+    assert(transport != nullptr);
+    auto client = session.connect_client();
+    assert(client);
+    auto welcome = session.drain_client_messages(client.value());
+    assert(welcome && welcome.value().size() == 1);
+
+    std::uint32_t dispatch_count = 0;
+    auto dispatcher = make_mutating_dispatcher(dispatch_count);
+    transport->fail_server_send(client.value(), net::TransportMessageKind::command_result, 1);
+    for (std::uint64_t sequence = 1; sequence <= 3; ++sequence) {
+        assert(session.send_client_command(
+            client.value(), net::CommandEnvelope{sequence, client.value(), "test.mutate",
+                                                 std::to_string(sequence), 0}));
+    }
+
+    auto first_tick = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(first_tick);
+    assert(dispatch_count == 3);
+    assert(first_tick.value().command_reports.size() == 3);
+    assert(first_tick.value().response_message_count == 3);
+    assert(first_tick.value().replication_message_count == 3);
+    assert(first_tick.value().outbound_delivery.attempted_message_count == 1);
+    assert(first_tick.value().outbound_delivery.delivered_message_count == 0);
+    assert(first_tick.value().outbound_delivery.failed_attempt_count == 1);
+    assert(first_tick.value().outbound_delivery.pending_message_count == 6);
+    assert(first_tick.value().outbound_delivery.blocked_client_count == 1);
+    assert(first_tick.value().outbound_delivery.failures.size() == 1);
+    assert(first_tick.value().outbound_delivery.failures.front().error_code ==
+           "test.injected_send_failure");
+    assert(session.pending_outbound_message_count() == 6);
+    auto before_retry = session.drain_client_messages(client.value());
+    assert(before_retry && before_retry.value().empty());
+
+    auto retry_tick = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(retry_tick);
+    assert(dispatch_count == 3);
+    assert(retry_tick.value().command_reports.empty());
+    assert(retry_tick.value().outbound_delivery.attempted_message_count == 6);
+    assert(retry_tick.value().outbound_delivery.delivered_message_count == 6);
+    assert(retry_tick.value().outbound_delivery.retry_attempt_count == 1);
+    assert(retry_tick.value().outbound_delivery.failed_attempt_count == 0);
+    assert(retry_tick.value().outbound_delivery.pending_message_count == 0);
+    assert(session.pending_outbound_message_count() == 0);
+
+    auto delivered = session.drain_client_messages(client.value());
+    assert(delivered && delivered.value().size() == 6);
+    for (std::size_t index = 0; index < delivered.value().size(); ++index) {
+        const auto expected_sequence = static_cast<std::uint64_t>(index / 2 + 1);
+        const auto expected_kind = index % 2 == 0 ? net::TransportMessageKind::command_result
+                                                  : net::TransportMessageKind::replication;
+        assert(delivered.value()[index].message.sequence == expected_sequence);
+        assert(delivered.value()[index].message.kind == expected_kind);
+    }
+}
+
+void test_host_send_failure_blocks_only_the_affected_client() {
+    FaultInjectingTransportHost* transport = nullptr;
+    auto session = make_fault_injected_session(transport);
+    assert(session.start());
+    auto origin = session.connect_client();
+    auto observer = session.connect_client();
+    assert(origin && observer && transport != nullptr);
+    assert(session.drain_client_messages(origin.value()));
+    assert(session.drain_client_messages(observer.value()));
+
+    std::uint32_t dispatch_count = 0;
+    auto dispatcher = make_mutating_dispatcher(dispatch_count);
+    transport->fail_server_send(observer.value(), net::TransportMessageKind::replication, 1);
+    assert(session.send_client_command(
+        origin.value(), net::CommandEnvelope{1, origin.value(), "test.mutate", "isolated", 0}));
+
+    auto first_tick = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(first_tick && dispatch_count == 1);
+    assert(first_tick.value().outbound_delivery.delivered_message_count == 2);
+    assert(first_tick.value().outbound_delivery.failed_attempt_count == 1);
+    assert(first_tick.value().outbound_delivery.pending_message_count == 1);
+    assert(first_tick.value().outbound_delivery.blocked_client_count == 1);
+    auto origin_delivery = session.drain_client_messages(origin.value());
+    auto observer_delivery = session.drain_client_messages(observer.value());
+    assert(origin_delivery && origin_delivery.value().size() == 2);
+    assert(observer_delivery && observer_delivery.value().empty());
+
+    auto retry_tick = session.tick(dispatcher, net::CommandExecutionContext{});
+    assert(retry_tick && dispatch_count == 1);
+    assert(retry_tick.value().outbound_delivery.delivered_message_count == 1);
+    assert(retry_tick.value().outbound_delivery.retry_attempt_count == 1);
+    assert(retry_tick.value().outbound_delivery.pending_message_count == 0);
+    origin_delivery = session.drain_client_messages(origin.value());
+    observer_delivery = session.drain_client_messages(observer.value());
+    assert(origin_delivery && origin_delivery.value().empty());
+    assert(observer_delivery && observer_delivery.value().size() == 1);
+    assert(observer_delivery.value().front().message.kind ==
+           net::TransportMessageKind::replication);
+}
+
 } // namespace
 
 int main() {
@@ -179,5 +409,7 @@ int main() {
     test_external_capacity_failure_does_not_leak_untracked_datagram();
     test_fragment_reassembly_is_scoped_and_expires();
     test_reliable_commands_are_delivered_only_after_gaps_close();
+    test_host_retries_responses_without_redispatching_drained_commands();
+    test_host_send_failure_blocks_only_the_affected_client();
     return 0;
 }

@@ -6,6 +6,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,6 +50,25 @@ struct HostSessionCommandResult {
     std::string error_message;
 };
 
+struct HostSessionOutboundDeliveryFailure {
+    core::NetId client_id;
+    TransportMessageKind message_kind = TransportMessageKind::command;
+    std::uint64_t sequence = 0;
+    std::uint64_t attempt_count = 0;
+    std::string error_code;
+    std::string error_message;
+};
+
+struct HostSessionOutboundDeliveryReport {
+    std::uint32_t attempted_message_count = 0;
+    std::uint32_t delivered_message_count = 0;
+    std::uint32_t retry_attempt_count = 0;
+    std::uint32_t failed_attempt_count = 0;
+    std::size_t pending_message_count = 0;
+    std::uint32_t blocked_client_count = 0;
+    std::vector<HostSessionOutboundDeliveryFailure> failures;
+};
+
 struct HostSessionTickResult {
     std::uint32_t transport_retransmission_count = 0;
     std::uint32_t transport_dropped_reliable_message_count = 0;
@@ -54,18 +76,24 @@ struct HostSessionTickResult {
     std::uint32_t command_message_count = 0;
     std::uint32_t response_message_count = 0;
     std::uint32_t replication_message_count = 0;
+    HostSessionOutboundDeliveryReport outbound_delivery;
     std::vector<HostSessionCommandReport> command_reports;
     std::vector<ReplicationRelevanceReport> replication_relevance_reports;
 };
 
+using HostSessionTransportFactory =
+    std::function<core::Result<std::unique_ptr<ITransportHost>>(TransportHostDesc)>;
+
 class HostSession {
   public:
     explicit HostSession(HostSessionConfig config = {});
+    HostSession(HostSessionConfig config, HostSessionTransportFactory transport_factory);
 
     [[nodiscard]] HostSessionState state() const noexcept;
     [[nodiscard]] bool is_running() const noexcept;
     [[nodiscard]] core::NetId server_id() const noexcept;
     [[nodiscard]] std::size_t connected_client_count() const noexcept;
+    [[nodiscard]] std::size_t pending_outbound_message_count() const noexcept;
     [[nodiscard]] const ReplicationRelevancePolicy& replication_relevance_policy() const noexcept;
 
     [[nodiscard]] core::Status start();
@@ -84,16 +112,24 @@ class HostSession {
     tick(const ServerCommandDispatcher& dispatcher, CommandExecutionContext context);
 
   private:
+    struct PendingOutboundMessage {
+        TransportMessage message;
+        std::uint64_t attempt_count = 0;
+    };
+
     [[nodiscard]] core::Status require_running() const;
-    [[nodiscard]] core::Status
-    assign_replication_sequence(HostSessionCommandReport& report);
-    [[nodiscard]] core::Status send_command_response(const HostSessionCommandReport& report);
-    [[nodiscard]] core::Result<ReplicationRelevanceReport>
-    broadcast_replication(const HostSessionCommandReport& report, std::int64_t server_time_ms);
+    [[nodiscard]] core::Status assign_replication_sequence(HostSessionCommandReport& report);
+    void queue_command_response(const HostSessionCommandReport& report);
+    [[nodiscard]] ReplicationRelevanceReport
+    queue_replication(const HostSessionCommandReport& report, std::int64_t server_time_ms,
+                      std::uint32_t& queued_message_count);
+    void flush_pending_outbound(HostSessionOutboundDeliveryReport& report);
 
     HostSessionConfig config_;
+    HostSessionTransportFactory transport_factory_;
     HostSessionState state_ = HostSessionState::stopped;
     std::unique_ptr<ITransportHost> transport_;
+    std::map<core::NetId, std::deque<PendingOutboundMessage>> pending_outbound_;
     std::uint64_t next_replication_sequence_ = 1;
 };
 

@@ -90,7 +90,12 @@ template <typename T> [[nodiscard]] core::Result<T> fail_from(const core::Error&
 
 } // namespace
 
-HostSession::HostSession(HostSessionConfig config) : config_(std::move(config)) {}
+HostSession::HostSession(HostSessionConfig config)
+    : HostSession(std::move(config),
+                  [](TransportHostDesc desc) { return create_transport_host(std::move(desc)); }) {}
+
+HostSession::HostSession(HostSessionConfig config, HostSessionTransportFactory transport_factory)
+    : config_(std::move(config)), transport_factory_(std::move(transport_factory)) {}
 
 HostSessionState HostSession::state() const noexcept {
     return state_;
@@ -111,6 +116,14 @@ std::size_t HostSession::connected_client_count() const noexcept {
     return transport_ ? transport_->connected_client_count() : 0;
 }
 
+std::size_t HostSession::pending_outbound_message_count() const noexcept {
+    std::size_t count = 0;
+    for (const auto& [_, messages] : pending_outbound_) {
+        count += messages.size();
+    }
+    return count;
+}
+
 const ReplicationRelevancePolicy& HostSession::replication_relevance_policy() const noexcept {
     return config_.replication_relevance;
 }
@@ -121,12 +134,21 @@ core::Status HostSession::start() {
                                      "host session is already running");
     }
 
-    auto transport = create_transport_host(config_.transport);
+    if (!transport_factory_) {
+        return core::Status::failure("host_session.missing_transport_factory",
+                                     "host session transport factory is not configured");
+    }
+    auto transport = transport_factory_(config_.transport);
     if (!transport) {
         return core::Status::failure(transport.error().code, transport.error().message);
     }
+    if (!transport.value()) {
+        return core::Status::failure("host_session.null_transport",
+                                     "host session transport factory returned a null transport");
+    }
 
     transport_ = std::move(transport).value();
+    pending_outbound_.clear();
     next_replication_sequence_ = 1;
     state_ = HostSessionState::running;
     return core::Status::ok();
@@ -139,6 +161,7 @@ core::Status HostSession::stop() {
 
     state_ = HostSessionState::stopped;
     transport_.reset();
+    pending_outbound_.clear();
     return core::Status::ok();
 }
 
@@ -190,7 +213,11 @@ core::Status HostSession::disconnect_client(core::NetId client_id) {
     if (!notice) {
         return notice;
     }
-    return transport_->disconnect_client(client_id);
+    auto disconnected = transport_->disconnect_client(client_id);
+    if (disconnected) {
+        pending_outbound_.erase(client_id);
+    }
+    return disconnected;
 }
 
 core::Status HostSession::send_client_command(core::NetId client_id, CommandEnvelope envelope) {
@@ -260,6 +287,11 @@ core::Result<HostSessionTickResult> HostSession::tick(const ServerCommandDispatc
         if (message.message.kind != TransportMessageKind::command) {
             report = make_transport_error_report(message, "transport.not_command_message",
                                                  "host session expected a command message");
+        } else if (next_replication_sequence_ == 0) {
+            ++tick_result.command_message_count;
+            report = make_transport_error_report(
+                message, "host_session.replication_sequence_exhausted",
+                "server replication stream exhausted its 64-bit sequence space");
         } else {
             ++tick_result.command_message_count;
             auto command = command_envelope_from_transport(message);
@@ -278,25 +310,20 @@ core::Result<HostSessionTickResult> HostSession::tick(const ServerCommandDispatc
                                                                 sequence.error().message);
         }
 
-        auto response = send_command_response(report);
-        if (!response) {
-            return core::Result<HostSessionTickResult>::failure(response.error().code,
-                                                                response.error().message);
-        }
+        queue_command_response(report);
         ++tick_result.response_message_count;
 
-        auto replication = broadcast_replication(report, context.server_time_ms);
-        if (!replication) {
-            return core::Result<HostSessionTickResult>::failure(replication.error().code,
-                                                                replication.error().message);
-        }
-        auto relevance_report = std::move(replication).value();
-        tick_result.replication_message_count += relevance_report.relevant_client_count;
+        std::uint32_t queued_replication_count = 0;
+        auto relevance_report =
+            queue_replication(report, context.server_time_ms, queued_replication_count);
+        tick_result.replication_message_count += queued_replication_count;
         if (relevance_report.event_count > 0) {
             tick_result.replication_relevance_reports.push_back(std::move(relevance_report));
         }
         tick_result.command_reports.push_back(std::move(report));
     }
+
+    flush_pending_outbound(tick_result.outbound_delivery);
 
     return core::Result<HostSessionTickResult>::success(std::move(tick_result));
 }
@@ -326,30 +353,26 @@ core::Status HostSession::assign_replication_sequence(HostSessionCommandReport& 
     return core::Status::ok();
 }
 
-core::Status HostSession::send_command_response(const HostSessionCommandReport& report) {
+void HostSession::queue_command_response(const HostSessionCommandReport& report) {
     const auto response_type = report.command_type.empty() ? std::string("command.result")
                                                            : report.command_type + ".result";
-    return transport_->send_server_to_client(
-        report.client_id,
+    pending_outbound_[report.client_id].push_back(PendingOutboundMessage{
         TransportMessage{TransportMessageKind::command_result, TransportChannel::reliable,
-                         report.sequence, response_type, host_session_result_payload(report), 0});
+                         report.sequence, response_type, host_session_result_payload(report), 0},
+        0});
 }
 
-core::Result<ReplicationRelevanceReport>
-HostSession::broadcast_replication(const HostSessionCommandReport& report,
-                                   std::int64_t server_time_ms) {
+ReplicationRelevanceReport HostSession::queue_replication(const HostSessionCommandReport& report,
+                                                          std::int64_t server_time_ms,
+                                                          std::uint32_t& queued_message_count) {
     ReplicationRelevanceReport relevance_report;
     if (!report.success || !report.committed_world_mutation || report.events.empty()) {
-        return core::Result<ReplicationRelevanceReport>::success(std::move(relevance_report));
+        return relevance_report;
     }
 
     ReplicationBatch batch{
-        report.sequence,
-        report.command_type,
-        report.events,
-        report.reserved_ids,
-        report.replication_sequence,
-        report.client_id,
+        report.sequence,     report.command_type,         report.events,
+        report.reserved_ids, report.replication_sequence, report.client_id,
     };
     relevance_report = ReplicationRelevance::evaluate(config_.replication_relevance, batch,
                                                       transport_->connected_client_ids());
@@ -357,19 +380,59 @@ HostSession::broadcast_replication(const HostSessionCommandReport& report,
         if (!decision.relevant) {
             continue;
         }
-        auto filtered = ReplicationRelevance::filter_for_client(
-            config_.replication_relevance, batch, decision.client_id);
+        auto filtered = ReplicationRelevance::filter_for_client(config_.replication_relevance,
+                                                                batch, decision.client_id);
         if (filtered.events.empty()) {
             continue;
         }
-        auto status = transport_->send_server_to_client(
-            decision.client_id, make_replication_transport_message(filtered, server_time_ms));
-        if (!status) {
-            return core::Result<ReplicationRelevanceReport>::failure(status.error().code,
-                                                                     status.error().message);
+        pending_outbound_[decision.client_id].push_back(PendingOutboundMessage{
+            make_replication_transport_message(filtered, server_time_ms), 0});
+        ++queued_message_count;
+    }
+    return relevance_report;
+}
+
+void HostSession::flush_pending_outbound(HostSessionOutboundDeliveryReport& report) {
+    for (auto pending = pending_outbound_.begin(); pending != pending_outbound_.end();) {
+        auto& messages = pending->second;
+        bool blocked = false;
+        while (!messages.empty()) {
+            auto& outbound = messages.front();
+            ++report.attempted_message_count;
+            if (outbound.attempt_count > 0) {
+                ++report.retry_attempt_count;
+            }
+            ++outbound.attempt_count;
+
+            auto delivered = transport_->send_server_to_client(pending->first, outbound.message);
+            if (!delivered) {
+                ++report.failed_attempt_count;
+                report.failures.push_back(HostSessionOutboundDeliveryFailure{
+                    pending->first,
+                    outbound.message.kind,
+                    outbound.message.sequence,
+                    outbound.attempt_count,
+                    delivered.error().code,
+                    delivered.error().message,
+                });
+                blocked = true;
+                break;
+            }
+
+            ++report.delivered_message_count;
+            messages.pop_front();
+        }
+
+        if (blocked) {
+            ++report.blocked_client_count;
+        }
+        if (messages.empty()) {
+            pending = pending_outbound_.erase(pending);
+        } else {
+            ++pending;
         }
     }
-    return core::Result<ReplicationRelevanceReport>::success(std::move(relevance_report));
+    report.pending_message_count = pending_outbound_message_count();
 }
 
 std::string_view host_session_state_name(HostSessionState state) noexcept {
