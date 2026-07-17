@@ -19,6 +19,7 @@ target_sources(
     content/content_validation.cpp
     core/assert.cpp
     core/filesystem.cpp
+    core/file_io.cpp
     core/hash.cpp
     core/ids.cpp
     core/logging.cpp
@@ -184,9 +185,11 @@ target_sources(
       content/content_validation.hpp
       core/assert.hpp
       core/filesystem.hpp
+      core/file_io.hpp
       core/hash.hpp
       core/ids.hpp
       core/logging.hpp
+      core/process_entry.hpp
       core/result.hpp
       debug/inspection.hpp
       debug/debug_overlay.hpp
