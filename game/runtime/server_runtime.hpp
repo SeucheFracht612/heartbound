@@ -67,6 +67,7 @@ class ServerRuntime final {
     [[nodiscard]] entities::EntityWorld& entities() noexcept;
     [[nodiscard]] const entities::EntityWorld& entities() const noexcept;
     [[nodiscard]] net::HostSession& host() noexcept;
+    [[nodiscard]] const net::HostSession& host() const noexcept;
     [[nodiscard]] const simulation::SimulationScheduler& scheduler() const noexcept;
     [[nodiscard]] const simulation::TickEvents& events() const noexcept;
     [[nodiscard]] movement::PlayerControllerStore& players() noexcept;

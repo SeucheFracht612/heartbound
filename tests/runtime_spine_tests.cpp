@@ -1,7 +1,9 @@
 #include "engine/content/content_validation.hpp"
 #include "engine/net/command_payload.hpp"
+#include "game/runtime/game_inspection.hpp"
 #include "game/runtime/game_runtime.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <filesystem>
 #include <string>
@@ -449,6 +451,34 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
            nullptr);
     auto save_snapshot = runtime.capture_save_snapshot();
     assert(save_snapshot && save_snapshot.value().mod_states.size() == 1);
+    const auto session_diagnostics = game::GameInspector::inspect(*runtime.session());
+    assert(session_diagnostics.state == "running");
+    assert(session_diagnostics.find_field("authoritative_world_tick") != nullptr);
+    assert(session_diagnostics.find_field("loaded_chunk_count") != nullptr);
+    assert(session_diagnostics.find_field("live_entity_count") != nullptr);
+    assert(session_diagnostics.find_field("client_pending_command_count") != nullptr);
+    assert(session_diagnostics.find_field("presentation_object_count") != nullptr);
+    const auto frame_diagnostics = game::GameInspector::inspect(frame.value());
+    assert(frame_diagnostics.find_field("simulation_ms") != nullptr);
+    assert(frame_diagnostics.find_field("replication_message_count") != nullptr);
+    const auto client_diagnostics = game::GameInspector::inspect(frame.value().client);
+    assert(client_diagnostics.find_field("feature_replication_callback_count")->value == "1");
+    const auto presentation_diagnostics =
+        game::GameInspector::inspect(frame.value().presentation);
+    assert(presentation_diagnostics.find_field("adapter_count")->value == "2");
+    const auto module_diagnostics = game::GameInspector::inspect(module_report);
+    assert(module_diagnostics.find_field("module_count")->value == "2");
+    const auto timing_diagnostics = game::GameInspector::inspect_system_timings(*server);
+    assert(timing_diagnostics.size() == server->scheduler().registered_system_count());
+    assert(std::ranges::all_of(timing_diagnostics, [](const auto& timing) {
+        const auto* invocation_count = timing.find_field("invocation_count");
+        return invocation_count != nullptr && invocation_count->value == "1";
+    }));
+    auto public_session_diagnostics = runtime.inspect_session();
+    auto public_system_diagnostics = runtime.inspect_system_timings();
+    assert(public_session_diagnostics && public_system_diagnostics);
+    assert(public_session_diagnostics.value().state == "running");
+    assert(public_system_diagnostics.value().size() == timing_diagnostics.size());
     assert(runtime.shutdown());
 }
 

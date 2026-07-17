@@ -342,6 +342,10 @@ net::HostSession& ServerRuntime::host() noexcept {
     return host_;
 }
 
+const net::HostSession& ServerRuntime::host() const noexcept {
+    return host_;
+}
+
 const simulation::SimulationScheduler& ServerRuntime::scheduler() const noexcept {
     return scheduler_;
 }

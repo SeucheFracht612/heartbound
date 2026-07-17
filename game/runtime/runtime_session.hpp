@@ -88,6 +88,8 @@ class RuntimeSession final {
     [[nodiscard]] PresentationWorld* presentation() noexcept;
     [[nodiscard]] const PresentationWorld* presentation() const noexcept;
     [[nodiscard]] const RuntimeConfiguration& config() const noexcept;
+    [[nodiscard]] std::uint64_t frame_count() const noexcept;
+    [[nodiscard]] const std::optional<RuntimeFrameStats>& last_frame_stats() const noexcept;
 
   private:
     RuntimeSession(RuntimeConfiguration config, SessionRequest request,
@@ -106,6 +108,8 @@ class RuntimeSession final {
     std::unique_ptr<ClientRuntime> client_;
     PresentationWorld presentation_;
     ClientPresentationSynchronizer presentation_synchronizer_;
+    std::optional<RuntimeFrameStats> last_frame_stats_;
+    std::uint64_t frame_count_ = 0;
     bool running_ = false;
 };
 

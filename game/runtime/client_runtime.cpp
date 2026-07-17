@@ -136,6 +136,10 @@ net::ClientSession& ClientRuntime::session() noexcept {
     return session_;
 }
 
+const net::ClientSession& ClientRuntime::session() const noexcept {
+    return session_;
+}
+
 std::span<const net::HostSessionCommandResult> ClientRuntime::command_results() const noexcept {
     return command_results_;
 }

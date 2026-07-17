@@ -185,6 +185,8 @@ core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput inpu
             stats.presentation.unchanged_objects += presented.value().unchanged_objects;
         }
     }
+    last_frame_stats_ = stats;
+    ++frame_count_;
     return core::Result<RuntimeFrameStats>::success(std::move(stats));
 }
 
@@ -332,6 +334,14 @@ const PresentationWorld* RuntimeSession::presentation() const noexcept {
 
 const RuntimeConfiguration& RuntimeSession::config() const noexcept {
     return config_;
+}
+
+std::uint64_t RuntimeSession::frame_count() const noexcept {
+    return frame_count_;
+}
+
+const std::optional<RuntimeFrameStats>& RuntimeSession::last_frame_stats() const noexcept {
+    return last_frame_stats_;
 }
 
 } // namespace heartstead::game

@@ -45,6 +45,7 @@ class ClientRuntime final {
     [[nodiscard]] world::WorldState& world() noexcept;
     [[nodiscard]] const world::WorldState& world() const noexcept;
     [[nodiscard]] net::ClientSession& session() noexcept;
+    [[nodiscard]] const net::ClientSession& session() const noexcept;
     [[nodiscard]] std::span<const net::HostSessionCommandResult> command_results() const noexcept;
     [[nodiscard]] const movement::PlayerControllerSnapshot*
     player_snapshot(core::NetId player_net_id) const noexcept;

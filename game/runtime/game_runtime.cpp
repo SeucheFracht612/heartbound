@@ -4,6 +4,7 @@
 #include "engine/core/ids.hpp"
 #include "engine/modding/prototype_registry.hpp"
 #include "engine/scenarios/scenario.hpp"
+#include "game/runtime/game_inspection.hpp"
 
 #include <algorithm>
 #include <utility>
@@ -529,6 +530,24 @@ core::Result<RenderSnapshot> GameRuntime::capture_render_snapshot() const {
             "render snapshot extraction requires an active client presentation world");
     }
     return core::Result<RenderSnapshot>::success(session_->capture_render_snapshot());
+}
+
+core::Result<debug::InspectionData> GameRuntime::inspect_session() const {
+    if (session_ == nullptr) {
+        return core::Result<debug::InspectionData>::failure(
+            "game_runtime.no_session", "game runtime has no active session to inspect");
+    }
+    return core::Result<debug::InspectionData>::success(GameInspector::inspect(*session_));
+}
+
+core::Result<std::vector<debug::InspectionData>> GameRuntime::inspect_system_timings() const {
+    if (session_ == nullptr || session_->server() == nullptr) {
+        return core::Result<std::vector<debug::InspectionData>>::failure(
+            "game_runtime.no_authoritative_runtime",
+            "simulation timing inspection requires an active authoritative runtime");
+    }
+    return core::Result<std::vector<debug::InspectionData>>::success(
+        GameInspector::inspect_system_timings(*session_->server()));
 }
 
 core::Status GameRuntime::shutdown() {

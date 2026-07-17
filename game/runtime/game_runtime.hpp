@@ -1,6 +1,7 @@
 #pragma once
 
 #include "engine/core/result.hpp"
+#include "engine/debug/inspection.hpp"
 #include "engine/modding/mod_validation.hpp"
 #include "engine/scripting/script_runtime.hpp"
 #include "game/runtime/runtime_session.hpp"
@@ -122,6 +123,9 @@ class GameRuntime {
     [[nodiscard]] core::Result<save::SaveSnapshot> capture_save_snapshot() const;
     [[nodiscard]] core::Status save_to(const save::FileSaveDatabase& database) const;
     [[nodiscard]] core::Result<RenderSnapshot> capture_render_snapshot() const;
+    [[nodiscard]] core::Result<debug::InspectionData> inspect_session() const;
+    [[nodiscard]] core::Result<std::vector<debug::InspectionData>>
+    inspect_system_timings() const;
     [[nodiscard]] core::Status shutdown();
     [[nodiscard]] RuntimeSession* session() noexcept;
     [[nodiscard]] const RuntimeSession* session() const noexcept;
