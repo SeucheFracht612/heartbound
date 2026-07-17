@@ -162,12 +162,16 @@ void test_cubic_worldgen_caves_and_external_features() {
     config.cave_frequency_per_mille = 1000;
     config.cave_min_depth = 8;
     config.feature_frequency_per_mille = 1000;
-    auto generated = world::DeterministicTerrainGenerator::generate_chunk_with_features(
+    auto underground = world::DeterministicTerrainGenerator::generate_chunk_with_features(
         {0, 0, 0}, config, graph, palette);
-    assert(generated && !generated.value().features.empty());
-    auto deep_cell = generated.value().chunk.get({0, 0, 0});
+    assert(underground);
+    assert(underground.value().features.empty());
+    auto deep_cell = underground.value().chunk.get({0, 0, 0});
     assert(deep_cell && deep_cell.value().type == world::VoxelPalette::air_type);
-    assert(generated.value().features.front().kind ==
+    auto surface = world::DeterministicTerrainGenerator::generate_chunk_with_features(
+        {0, 1, 0}, config, graph, palette);
+    assert(surface && !surface.value().features.empty());
+    assert(surface.value().features.front().kind ==
            world::GeneratedWorldFeatureKind::large_static_object);
 }
 
