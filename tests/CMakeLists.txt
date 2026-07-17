@@ -9,11 +9,18 @@ function(heartstead_configure_test_target target_name)
   endif()
 endfunction()
 
+function(heartstead_register_unit_test target_name)
+  add_test(NAME ${target_name} COMMAND ${target_name})
+  # A deadlock in a foundation test must fail CI instead of occupying a worker indefinitely.
+  # Keep this above the smoke-test timeout because sanitizer and contention builds are slower.
+  set_tests_properties(${target_name} PROPERTIES TIMEOUT 120)
+endfunction()
+
 add_executable(heartstead_engine_tests engine_tests.cpp)
 target_link_libraries(heartstead_engine_tests PRIVATE Heartstead::Engine)
 heartstead_configure_test_target(heartstead_engine_tests)
 
-add_test(NAME heartstead_engine_tests COMMAND heartstead_engine_tests)
+heartstead_register_unit_test(heartstead_engine_tests)
 
 add_executable(heartstead_game_runtime_tests game_runtime_tests.cpp)
 target_link_libraries(heartstead_game_runtime_tests PRIVATE Heartstead::GameRuntime)
@@ -22,7 +29,7 @@ target_compile_definitions(
 )
 heartstead_configure_test_target(heartstead_game_runtime_tests)
 
-add_test(NAME heartstead_game_runtime_tests COMMAND heartstead_game_runtime_tests)
+heartstead_register_unit_test(heartstead_game_runtime_tests)
 
 add_executable(heartstead_runtime_spine_tests runtime_spine_tests.cpp)
 target_link_libraries(heartstead_runtime_spine_tests PRIVATE Heartstead::GameRuntime)
@@ -30,12 +37,12 @@ target_compile_definitions(
   heartstead_runtime_spine_tests PRIVATE HEARTSTEAD_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 heartstead_configure_test_target(heartstead_runtime_spine_tests)
-add_test(NAME heartstead_runtime_spine_tests COMMAND heartstead_runtime_spine_tests)
+heartstead_register_unit_test(heartstead_runtime_spine_tests)
 
 add_executable(heartstead_presentation_world_tests presentation_world_tests.cpp)
 target_link_libraries(heartstead_presentation_world_tests PRIVATE Heartstead::GameRuntime)
 heartstead_configure_test_target(heartstead_presentation_world_tests)
-add_test(NAME heartstead_presentation_world_tests COMMAND heartstead_presentation_world_tests)
+heartstead_register_unit_test(heartstead_presentation_world_tests)
 
 add_executable(heartstead_headless_session_tests headless_session_tests.cpp)
 target_link_libraries(heartstead_headless_session_tests PRIVATE Heartstead::GameRuntime)
@@ -43,13 +50,13 @@ target_compile_definitions(
   heartstead_headless_session_tests PRIVATE HEARTSTEAD_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 heartstead_configure_test_target(heartstead_headless_session_tests)
-add_test(NAME heartstead_headless_session_tests COMMAND heartstead_headless_session_tests)
+heartstead_register_unit_test(heartstead_headless_session_tests)
 
 function(heartstead_add_foundation_test target_name source_file)
   add_executable(${target_name} ${source_file})
   target_link_libraries(${target_name} PRIVATE Heartstead::Engine)
   heartstead_configure_test_target(${target_name})
-  add_test(NAME ${target_name} COMMAND ${target_name})
+  heartstead_register_unit_test(${target_name})
 endfunction()
 
 heartstead_add_foundation_test(heartstead_coordinate_v02_tests coordinate_v02_tests.cpp)
@@ -90,7 +97,7 @@ heartstead_add_foundation_test(heartstead_movement_controller_tests movement_con
 add_executable(heartstead_gameplay_input_tests gameplay_input_tests.cpp)
 target_link_libraries(heartstead_gameplay_input_tests PRIVATE Heartstead::GameRuntime)
 heartstead_configure_test_target(heartstead_gameplay_input_tests)
-add_test(NAME heartstead_gameplay_input_tests COMMAND heartstead_gameplay_input_tests)
+heartstead_register_unit_test(heartstead_gameplay_input_tests)
 
 function(heartstead_add_smoke_test test_name target_name)
   if(TARGET ${target_name})
