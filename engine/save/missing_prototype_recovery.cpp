@@ -11,10 +11,11 @@ namespace heartstead::save {
 
 namespace {
 
-[[nodiscard]] bool missing_kind(const modding::PrototypeRegistry& prototypes,
-                                const core::PrototypeId& id, std::string_view kind) {
-    const auto* prototype = prototypes.find(id);
-    return prototype == nullptr || prototype->kind != kind;
+[[nodiscard]] bool prototype_missing(const modding::PrototypeRegistry& prototypes,
+                                     const core::PrototypeId& id) {
+    // A present prototype with the wrong semantic kind is corrupted content, not missing content.
+    // Leave that record intact so SaveSnapshotValidator can report the kind mismatch.
+    return prototypes.find(id) == nullptr;
 }
 
 template <typename AddRecord>
@@ -62,7 +63,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
     std::map<std::uint64_t, world::WorldPosition> build_positions;
     for (const auto& build : snapshot.build_pieces) {
         build_positions.emplace(build.object_id.value(), build.transform.position);
-        if (!missing_kind(prototypes, build.prototype_id, modding::PrototypeKinds::build_piece)) {
+        if (!prototype_missing(prototypes, build.prototype_id)) {
             continue;
         }
         add_placeholder(
@@ -80,7 +81,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
 
     std::set<std::uint64_t> missing_entity_ids;
     for (const auto& entity : snapshot.entities) {
-        if (!missing_kind(prototypes, entity.prototype_id, modding::PrototypeKinds::entity)) {
+        if (!prototype_missing(prototypes, entity.prototype_id)) {
             continue;
         }
         add_placeholder(
@@ -99,7 +100,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
 
     std::set<std::uint64_t> missing_cargo_ids;
     for (const auto& cargo : snapshot.cargo_records) {
-        if (!missing_kind(prototypes, cargo.prototype_id, modding::PrototypeKinds::cargo)) {
+        if (!prototype_missing(prototypes, cargo.prototype_id)) {
             continue;
         }
         add_placeholder(
@@ -118,7 +119,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
 
     std::set<std::uint64_t> missing_workpiece_ids;
     for (const auto& workpiece : snapshot.workpieces) {
-        if (!missing_kind(prototypes, workpiece.prototype_id, modding::PrototypeKinds::workpiece)) {
+        if (!prototype_missing(prototypes, workpiece.prototype_id)) {
             continue;
         }
         add_placeholder(snapshot, placeholder_keys, world::MissingPrototypeKind::workpiece,
@@ -141,8 +142,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
             dependent_missing =
                 dependent_missing || missing_owner_ids.contains(part.build_piece_id.value());
         }
-        if (!dependent_missing &&
-            !missing_kind(prototypes, assembly.prototype_id, modding::PrototypeKinds::assembly)) {
+        if (!dependent_missing && !prototype_missing(prototypes, assembly.prototype_id)) {
             continue;
         }
         const auto position = build_positions.contains(assembly.root_build_piece_id.value())
@@ -171,7 +171,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
     for (const auto& inventory : snapshot.inventories) {
         const items::ItemStack* missing_stack = nullptr;
         for (const auto& stack : inventory.stacks) {
-            if (missing_kind(prototypes, stack.prototype_id, modding::PrototypeKinds::item)) {
+            if (prototype_missing(prototypes, stack.prototype_id)) {
                 missing_stack = &stack;
                 break;
             }
@@ -199,8 +199,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
     std::set<std::uint64_t> missing_process_ids;
     for (const auto& process : snapshot.processes) {
         const auto owner_missing = missing_owner_ids.contains(process.owner_id.value());
-        if (!owner_missing &&
-            !missing_kind(prototypes, process.prototype_id, modding::PrototypeKinds::process)) {
+        if (!owner_missing && !prototype_missing(prototypes, process.prototype_id)) {
             continue;
         }
         add_placeholder(
@@ -221,8 +220,7 @@ preserve_missing_prototypes(SaveSnapshot& snapshot, const modding::PrototypeRegi
     std::set<std::uint64_t> missing_fire_ids;
     for (const auto& fire : snapshot.fires) {
         const auto owner_missing = missing_owner_ids.contains(fire.fire_id.value());
-        if (!owner_missing &&
-            !missing_kind(prototypes, fire.prototype_id, modding::PrototypeKinds::fire)) {
+        if (!owner_missing && !prototype_missing(prototypes, fire.prototype_id)) {
             continue;
         }
         const auto position = build_positions.contains(fire.fire_id.value())

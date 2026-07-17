@@ -13571,12 +13571,8 @@ void test_world_snapshot_bridge() {
     wrong_item_kind.inventories.front().stacks.front().prototype_id = cargo_prototype.value();
     auto wrong_item_kind_import = heartstead::world::WorldSnapshotBridge::import_validated_snapshot(
         wrong_item_kind, bridge_registry, load_config);
-    assert(wrong_item_kind_import);
-    assert(wrong_item_kind_import.value().inventories().count() == 0);
-    assert(std::ranges::any_of(
-        wrong_item_kind_import.value().missing_prototypes(), [](const auto& missing) {
-            return missing.kind == heartstead::world::MissingPrototypeKind::inventory;
-        }));
+    assert(!wrong_item_kind_import);
+    assert(wrong_item_kind_import.error().code == "prototype_registry.kind_mismatch");
 
     auto duplicate = snapshot.value();
     duplicate.cargo_records.front().cargo_id = wall_id.value();
