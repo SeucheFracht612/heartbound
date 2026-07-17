@@ -616,7 +616,9 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     auto module = std::make_shared<TestGameplayModule>();
     game::RuntimeConfiguration config;
     config.gameplay_modules.push_back(module);
-    assert(runtime.start_session(config, make_session_request(report)));
+    auto request = make_session_request(report);
+    request.metadata.enabled_mods.push_back({"test", "0.0.1", "test-feature"});
+    assert(runtime.start_session(config, std::move(request)));
     const auto* server = runtime.session()->server();
     assert(server != nullptr);
     const auto& module_report = server->gameplay_modules().report();

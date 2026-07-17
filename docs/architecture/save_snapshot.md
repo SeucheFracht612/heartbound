@@ -37,7 +37,7 @@ The validator checks:
 - duplicate process ids
 - duplicate fire owner/component ids within the fire section and fire state/time invariants; a
   fire id is not a second globally unique world object id
-- duplicate mod state keys
+- duplicate mod state keys and state owned by neither an enabled mod nor the built-in engine
 - missing-prototype placeholder shape and per-kind/stable-id uniqueness
 - prototype references through `PrototypeRegistry`
 - expected prototype kinds for each section
@@ -47,6 +47,7 @@ The validator checks:
 - process instance state, work/time, and interruption invariants
 - process slot prototype and count validity
 - assembly roots and parts against saved build pieces
+- assembly process slots against saved processes and their owning assembly
 - assembly part and port record uniqueness
 
 This is the engine-side contract that binary or database-backed save files should

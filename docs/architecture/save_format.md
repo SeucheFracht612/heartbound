@@ -47,9 +47,11 @@ through `content::save_metadata_from_content_report`. Each saved mod record stor
 version, and normalized prototype hash so later load/migration code can detect content drift without
 depending on real disk paths.
 
-`SaveMetadata::validate` rejects duplicate enabled mod ids, empty migration history entries, and
-duplicate migration history entries. Migration history is an ordered audit trail, not a set of
-arbitrary repeatable notes.
+`SaveMetadata::validate` rejects duplicate enabled mod ids, migration history entries that are not
+safe local ids, and duplicate migration history entries. Migration history is an ordered audit
+trail, not a set of arbitrary repeatable notes. The migration runner owns schema-version changes,
+revalidates metadata after every callback, and commits the staged snapshot only after the entire
+path succeeds.
 
 `SaveCompatibilityChecker` compares saved mod records against the active mod prototype
 fingerprints. Missing saved mods, prototype-hash changes, and extra active mods are compatibility

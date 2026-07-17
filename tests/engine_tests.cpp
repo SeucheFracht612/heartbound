@@ -5438,6 +5438,12 @@ void test_save_metadata_and_ids() {
     assert(!empty_migration_status);
     assert(empty_migration_status.error().code == "save.empty_migration_history");
 
+    auto invalid_migration_metadata = metadata;
+    invalid_migration_metadata.migration_history.push_back("migration with spaces");
+    auto invalid_migration_status = invalid_migration_metadata.validate();
+    assert(!invalid_migration_status);
+    assert(invalid_migration_status.error().code == "save.invalid_migration_history");
+
     metadata.enabled_mods.push_back({"BadMod", "0.0.1", ""});
     assert(!metadata.validate());
 
@@ -5508,7 +5514,7 @@ void test_save_text_codec() {
     metadata.world_seed = 982451653;
     metadata.enabled_mods.push_back({"base", "0.0.1", "hash|with=escaping"});
     metadata.migration_history.push_back("0001-language-and-build-system");
-    metadata.migration_history.push_back("line with % marker");
+    metadata.migration_history.push_back("0002-percent-marker");
 
     const auto encoded = heartstead::save::SaveTextCodec::encode_metadata(metadata);
     auto decoded = heartstead::save::SaveTextCodec::decode_metadata(encoded);
@@ -5629,6 +5635,43 @@ void test_save_migration_registry() {
     assert(!failed && failed.error().code == "test.migration_failed");
     assert(heartstead::save::SaveTextCodec::encode_snapshot(failure_snapshot) ==
            before_failed_migration);
+
+    heartstead::save::SaveSnapshot changed_schema_snapshot;
+    changed_schema_snapshot.metadata.schema_version = 1;
+    changed_schema_snapshot.metadata.game_version = "0.1.0";
+    const auto before_changed_schema =
+        heartstead::save::SaveTextCodec::encode_snapshot(changed_schema_snapshot);
+    heartstead::save::SaveMigrationRegistry changed_schema_registry;
+    auto changed_schema_step = first;
+    changed_schema_step.apply = [](heartstead::save::SaveSnapshot& active_snapshot) {
+        active_snapshot.metadata.schema_version = 99;
+        return heartstead::core::Status::ok();
+    };
+    assert(changed_schema_registry.register_migration(std::move(changed_schema_step)));
+    auto changed_schema = heartstead::save::SaveMigrationRunner::migrate(
+        changed_schema_snapshot, changed_schema_registry, 2);
+    assert(!changed_schema &&
+           changed_schema.error().code == "save_migration.callback_changed_schema");
+    assert(heartstead::save::SaveTextCodec::encode_snapshot(changed_schema_snapshot) ==
+           before_changed_schema);
+
+    heartstead::save::SaveSnapshot invalid_metadata_snapshot;
+    invalid_metadata_snapshot.metadata.schema_version = 1;
+    invalid_metadata_snapshot.metadata.game_version = "0.1.0";
+    const auto before_invalid_metadata =
+        heartstead::save::SaveTextCodec::encode_snapshot(invalid_metadata_snapshot);
+    heartstead::save::SaveMigrationRegistry invalid_metadata_registry;
+    auto invalid_metadata_step = first;
+    invalid_metadata_step.apply = [](heartstead::save::SaveSnapshot& active_snapshot) {
+        active_snapshot.metadata.migration_history.push_back("invalid migration id");
+        return heartstead::core::Status::ok();
+    };
+    assert(invalid_metadata_registry.register_migration(std::move(invalid_metadata_step)));
+    auto invalid_metadata = heartstead::save::SaveMigrationRunner::migrate(
+        invalid_metadata_snapshot, invalid_metadata_registry, 2);
+    assert(!invalid_metadata && invalid_metadata.error().code == "save.invalid_migration_history");
+    assert(heartstead::save::SaveTextCodec::encode_snapshot(invalid_metadata_snapshot) ==
+           before_invalid_metadata);
 }
 
 heartstead::modding::PrototypeRegistry build_snapshot_test_registry() {
@@ -5764,10 +5807,11 @@ void test_save_snapshot_validation() {
         {"fuel_input", heartstead::networks::NetworkKind::logistics, firebox_record.object_id, 2});
     assembly.ports.push_back({"smoke_output", heartstead::networks::NetworkKind::smoke_ventilation,
                               chimney_record.object_id, 1});
+    assembly.process_slots.push_back(heartstead::core::ProcessId::from_value(300));
     snapshot.assemblies.push_back(assembly);
 
     auto process = heartstead::processes::ProcessRuntime::create(
-        heartstead::core::ProcessId::from_value(300), wall_record.object_id, drying.value(), 0,
+        heartstead::core::ProcessId::from_value(300), assembly.assembly_id, drying.value(), 0,
         60000);
     assert(process);
     process.value().input_slots.push_back({raw_clay.value(), 4});
@@ -6036,6 +6080,25 @@ void test_save_snapshot_validation() {
         return issue.code == "save_snapshot.duplicate_process_id";
     }));
 
+    auto missing_assembly_process_snapshot = snapshot;
+    missing_assembly_process_snapshot.assemblies.front().process_slots.front() =
+        heartstead::core::ProcessId::from_value(9999);
+    validation = heartstead::save::SaveSnapshotValidator::validate(
+        missing_assembly_process_snapshot, registry);
+    assert(!validation.valid());
+    assert(std::ranges::any_of(validation.issues, [](const auto& issue) {
+        return issue.code == "save_snapshot.missing_assembly_process";
+    }));
+
+    auto foreign_assembly_process_snapshot = snapshot;
+    foreign_assembly_process_snapshot.processes.front().owner_id = wall_record.object_id;
+    validation = heartstead::save::SaveSnapshotValidator::validate(
+        foreign_assembly_process_snapshot, registry);
+    assert(!validation.valid());
+    assert(std::ranges::any_of(validation.issues, [](const auto& issue) {
+        return issue.code == "save_snapshot.assembly_process_owner_mismatch";
+    }));
+
     auto invalid_workpiece_payload_snapshot = snapshot;
     invalid_workpiece_payload_snapshot.workpieces.front().encoded_cells = "bad\n";
     validation = heartstead::save::SaveSnapshotValidator::validate(
@@ -6062,6 +6125,21 @@ void test_save_snapshot_validation() {
     assert(std::ranges::any_of(validation.issues, [](const auto& issue) {
         return issue.code == "save_snapshot.duplicate_mod_state";
     }));
+
+    auto disabled_mod_state_snapshot = snapshot;
+    disabled_mod_state_snapshot.mod_states.push_back({"disabled", "state", "opaque"});
+    validation =
+        heartstead::save::SaveSnapshotValidator::validate(disabled_mod_state_snapshot, registry);
+    assert(!validation.valid());
+    assert(std::ranges::any_of(validation.issues, [](const auto& issue) {
+        return issue.code == "save_snapshot.disabled_mod_state";
+    }));
+
+    auto engine_mod_state_snapshot = snapshot;
+    engine_mod_state_snapshot.mod_states.front().mod_id = "engine";
+    validation =
+        heartstead::save::SaveSnapshotValidator::validate(engine_mod_state_snapshot, registry);
+    assert(validation.valid());
 
     auto duplicate_assembly_part_snapshot = snapshot;
     duplicate_assembly_part_snapshot.assemblies.front().parts.push_back(
@@ -13661,6 +13739,7 @@ void test_world_snapshot_bridge() {
     heartstead::world::WorldStateDesc desc;
     desc.metadata.game_version = "snapshot_bridge_test";
     desc.metadata.world_seed = 12345;
+    desc.metadata.enabled_mods.push_back({"base", "0.0.1", "hash"});
     desc.next_save_id = 200;
     desc.next_runtime_handle = 20;
     heartstead::world::WorldState state(desc);

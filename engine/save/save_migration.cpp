@@ -140,9 +140,20 @@ SaveMigrationRunner::migrate(SaveSnapshot& snapshot, const SaveMigrationRegistry
             return core::Result<SaveMigrationResult>::failure(status.error().code,
                                                               status.error().message);
         }
+        if (staged_snapshot.metadata.schema_version != migration->from_schema_version) {
+            return core::Result<SaveMigrationResult>::failure(
+                "save_migration.callback_changed_schema",
+                "save migration callback changed the schema version owned by the runner: " +
+                    migration->id);
+        }
 
         staged_snapshot.metadata.schema_version = migration->to_schema_version;
         staged_snapshot.metadata.migration_history.push_back(migration->id);
+        status = staged_snapshot.metadata.validate();
+        if (!status) {
+            return core::Result<SaveMigrationResult>::failure(status.error().code,
+                                                              status.error().message);
+        }
         result.applied_migrations.push_back(migration->id);
         result.final_schema_version = migration->to_schema_version;
     }

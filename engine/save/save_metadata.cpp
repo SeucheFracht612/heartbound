@@ -40,6 +40,11 @@ core::Status SaveMetadata::validate() const {
             return core::Status::failure("save.empty_migration_history",
                                          "migration history entries must not be empty");
         }
+        if (!core::is_valid_local_id(migration)) {
+            return core::Status::failure("save.invalid_migration_history",
+                                         "migration history entry must be a safe local id: " +
+                                             migration);
+        }
         if (!seen_migrations.insert(migration).second) {
             return core::Status::failure("save.duplicate_migration_history",
                                          "migration history entry is duplicated: " + migration);

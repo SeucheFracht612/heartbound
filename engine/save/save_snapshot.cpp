@@ -5,6 +5,7 @@
 #include "engine/workpieces/workpiece_state.hpp"
 #include "engine/world/chunks/chunk_edit_delta_codec.hpp"
 
+#include <map>
 #include <set>
 #include <string_view>
 #include <utility>
@@ -88,13 +89,19 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
     std::set<std::uint64_t> inventory_owner_ids;
     std::set<std::uint64_t> process_ids;
     std::set<std::uint64_t> fire_ids;
+    std::set<std::string> enabled_mod_ids;
     std::set<world::ChunkCoord> chunk_edit_coords;
     std::set<std::pair<std::string, std::string>> mod_state_keys;
     std::set<std::pair<world::MissingPrototypeKind, std::uint64_t>> missing_prototype_keys;
+    std::map<std::uint64_t, core::SaveId> process_owners;
     std::vector<std::pair<std::string, core::SaveId>> owner_refs;
+    std::vector<std::pair<core::SaveId, core::ProcessId>> assembly_process_refs;
 
     add_status_issue(validation, snapshot.metadata.validate());
     add_status_issue(validation, snapshot.voxel_palette.validate());
+    for (const auto& mod : snapshot.metadata.enabled_mods) {
+        enabled_mod_ids.insert(mod.id);
+    }
 
     for (const auto& missing : snapshot.missing_prototypes) {
         add_status_issue(validation, missing.validate());
@@ -191,9 +198,9 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
     }
 
     for (const auto& workpiece : snapshot.workpieces) {
-        validate_save_id_unique(
-            validation, save_ids, core::SaveId::from_value(workpiece.workpiece_id.value()),
-            "workpiece");
+        validate_save_id_unique(validation, save_ids,
+                                core::SaveId::from_value(workpiece.workpiece_id.value()),
+                                "workpiece");
         if (workpiece.encoded_cells.empty()) {
             add_issue(validation, "save_snapshot.empty_workpiece_cells",
                       "workpiece cell payload must not be empty");
@@ -252,6 +259,11 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
                           "assembly port source build piece is not present in saved build pieces");
             }
         }
+        for (const auto process_id : assembly.process_slots) {
+            if (assembly.assembly_id.is_valid() && process_id.is_valid()) {
+                assembly_process_refs.emplace_back(assembly.assembly_id, process_id);
+            }
+        }
     }
 
     for (const auto& process : snapshot.processes) {
@@ -262,6 +274,9 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
         } else if (!process_ids.insert(process.process_id.value()).second) {
             add_issue(validation, "save_snapshot.duplicate_process_id",
                       "duplicate process id " + process.process_id.to_string());
+        }
+        if (process.process_id.is_valid()) {
+            process_owners.try_emplace(process.process_id.value(), process.owner_id);
         }
         if (!process.owner_id.is_valid()) {
             add_issue(validation, "save_snapshot.invalid_process_owner",
@@ -283,10 +298,26 @@ SaveSnapshotValidator::validate(const SaveSnapshot& snapshot,
         }
     }
 
+    for (const auto& [assembly_id, process_id] : assembly_process_refs) {
+        const auto process = process_owners.find(process_id.value());
+        if (process == process_owners.end()) {
+            add_issue(validation, "save_snapshot.missing_assembly_process",
+                      "assembly " + assembly_id.to_string() + " references missing process " +
+                          process_id.to_string());
+        } else if (process->second != assembly_id) {
+            add_issue(validation, "save_snapshot.assembly_process_owner_mismatch",
+                      "assembly " + assembly_id.to_string() + " references process " +
+                          process_id.to_string() + " owned by " + process->second.to_string());
+        }
+    }
+
     for (const auto& mod_state : snapshot.mod_states) {
         if (!core::is_valid_namespace_id(mod_state.mod_id)) {
             add_issue(validation, "save_snapshot.invalid_mod_state_id",
                       "mod state record has an invalid mod id");
+        } else if (mod_state.mod_id != "engine" && !enabled_mod_ids.contains(mod_state.mod_id)) {
+            add_issue(validation, "save_snapshot.disabled_mod_state",
+                      "mod state belongs to a mod that is not enabled: " + mod_state.mod_id);
         }
         if (mod_state.state_key.empty()) {
             add_issue(validation, "save_snapshot.empty_mod_state_key",
