@@ -5,6 +5,7 @@
 #include "engine/server_logs/server_log.hpp"
 #include "engine/simulation/world_time.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -37,8 +38,11 @@ struct AuthoritativeServerConfig {
 struct ConnectedPlayer {
     core::NetId client_id;
     player_profiles::PlayerProfile profile;
+    std::string address_hash;
     bool dirty = false;
 };
+
+using BanValidatorHandle = std::uint64_t;
 
 class AuthoritativeServer {
   public:
@@ -72,7 +76,12 @@ class AuthoritativeServer {
     [[nodiscard]] net::HostSession& host_session() noexcept;
     [[nodiscard]] const player_profiles::FilePlayerProfileStore& profile_store() const noexcept;
     [[nodiscard]] server_logs::FileServerLog& logs() noexcept;
+    [[nodiscard]] const std::filesystem::path& world_root() const noexcept;
+    [[nodiscard]] const std::filesystem::path& server_root() const noexcept;
+    [[nodiscard]] std::string_view server_session() const noexcept;
     void set_ban_validator(JoinBanValidator validator);
+    [[nodiscard]] BanValidatorHandle add_ban_validator(JoinBanValidator validator);
+    void remove_ban_validator(BanValidatorHandle handle) noexcept;
 
   private:
     [[nodiscard]] core::Status send_profile_snapshot(const ConnectedPlayer& player);
@@ -88,7 +97,9 @@ class AuthoritativeServer {
     player_profiles::FilePlayerProfileStore profiles_;
     server_logs::FileServerLog logs_;
     std::map<std::uint64_t, ConnectedPlayer> players_;
+    std::map<BanValidatorHandle, JoinBanValidator> ban_validators_;
     std::uint64_t next_outbound_sequence_ = 1;
+    BanValidatorHandle next_ban_validator_handle_ = 1;
 };
 
 [[nodiscard]] std::string hash_client_address(std::string_view address);

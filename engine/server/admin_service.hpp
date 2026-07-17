@@ -33,8 +33,14 @@ class ServerAdminService {
     ServerAdminService(AdminServiceConfig config, AuthoritativeServer& server);
     ~ServerAdminService();
 
+    ServerAdminService(const ServerAdminService&) = delete;
+    ServerAdminService& operator=(const ServerAdminService&) = delete;
+    ServerAdminService(ServerAdminService&&) = delete;
+    ServerAdminService& operator=(ServerAdminService&&) = delete;
+
     [[nodiscard]] core::Status load_bans();
     [[nodiscard]] core::Status save_bans() const;
+    [[nodiscard]] bool initialized() const noexcept;
     [[nodiscard]] bool is_banned(const player_profiles::PlayerUuid& uuid,
                                  std::string_view address_hash) const noexcept;
     [[nodiscard]] const std::vector<ServerBanRecord>& bans() const noexcept;
@@ -66,12 +72,16 @@ class ServerAdminService {
     [[nodiscard]] core::Status audit(std::string event, std::string actor,
                                      simulation::WorldTick world_time,
                                      std::map<std::string, std::string> metadata = {}) const;
+    [[nodiscard]] core::Status validate_configuration() const;
+    [[nodiscard]] core::Status require_initialized() const;
     [[nodiscard]] std::filesystem::path ban_file() const;
 
     AdminServiceConfig config_;
     AuthoritativeServer& server_;
     player_profiles::FilePlayerProfileStore profiles_;
     std::vector<ServerBanRecord> bans_;
+    BanValidatorHandle ban_validator_handle_ = 0;
+    bool initialized_ = false;
 };
 
 } // namespace heartstead::server

@@ -76,7 +76,12 @@ core::Result<core::NetId> AuthoritativeServer::join(const PlayerJoinRequest& req
         return core::Result<core::NetId>::failure("authoritative_server.invalid_join",
                                                   "join requires UUID and display name");
     const auto address_hash = hash_client_address(request.remote_address);
-    if (config_.ban_validator && config_.ban_validator(request.player_uuid, address_hash)) {
+    const auto is_banned =
+        (config_.ban_validator && config_.ban_validator(request.player_uuid, address_hash)) ||
+        std::ranges::any_of(ban_validators_, [&](const auto& validator) {
+            return validator.second(request.player_uuid, address_hash);
+        });
+    if (is_banned) {
         return core::Result<core::NetId>::failure("authoritative_server.player_banned",
                                                   "player or address is banned from this server");
     }
@@ -122,7 +127,7 @@ core::Result<core::NetId> AuthoritativeServer::join(const PlayerJoinRequest& req
     auto client = host_.connect_client();
     if (!client)
         return client;
-    ConnectedPlayer connected{client.value(), std::move(profile).value(), true};
+    ConnectedPlayer connected{client.value(), std::move(profile).value(), address_hash, true};
     auto [it, inserted] = players_.emplace(client.value().value(), std::move(connected));
     if (!inserted) {
         (void)host_.disconnect_client(client.value());
@@ -302,8 +307,33 @@ server_logs::FileServerLog& AuthoritativeServer::logs() noexcept {
     return logs_;
 }
 
+const std::filesystem::path& AuthoritativeServer::world_root() const noexcept {
+    return config_.world_root;
+}
+
+const std::filesystem::path& AuthoritativeServer::server_root() const noexcept {
+    return logs_.server_root();
+}
+
+std::string_view AuthoritativeServer::server_session() const noexcept {
+    return config_.server_session;
+}
+
 void AuthoritativeServer::set_ban_validator(JoinBanValidator validator) {
     config_.ban_validator = std::move(validator);
+}
+
+BanValidatorHandle AuthoritativeServer::add_ban_validator(JoinBanValidator validator) {
+    auto handle = next_ban_validator_handle_++;
+    while (handle == 0 || ban_validators_.contains(handle)) {
+        handle = next_ban_validator_handle_++;
+    }
+    ban_validators_.emplace(handle, std::move(validator));
+    return handle;
+}
+
+void AuthoritativeServer::remove_ban_validator(BanValidatorHandle handle) noexcept {
+    ban_validators_.erase(handle);
 }
 
 core::Status AuthoritativeServer::send_profile_snapshot(const ConnectedPlayer& player) {

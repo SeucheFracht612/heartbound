@@ -131,6 +131,7 @@ void test_admin_backups_publish_complete_unique_directories_outside_the_world() 
         admin_config.server_root = server_root;
         admin_config.backup_root = backup_root;
         heartstead::server::ServerAdminService admin(admin_config, server);
+        assert(admin.load_bans());
 
         auto first = admin.create_backup("manual", 10, "console");
         auto second = admin.create_backup("manual", 11, "console");
@@ -147,6 +148,7 @@ void test_admin_backups_publish_complete_unique_directories_outside_the_world() 
         unsafe_config.server_root = server_root;
         unsafe_config.backup_root = world_root / "nested_backups";
         heartstead::server::ServerAdminService unsafe_admin(unsafe_config, server);
+        assert(unsafe_admin.load_bans());
         auto rejected = unsafe_admin.create_backup("unsafe", 12, "console");
         assert(!rejected);
         assert(rejected.error().code == "admin.backup_inside_world");
