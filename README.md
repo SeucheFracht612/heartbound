@@ -9,11 +9,9 @@ block abstraction.
 
 ## Current Status
 
-Heartstead Engine v0.2 architecture is implemented as an engine-only foundation. Gameplay and
-production content are intentionally not part of this pass. The current strict build has focused
-coverage for cubic `i64` worlds, rich blocks, recoverable saves, authoritative profiles/logs,
-lazy time/process/fire simulation, workpieces, staged assemblies, resource/shader policies,
-worldgen features, admin infrastructure and camera-relative rendering.
+Heartstead now contains the engine foundation, Renderer V1, and a gameplay-ready runtime spine.
+The development application runs an authoritative local server and replicated client in one
+process; the dedicated server and headless test host use the same fixed-tick simulation path.
 
 Implemented in this repository:
 
@@ -100,7 +98,14 @@ Implemented in this repository:
 - build piece prototype materialization, derived invalidation, assembly representations, and
   validated assembly creation
 - prototype registry validation
-- game runtime target scaffold above the engine
+- game runtime target above the engine
+- composition-root runtime with local server/client and dedicated-server modes
+- fixed-phase simulation scheduling with typed tick event streams
+- generation-safe entity/component lifecycle and replicated destruction tombstones
+- authoritative player movement plus validated place/remove voxel commands
+- distinct replicated client, retained presentation, and immutable render-snapshot state
+- gameplay module registration with typed domain-service interfaces
+- authoritative save/reload and reusable headless session integration harness
 - game runtime startup from aggregate content validation
 - game-owned default script host API registry for server/client/migration scripting stages,
   validated by the engine scripting boundary
@@ -177,13 +182,15 @@ Implemented in this repository:
   execution, and complete JSON/CSV frame export
 - CTest coverage for unit tests plus headless-safe sample and tool smoke tests
 
-Gameplay system rules, general multi-pass production rendering, production physics/networking/
-scripting backends, optimized chunk streaming/meshing, and real gameplay simulation are not
-implemented yet.
+Full game feature rules, remote-client composition, production Jolt/Luau integrations, and wider
+native platform coverage remain future work. Renderer V1 and the local gameplay vertical slice are
+implemented; new renderer work is driven by measured gameplay needs.
 
 The normative target and the implementation audit are in
 [`docs/architecture/engine_spec.md`](docs/architecture/engine_spec.md) and
-[`docs/architecture/engine_v0_2_audit.md`](docs/architecture/engine_v0_2_audit.md).
+[`docs/architecture/engine_v0_2_audit.md`](docs/architecture/engine_v0_2_audit.md). Runtime ownership
+and feature extension are documented in
+[`docs/architecture/runtime_composition.md`](docs/architecture/runtime_composition.md).
 
 ## Build
 

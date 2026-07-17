@@ -53,7 +53,12 @@ Implemented foundation:
     logistics, farming, animals, ecology, combat, sleep, magic, and workpieces
   - records whether a system is server-authoritative and mod-data-driven
 
-This target is intentionally a scaffold. It proves the boundary:
+The runtime now also composes a fixed-tick local server/client session, typed gameplay modules,
+generation-safe entity lifecycle, player movement, authoritative voxel interaction, replication,
+retained client presentation, save/reload, and a headless session harness. The normative ownership
+and lifecycle contract is in [`runtime_composition.md`](runtime_composition.md).
+
+The layer boundary remains:
 
 ```text
 engine/
