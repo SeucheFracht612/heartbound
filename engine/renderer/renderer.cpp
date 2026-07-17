@@ -62,8 +62,10 @@ make_terrain_shader_program(std::span<const std::uint32_t> vertex_spirv,
         shader_program.interface.vertex_inputs.push_back({attribute.location, attribute.format});
     }
     shader_program.interface.descriptors = {
-        {"terrain_textures", rhi::RenderDescriptorKind::sampled_texture, 0, true},
-        {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true},
+        {"terrain_textures", rhi::RenderDescriptorKind::sampled_texture, 0, true,
+         rhi::RenderShaderStageFlags::fragment},
+        {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true,
+         rhi::RenderShaderStageFlags::fragment},
     };
     shader_program.interface.push_constant_ranges.push_back(
         {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
@@ -89,7 +91,8 @@ make_static_mesh_shader_program(std::span<const std::uint32_t> vertex_spirv,
         shader_program.interface.vertex_inputs.push_back({attribute.location, attribute.format});
     }
     shader_program.interface.descriptors = {
-        {"object_instances", rhi::RenderDescriptorKind::storage_buffer, 0, true},
+        {"object_instances", rhi::RenderDescriptorKind::storage_buffer, 0, true,
+         rhi::RenderShaderStageFlags::vertex},
     };
     shader_program.interface.push_constant_ranges.push_back(
         {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
@@ -137,7 +140,8 @@ make_ui_shader_program(std::span<const std::uint32_t> vertex_spirv,
         shader_program.interface.vertex_inputs.push_back({attribute.location, attribute.format});
     }
     shader_program.interface.descriptors = {
-        {"ui_atlas", rhi::RenderDescriptorKind::sampled_texture, 0, true},
+        {"ui_atlas", rhi::RenderDescriptorKind::sampled_texture, 0, true,
+         rhi::RenderShaderStageFlags::fragment},
     };
     shader_program.interface.push_constant_ranges.push_back(
         {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
@@ -1157,8 +1161,10 @@ core::Status Renderer::create_terrain_pipeline(std::span<const std::uint32_t> ve
     layout.material_id = material.value();
     layout.shader_template = {"base", "shaders/terrain.vert"};
     layout.descriptors = {
-        {"terrain_textures", rhi::RenderDescriptorKind::sampled_texture, 0, true},
-        {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true},
+        {"terrain_textures", rhi::RenderDescriptorKind::sampled_texture, 0, true,
+         rhi::RenderShaderStageFlags::fragment},
+        {"voxel_materials", rhi::RenderDescriptorKind::storage_buffer, 1, true,
+         rhi::RenderShaderStageFlags::fragment},
     };
     layout.push_constant_ranges.push_back(
         {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
@@ -1269,7 +1275,8 @@ core::Status Renderer::create_scene_pipelines(std::span<const std::uint32_t> ver
     layout.material_id = material.value();
     layout.shader_template = {"base", "shaders/static_mesh.vert"};
     layout.descriptors = {
-        {"object_instances", rhi::RenderDescriptorKind::storage_buffer, 0, true},
+        {"object_instances", rhi::RenderDescriptorKind::storage_buffer, 0, true,
+         rhi::RenderShaderStageFlags::vertex},
     };
     layout.push_constant_ranges.push_back(
         {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,
@@ -1450,7 +1457,8 @@ core::Status Renderer::create_ui_pipeline(std::span<const std::uint32_t> vertex_
     layout.material_id = material.value();
     layout.shader_template = {"base", "shaders/ui.vert"};
     layout.descriptors = {
-        {"ui_atlas", rhi::RenderDescriptorKind::sampled_texture, 0, true},
+        {"ui_atlas", rhi::RenderDescriptorKind::sampled_texture, 0, true,
+         rhi::RenderShaderStageFlags::fragment},
     };
     layout.push_constant_ranges.push_back(
         {rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment, 0,

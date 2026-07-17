@@ -282,6 +282,8 @@ struct RenderDescriptorBinding {
     RenderDescriptorKind kind = RenderDescriptorKind::sampled_texture;
     std::uint32_t slot = 0;
     bool required = true;
+    RenderShaderStageFlags stages =
+        RenderShaderStageFlags::vertex | RenderShaderStageFlags::fragment;
 };
 
 struct RenderPushConstantRange {

@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <span>
@@ -852,21 +853,6 @@ vulkan_primitive_topology(rhi::RenderPrimitiveTopology topology) noexcept {
     return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 }
 
-[[nodiscard]] VkShaderStageFlags
-vulkan_descriptor_stage_flags(rhi::RenderDescriptorKind kind) noexcept {
-    switch (kind) {
-    case rhi::RenderDescriptorKind::sampled_texture:
-        return VK_SHADER_STAGE_FRAGMENT_BIT;
-    case rhi::RenderDescriptorKind::storage_buffer:
-        return VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
-               VK_SHADER_STAGE_COMPUTE_BIT;
-    case rhi::RenderDescriptorKind::uniform_scalar:
-    case rhi::RenderDescriptorKind::uniform_color:
-        return VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    }
-    return VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-}
-
 [[nodiscard]] std::vector<VkDescriptorPoolSize>
 make_descriptor_pool_sizes(const rhi::RenderPipelineLayoutDesc& desc) {
     std::uint32_t sampled_textures = 0;
@@ -918,6 +904,103 @@ find_descriptor_binding(const rhi::RenderPipelineLayoutDesc& layout,
             return binding.name == binding_name;
         });
     return found == layout.descriptors.end() ? nullptr : &*found;
+}
+
+[[nodiscard]] bool same_extent(rhi::RenderExtent left, rhi::RenderExtent right) noexcept {
+    return left.width == right.width && left.height == right.height;
+}
+
+[[nodiscard]] core::Status
+validate_vulkan_clear_frame_plan(const rhi::RenderFramePlan& plan) {
+    const auto supported_pass_count = plan.has_present_pass() ? 2U : 1U;
+    if (plan.resources.size() != 1 || plan.passes.size() != supported_pass_count) {
+        return core::Status::failure(
+            "renderer.vulkan_unsupported_frame_plan",
+            "Vulkan execute_frame_plan supports one clear target and an optional present pass");
+    }
+    const auto& target = plan.resources.front();
+    const auto& clear = plan.passes.front();
+    const auto clear_supported =
+        target.lifetime == rhi::RenderResourceLifetime::external &&
+        target.format == rhi::RenderImageFormat::rgba8_unorm &&
+        same_extent(target.extent, plan.extent) && clear.kind == rhi::RenderPassKind::clear &&
+        clear.reads.empty() && clear.writes.size() == 1 && clear.writes.front() == target.name &&
+        !clear.presents;
+    if (!clear_supported) {
+        return core::Status::failure(
+            "renderer.vulkan_unsupported_frame_plan",
+            "Vulkan execute_frame_plan received a clear target it cannot execute faithfully");
+    }
+    if (plan.passes.size() == 2) {
+        const auto& present = plan.passes[1];
+        const auto present_supported = present.kind == rhi::RenderPassKind::present &&
+                                       present.reads.size() == 1 &&
+                                       present.reads.front() == target.name &&
+                                       present.writes.empty() && present.presents;
+        if (!present_supported) {
+            return core::Status::failure(
+                "renderer.vulkan_unsupported_frame_plan",
+                "Vulkan execute_frame_plan received a present pass it cannot execute faithfully");
+        }
+    }
+    return core::Status::ok();
+}
+
+[[nodiscard]] bool pass_matches(const rhi::RenderPassDesc& pass, std::string_view name,
+                                rhi::RenderPassKind kind,
+                                std::initializer_list<std::string_view> reads,
+                                std::initializer_list<std::string_view> writes,
+                                bool presents) {
+    if (pass.name != name || pass.kind != kind || pass.reads.size() != reads.size() ||
+        pass.writes.size() != writes.size() || pass.presents != presents) {
+        return false;
+    }
+    return std::ranges::equal(pass.reads, reads) && std::ranges::equal(pass.writes, writes);
+}
+
+[[nodiscard]] core::Status
+validate_vulkan_unified_frame_plan(const rhi::RenderFrameSubmission& frame) {
+    const auto& plan = frame.plan;
+    if (plan.resources.size() != 2 || plan.passes.size() != 8) {
+        return core::Status::failure(
+            "renderer.vulkan_unsupported_frame_plan",
+            "Vulkan execute_frame supports the renderer unified color/depth frame plan");
+    }
+    const auto& color = plan.resources[0];
+    const auto& depth = plan.resources[1];
+    const auto resources_supported =
+        color.name == "output" && color.lifetime == rhi::RenderResourceLifetime::external &&
+        color.format == rhi::RenderImageFormat::rgba8_unorm &&
+        same_extent(color.extent, plan.extent) && depth.name == "depth" &&
+        depth.lifetime == rhi::RenderResourceLifetime::transient &&
+        depth.format == rhi::RenderImageFormat::d32_sfloat &&
+        same_extent(depth.extent, plan.extent);
+    const auto passes_supported =
+        pass_matches(plan.passes[0], "sky", rhi::RenderPassKind::clear, {}, {"output"}, false) &&
+        pass_matches(plan.passes[1], "opaque_terrain", rhi::RenderPassKind::world, {"output"},
+                     {"output", "depth"}, false) &&
+        pass_matches(plan.passes[2], "alpha_tested_terrain", rhi::RenderPassKind::world,
+                     {"output", "depth"}, {"output", "depth"}, false) &&
+        pass_matches(plan.passes[3], "rich_static_instances", rhi::RenderPassKind::world,
+                     {"output", "depth"}, {"output", "depth"}, false) &&
+        pass_matches(plan.passes[4], "transparent_terrain", rhi::RenderPassKind::world,
+                     {"output", "depth"}, {"output", "depth"}, false) &&
+        pass_matches(plan.passes[5], "debug", rhi::RenderPassKind::debug, {"output", "depth"},
+                     {"output", "depth"}, false) &&
+        pass_matches(plan.passes[6], "ui", rhi::RenderPassKind::ui, {"output", "depth"},
+                     {"output", "depth"}, false) &&
+        pass_matches(plan.passes[7], "present", rhi::RenderPassKind::present, {"output"}, {},
+                     true);
+    const auto command_passes_supported =
+        std::ranges::all_of(frame.pass_commands, [](const rhi::RenderPassCommands& commands) {
+            return commands.pass_index >= 1 && commands.pass_index <= 6;
+        });
+    if (!resources_supported || !passes_supported || !command_passes_supported) {
+        return core::Status::failure(
+            "renderer.vulkan_unsupported_frame_plan",
+            "Vulkan execute_frame received operations it cannot execute faithfully");
+    }
+    return core::Status::ok();
 }
 
 struct VulkanResourceStateSync {
@@ -1164,6 +1247,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
         VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
         VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
+        std::uint64_t last_used_submission_serial = 0;
     };
 
     struct VulkanComputePipelineResource {
@@ -1455,6 +1539,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             return core::Result<rhi::RenderFrameStats>::failure(execution_plan.error().code,
                                                                 execution_plan.error().message);
         }
+        const auto compatibility_status = validate_vulkan_clear_frame_plan(plan);
+        if (!compatibility_status) {
+            return core::Result<rhi::RenderFrameStats>::failure(
+                compatibility_status.error().code, compatibility_status.error().message);
+        }
 
         const auto clear_color = plan.first_clear_color();
         if (plan.has_present_pass()) {
@@ -1549,6 +1638,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     [[nodiscard]] core::Result<rhi::RenderFrameStats>
     execute_frame(const rhi::RenderFrameSubmission& frame) override {
         auto status = rhi::validate_render_frame_submission_shape(frame);
+        if (!status) {
+            return core::Result<rhi::RenderFrameStats>::failure(status.error().code,
+                                                                status.error().message);
+        }
+        status = validate_vulkan_unified_frame_plan(frame);
         if (!status) {
             return core::Result<rhi::RenderFrameStats>::failure(status.error().code,
                                                                 status.error().message);
@@ -2215,11 +2309,18 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         stats.gpu_backed = true;
 
         const auto key = stats.material_id.value();
+        poll_completed_submissions();
         const auto existing = pipeline_layouts_.find(key);
         if (existing != pipeline_layouts_.end() &&
             rhi::equivalent_render_pipeline_layout(existing->second.desc, desc)) {
             stats.bound_pipeline_count = pipeline_layouts_.size();
             return core::Result<rhi::RenderPipelineLayoutStats>::success(stats);
+        }
+        if (existing != pipeline_layouts_.end() &&
+            existing->second.last_used_submission_serial > completed_submission_serial_) {
+            return core::Result<rhi::RenderPipelineLayoutStats>::failure(
+                "renderer.descriptor_set_in_flight",
+                "cannot replace a pipeline layout while its descriptor set is in flight");
         }
 
         auto resource = create_pipeline_layout_resource(std::move(desc));
@@ -2569,6 +2670,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             return core::Result<rhi::RenderDescriptorWriteStats>::failure(status.error().code,
                                                                           status.error().message);
         }
+        poll_completed_submissions();
 
         std::unordered_set<std::string> materials;
         std::size_t uniform_write_count = 0;
@@ -2587,6 +2689,11 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 return core::Result<rhi::RenderDescriptorWriteStats>::failure(
                     "renderer.unbound_descriptor_layout",
                     "descriptor write material must have a bound pipeline layout");
+            }
+            if (layout->second.last_used_submission_serial > completed_submission_serial_) {
+                return core::Result<rhi::RenderDescriptorWriteStats>::failure(
+                    "renderer.descriptor_set_in_flight",
+                    "cannot update a descriptor set while it is in flight");
             }
             const auto* binding = find_descriptor_binding(layout->second.desc, write.binding_name);
             if (binding == nullptr) {
@@ -2738,6 +2845,17 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                     "renderer.unbound_material_graphics_pipeline",
                     "mesh draw material must have a graphics pipeline");
             }
+            const auto layout = pipeline_layouts_.find(draw.material_id.value());
+            if (layout == pipeline_layouts_.end()) {
+                return core::Result<rhi::RenderDrawStats>::failure(
+                    "renderer.unbound_graphics_pipeline_layout",
+                    "mesh draw graphics pipeline layout is no longer bound");
+            }
+            status = validate_required_descriptors(layout->second);
+            if (!status) {
+                return core::Result<rhi::RenderDrawStats>::failure(status.error().code,
+                                                                   status.error().message);
+            }
             const auto vertex = buffer_resources_.find(draw.vertex_buffer.value);
             if (vertex == buffer_resources_.end()) {
                 return core::Result<rhi::RenderDrawStats>::failure(
@@ -2785,6 +2903,19 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         if (!handle.is_valid()) {
             return core::Status::failure("renderer.invalid_resource_handle",
                                          "render resource handle must be valid");
+        }
+        poll_completed_submissions();
+        for (const auto& [_, write] : descriptor_write_records_) {
+            if (write.resource.value != handle.value && write.sampler.value != handle.value) {
+                continue;
+            }
+            const auto layout = pipeline_layouts_.find(write.material_id.value());
+            if (layout != pipeline_layouts_.end() &&
+                layout->second.last_used_submission_serial > completed_submission_serial_) {
+                return core::Status::failure(
+                    "renderer.descriptor_resource_in_flight",
+                    "cannot release a descriptor resource while its descriptor set is in flight");
+            }
         }
         auto found = buffer_resources_.find(handle.value);
         if (found != buffer_resources_.end()) {
@@ -2841,6 +2972,22 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
     }
 
   private:
+    [[nodiscard]] core::Status
+    validate_required_descriptors(const VulkanPipelineLayoutResource& layout) const {
+        for (const auto& binding : layout.desc.descriptors) {
+            if (!binding.required) {
+                continue;
+            }
+            const auto key = layout.desc.material_id.value() + "|" + binding.name;
+            if (!descriptor_write_records_.contains(key)) {
+                return core::Status::failure(
+                    "renderer.required_descriptor_unbound",
+                    "required descriptor binding has not been written: " + binding.name);
+            }
+        }
+        return core::Status::ok();
+    }
+
     [[nodiscard]] core::Result<VulkanFrameContext> create_frame_context() {
         VulkanFrameContext context;
         auto pool = create_command_pool(device_, graphics_queue_family_);
@@ -3092,6 +3239,29 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             }
         }
         advance_completed_submission(newest);
+    }
+
+    void poll_completed_submissions() noexcept {
+        std::uint64_t newest = completed_submission_serial_;
+        for (auto& context : frame_contexts_) {
+            if (!context.in_flight ||
+                vkGetFenceStatus(device_, context.completion_fence) != VK_SUCCESS) {
+                continue;
+            }
+            newest = std::max(newest, context.submission_serial);
+            context.in_flight = false;
+        }
+        for (auto& context : upload_contexts_) {
+            if (!context.in_flight ||
+                vkGetFenceStatus(device_, context.completion_fence) != VK_SUCCESS) {
+                continue;
+            }
+            newest = std::max(newest, context.submission_serial);
+            context.in_flight = false;
+        }
+        if (newest > completed_submission_serial_) {
+            advance_completed_submission(newest);
+        }
     }
 
     [[nodiscard]] core::Status wait_for_frame_context(VulkanFrameContext& context,
@@ -3731,7 +3901,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             binding.binding = descriptor.slot;
             binding.descriptorType = vulkan_descriptor_type(descriptor.kind);
             binding.descriptorCount = 1;
-            binding.stageFlags = vulkan_descriptor_stage_flags(descriptor.kind);
+            binding.stageFlags = vulkan_shader_stage_flags(descriptor.stages);
             bindings.push_back(binding);
         }
 
@@ -4423,6 +4593,10 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                         "renderer.unbound_graphics_pipeline_layout",
                         "render draw graphics pipeline layout is no longer bound");
                 }
+                const auto descriptor_status = validate_required_descriptors(layout->second);
+                if (!descriptor_status) {
+                    return descriptor_status;
+                }
                 const auto has_chunk_constants = std::ranges::any_of(
                     layout->second.desc.push_constant_ranges,
                     [](const rhi::RenderPushConstantRange& range) {
@@ -4996,6 +5170,19 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
         ++next_frame_index_;
         next_frame_context_ = (next_frame_context_ + 1) % frame_contexts_.size();
         mark_timestamp_frame_pending(frame_index);
+        for (const auto& commands : frame.pass_commands) {
+            for (const auto& draw : commands.draws) {
+                const auto pipeline = graphics_pipelines_.find(draw.pipeline.value);
+                if (pipeline == graphics_pipelines_.end()) {
+                    continue;
+                }
+                const auto layout =
+                    pipeline_layouts_.find(pipeline->second.desc.material_id.value());
+                if (layout != pipeline_layouts_.end()) {
+                    layout->second.last_used_submission_serial = submission_serial;
+                }
+            }
+        }
 
         // Render-finished semaphores are owned by swapchain images. Reacquiring an image proves
         // that presentation consumed its prior wait before that semaphore is signaled again.

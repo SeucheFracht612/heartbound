@@ -33,6 +33,8 @@ struct ShaderDescriptorInterface {
     rhi::RenderDescriptorKind kind = rhi::RenderDescriptorKind::sampled_texture;
     std::uint32_t slot = 0;
     bool required = true;
+    rhi::RenderShaderStageFlags stages =
+        rhi::RenderShaderStageFlags::vertex | rhi::RenderShaderStageFlags::fragment;
 
     friend bool operator==(const ShaderDescriptorInterface&,
                            const ShaderDescriptorInterface&) = default;

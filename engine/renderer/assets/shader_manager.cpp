@@ -339,6 +339,19 @@ core::Status validate_shader_program_desc(const ShaderProgramDesc& desc) {
         return core::Status::failure("shader_manager.incomplete_graphics_program",
                                      "graphics shader programs require vertex and fragment stages");
     }
+    const auto available_stage_bits =
+        (has_vertex ? static_cast<std::uint32_t>(rhi::RenderShaderStageFlags::vertex) : 0U) |
+        (has_fragment ? static_cast<std::uint32_t>(rhi::RenderShaderStageFlags::fragment) : 0U) |
+        (has_compute ? static_cast<std::uint32_t>(rhi::RenderShaderStageFlags::compute) : 0U);
+    for (const auto& descriptor : desc.interface.descriptors) {
+        const auto descriptor_stage_bits = static_cast<std::uint32_t>(descriptor.stages);
+        if (descriptor_stage_bits == 0 ||
+            (descriptor_stage_bits & ~available_stage_bits) != 0) {
+            return core::Status::failure(
+                "shader_manager.invalid_descriptor_stages",
+                "shader descriptor stages must be non-empty stages present in the program");
+        }
+    }
     return core::Status::ok();
 }
 
@@ -367,8 +380,11 @@ core::Status validate_shader_interface(const ShaderProgramView& program,
     for (const auto& expected : interface.descriptors) {
         const auto found =
             std::ranges::find_if(layout.descriptors, [&expected](const auto& binding) {
+                const auto binding_stages = static_cast<std::uint32_t>(binding.stages);
+                const auto expected_stages = static_cast<std::uint32_t>(expected.stages);
                 return binding.name == expected.name && binding.kind == expected.kind &&
-                       binding.slot == expected.slot;
+                       binding.slot == expected.slot &&
+                       (binding_stages & expected_stages) == expected_stages;
             });
         if (found == layout.descriptors.end() && expected.required) {
             return core::Status::failure(

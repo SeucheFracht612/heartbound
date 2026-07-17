@@ -212,6 +212,12 @@ class HeadlessRenderDevice final : public IRenderDevice {
                             "renderer.unbound_graphics_pipeline_layout",
                             "render draw graphics pipeline layout is no longer bound");
                     }
+                    const auto descriptor_status =
+                        validate_required_descriptors(layout->second);
+                    if (!descriptor_status) {
+                        return core::Result<RenderFrameStats>::failure(
+                            descriptor_status.error().code, descriptor_status.error().message);
+                    }
                     const auto has_chunk_constants = std::ranges::any_of(
                         layout->second.push_constant_ranges,
                         [](const RenderPushConstantRange& range) {
@@ -667,6 +673,17 @@ class HeadlessRenderDevice final : public IRenderDevice {
                     "renderer.unbound_material_graphics_pipeline",
                     "mesh draw material must have a graphics pipeline");
             }
+            const auto layout = pipeline_layouts_.find(draw.material_id.value());
+            if (layout == pipeline_layouts_.end()) {
+                return core::Result<RenderDrawStats>::failure(
+                    "renderer.unbound_graphics_pipeline_layout",
+                    "mesh draw graphics pipeline layout is no longer bound");
+            }
+            status = validate_required_descriptors(layout->second);
+            if (!status) {
+                return core::Result<RenderDrawStats>::failure(status.error().code,
+                                                              status.error().message);
+            }
             const auto vertex = resources_.find(draw.vertex_buffer.value);
             if (vertex == resources_.end()) {
                 return core::Result<RenderDrawStats>::failure(
@@ -736,6 +753,22 @@ class HeadlessRenderDevice final : public IRenderDevice {
     }
 
   private:
+    [[nodiscard]] core::Status
+    validate_required_descriptors(const RenderPipelineLayoutDesc& layout) const {
+        for (const auto& binding : layout.descriptors) {
+            if (!binding.required) {
+                continue;
+            }
+            const auto key = layout.material_id.value() + "|" + binding.name;
+            if (!descriptor_writes_.contains(key)) {
+                return core::Status::failure(
+                    "renderer.required_descriptor_unbound",
+                    "required descriptor binding has not been written: " + binding.name);
+            }
+        }
+        return core::Status::ok();
+    }
+
     void destroy_compute_pipelines_for_shader(RenderResourceHandle shader) {
         for (auto pipeline = compute_pipelines_.begin(); pipeline != compute_pipelines_.end();) {
             if (pipeline->second.compute_shader.value == shader.value) {
@@ -1181,6 +1214,15 @@ core::Status validate_render_pipeline_layout_shape(const RenderPipelineLayoutDes
             return core::Status::failure("renderer.duplicate_descriptor_slot",
                                          "pipeline descriptor binding slot is duplicated");
         }
+        constexpr auto valid_stage_bits =
+            static_cast<std::uint32_t>(RenderShaderStageFlags::vertex) |
+            static_cast<std::uint32_t>(RenderShaderStageFlags::fragment) |
+            static_cast<std::uint32_t>(RenderShaderStageFlags::compute);
+        const auto stage_bits = static_cast<std::uint32_t>(binding.stages);
+        if (stage_bits == 0 || (stage_bits & ~valid_stage_bits) != 0) {
+            return core::Status::failure("renderer.invalid_descriptor_stages",
+                                         "pipeline descriptor shader stages are invalid");
+        }
         switch (binding.kind) {
         case RenderDescriptorKind::sampled_texture:
         case RenderDescriptorKind::storage_buffer:
@@ -1237,7 +1279,7 @@ bool equivalent_render_pipeline_layout(const RenderPipelineLayoutDesc& left,
         const auto& first = left.descriptors[index];
         const auto& second = right.descriptors[index];
         if (first.name != second.name || first.kind != second.kind || first.slot != second.slot ||
-            first.required != second.required) {
+            first.required != second.required || first.stages != second.stages) {
             return false;
         }
     }
@@ -1391,6 +1433,7 @@ validate_render_descriptor_writes_shape(std::span<const RenderDescriptorWrite> w
         return core::Status::failure("renderer.empty_descriptor_write_list",
                                      "descriptor write list must contain at least one write");
     }
+    std::unordered_set<std::string> targets;
     for (const auto& write : writes) {
         if (!write.material_id.is_valid()) {
             return core::Status::failure("renderer.invalid_descriptor_write_material",
@@ -1408,6 +1451,11 @@ validate_render_descriptor_writes_shape(std::span<const RenderDescriptorWrite> w
             return core::Status::failure(
                 "renderer.invalid_descriptor_sampler_range",
                 "descriptor writes with a sampler cannot specify a buffer range");
+        }
+        if (!targets.insert(write.material_id.value() + "|" + write.binding_name).second) {
+            return core::Status::failure(
+                "renderer.duplicate_descriptor_write",
+                "a descriptor write batch cannot update the same material binding twice");
         }
     }
     return core::Status::ok();
