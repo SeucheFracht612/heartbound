@@ -21,15 +21,27 @@ Implemented foundation:
 - decode errors for invalid magic, unsupported format version, truncation, invalid enum
   values, invalid prototype ids, and trailing data
 
-Binary format version 2 stores assembly-port source build-piece ids and per-port capacity, so saved
-multiblock machine ports remain tied to stable placed construction records instead of only a loose
-port name. Binary format version 3 adds persisted entity transforms; the decoder still accepts
-version 2 snapshots and materializes identity transforms for entities. Binary format version 4 adds
-persisted cargo positions; older supported binary versions materialize cargo at the origin.
-Binary format version 5 widens chunk edit record coordinates from signed 32-bit components to
-signed 64-bit components; older supported binary versions are still decoded through the legacy
-32-bit chunk-coordinate path. Binary format version 6 adds the authoritative unsigned 64-bit
-`world_time`; older supported versions materialize it as zero for migration.
+The current writer emits binary format version 13. The decoder accepts versions 2 through 13 and
+materializes explicit compatibility defaults for fields that did not exist in an older version:
+
+| Version | Change |
+| --- | --- |
+| 2 | Stores assembly-port source build-piece ids and per-port capacity. |
+| 3 | Adds entity transforms; version 2 entities receive identity transforms. |
+| 4 | Adds cargo positions; older cargo records are placed at the origin. |
+| 5 | Widens chunk-edit coordinates from signed 32-bit to signed 64-bit components. |
+| 6 | Adds authoritative unsigned 64-bit `world_time`; older snapshots receive zero. |
+| 7 | Replaces legacy global floating-point positions with anchored world positions and adds the voxel-palette manifest. |
+| 8 | Adds missing-prototype placeholder records. |
+| 9 | Widens process tick fields to unsigned 64-bit values and adds output-claim, condition-function, and interruption-policy state. |
+| 10 | Adds fire simulation records. |
+| 11 | Adds rich workpiece material, server-state, owner, revision, and committed fields. |
+| 12 | Adds assembly state-machine state, stage, revision, capabilities, process slots, failure reason, and custom state. |
+| 13 | Adds assembly part/port relative coordinates and the assembly root chunk coordinate. |
+
+Version numbers describe an ordered byte layout, not independently optional features. Any new
+authoritative field must increment the format version, retain an intentional legacy default, and
+add decode coverage for both the new and oldest-supported layouts.
 
 The binary codec preserves the same `SaveSnapshot` contract as the text codec. It does
 not collapse saved data into a generic object blob, and it does not save derived data as
