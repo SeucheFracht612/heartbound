@@ -25,9 +25,11 @@ Implemented foundation:
   - supports rollback/failure tracking
   - reports stable stage names and dirty flags for tools and replay diagnostics
 
-This is not a complete world database yet. It is the contract future voxel edits, build
-placement, item transfers, workpiece edits, tree felling, machine starts, and ward
-activation should use to avoid duplication bugs and multiplayer desyncs.
+This is not a complete world database yet. It is the active contract for voxel edits, build
+placement/completion, inventory transfers, workpiece edits/finishing, cargo creation, entity spawns,
+process starts/advancement, sleep, and assembly lifecycle commands. Future tree felling,
+machine-specific actions, and ward activation should use the same path to avoid duplication bugs and
+multiplayer desyncs.
 
 `ServerCommandDispatcher` is the current entry point for command-driven mutations. It
 creates a `WorldOperation` for each mutating command and requires handlers to satisfy the
@@ -42,11 +44,11 @@ report preserves the rollback stage, partial mutation descriptions, emitted diag
 reserved ids, and the authoritative error code while the older `dispatch` API continues to expose a
 simple success/failure result.
 
-`WorldCommandRegistry` now provides reusable command handlers for terrain voxel edits,
-build-piece placement and completion, workpiece edits, inventory transfers, cargo creation,
-entity spawns, process starts and advancement, and assembly creation. These handlers
-mutate `WorldState` directly and use the same `WorldOperation` contract for events, save
-dirtiness, and replication dirtiness.
+`WorldCommandRegistry` provides reusable command handlers for terrain voxel edits and sleep,
+build-piece placement/completion, workpiece edits/finishing, inventory transfers, cargo creation,
+entity spawns, process starts/advancement, direct assembly creation, and staged assembly
+blueprint/part/stage/state transitions. These handlers mutate `WorldState` directly and use the same
+`WorldOperation` contract for events, save dirtiness, and replication dirtiness.
 
 Build completion and assembly creation now perform an immediate derived spatial-network
 rebuild after marking dirty regions, so operational ports participate in storage, smoke,

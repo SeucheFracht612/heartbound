@@ -30,7 +30,9 @@ Implemented foundation:
     aggregate content validation
   - records the selected scenario start region and spawn mode in the startup report
   - materializes the selected scenario again at session creation, records its identity in
-    authoritative state, and applies its new-world spawn, item, and cargo bootstrap exactly once
+    authoritative state, and applies its new-world spawn area and cargo bootstrap exactly once
+  - grants scenario starting items once for each newly created persistent player inventory, while
+    preserving an existing inventory when a saved player reconnects
   - restores the saved scenario automatically and rejects explicit save/scenario mismatches
   - verifies that required engine-level prototype families are present, including materials
     and scenarios
