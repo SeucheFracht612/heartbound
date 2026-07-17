@@ -53,8 +53,13 @@ template <typename Callable>
 template <typename Callable>
 [[nodiscard]] int run_no_argument_process_entry(int argc, char** argv,
                                                 Callable&& callable) noexcept {
-    const std::string_view executable =
-        argc > 0 && argv != nullptr && argv[0] != nullptr ? argv[0] : "heartstead";
+    if (argv == nullptr) {
+        return run_process_entry("heartstead", [] {
+            std::cerr << "usage: heartstead\n";
+            return 2;
+        });
+    }
+    const std::string_view executable = argc > 0 && argv[0] != nullptr ? argv[0] : "heartstead";
     return run_process_entry(executable, [&] {
         if (argc == 2 && argv[1] != nullptr &&
             (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {

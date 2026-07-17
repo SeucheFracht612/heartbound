@@ -24,6 +24,7 @@ int main() {
     assert(run_no_argument_process_entry(1, no_arguments, [] { return 9; }) == 9);
     assert(run_no_argument_process_entry(2, help_arguments, [] { return 9; }) == 0);
     assert(run_no_argument_process_entry(2, unexpected_arguments, [] { return 9; }) == 2);
+    assert(run_no_argument_process_entry(2, nullptr, [] { return 9; }) == 2);
 
     std::cout.setstate(std::ios::badbit);
     assert(run_process_entry("process-entry-test", [] { return 0; }) == EXIT_FAILURE);

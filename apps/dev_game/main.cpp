@@ -343,14 +343,14 @@ int run_native(game::GameRuntime& runtime, const content::ContentValidationRepor
                 if (!selection) {
                     return fail(selection.error());
                 }
-                if (selection.value().hit.has_value()) {
+                const auto& hit = selection.value().hit;
+                if (hit.has_value()) {
                     if (action_frame[input::InputAction::primary_action].pressed) {
                         status = runtime.session()->submit_remove_voxel(
-                            {selection.value().hit->block},
-                            active_platform.value()->clock().now_ms());
+                            {hit->block}, active_platform.value()->clock().now_ms());
                     } else {
                         status = runtime.session()->submit_place_voxel(
-                            {selection.value().hit->adjacent_block, *clay},
+                            {hit->adjacent_block, *clay},
                             active_platform.value()->clock().now_ms());
                     }
                     if (!status) {
