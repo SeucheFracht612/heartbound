@@ -20,8 +20,11 @@ Implemented foundation:
 
 - `AssemblyDefinition`
   - prototype id
-  - named required and optional parts
-  - required ports
+  - named required and optional parts with prototype, relative coordinate, construction stage, and
+    optional role
+  - required ports with relative coordinates
+  - ordered construction stages, capabilities, allowed processes, validation rules, room
+    requirements, UI panel, capacity, and heat/power requirements
   - materialized from assembly prototypes through `assembly_definition_from_prototype`
 
 - `AssemblyRecord`
@@ -30,7 +33,9 @@ Implemented foundation:
   - named build piece parts
   - assembly ports bound to the source build-piece save id that supplies each port
   - per-port capacity copied from the supplying build piece
-  - operating state
+  - root chunk coordinate plus prototype-relative part/port coordinates
+  - blueprint/constructing/drying/maiden-firing/ready/operating/failed state, current construction
+    stage, monotonic revision, capabilities, attached process slots, failure reason, and custom state
   - unique part names and unique port names within the record
   - validation for valid port source ids and non-zero port capacity
   - derived as a separate simulation LOD subject from its root build-piece transform without
@@ -51,13 +56,30 @@ Implemented foundation:
     transaction
 
 - `assembly.create`
-  - server-authoritative command for creating validated assembly records
+  - server-authoritative direct-completion command for creating a validated ready assembly from
+    already completed and correctly positioned parts
   - consumes already placed build pieces by stable save id
   - derives assembly ports from the participating build-piece ports, preserving the source
     build-piece save id and capacity
   - marks assembly and network derived data dirty
   - rebuilds derived spatial networks so assembly access points become operational in the
     same transaction
+
+- staged assembly construction
+  - `assembly.start_blueprint` creates a blueprint from a completed root piece and the
+    prototype-defined ghost layout
+  - `assembly.place_part` accepts a completed build piece only for its named current-stage slot and
+    checks its world coordinate against the root-relative layout
+  - `assembly.advance_stage` requires every non-optional part in the current stage and materializes
+    the final ready record after the last stage
+  - every successful lifecycle mutation advances the record revision and marks save/replication
+    state dirty
+
+- assembly state machine
+  - `assembly.transition` permits ready/operating, ready/drying/maiden-firing/ready, or transition
+    into failed state; failure requires a reason
+  - `AssemblyRuntime` also provides checked process attach/detach operations with unique process ids
+  - `operating` remains a compatibility field and must exactly agree with `state == operating`
 
 - `SpatialNetworkDeriver`
   - materializes complete build-piece ports and assembly ports into rebuildable spatial
