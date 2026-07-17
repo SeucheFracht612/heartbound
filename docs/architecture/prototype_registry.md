@@ -5,17 +5,14 @@ loaded definitions into an engine-facing lookup table.
 
 Implemented foundation:
 
-- known prototype kinds:
-  - item
-  - cargo
-  - entity
-  - voxel
-  - build piece
-  - assembly
-  - workpiece
-  - process
-  - material
-  - scenario
+- engine-owned prototype kinds with typed semantic validation:
+  - `item`, `cargo`, `entity`, `voxel`, and `block_model`
+  - `build_piece`, `assembly`, `workpiece`, and `pattern`
+  - `process`, `fire`, and `room_descriptor`
+  - `material` and `scenario`
+- reserved gameplay-owned kinds accepted by the generic registry:
+  - `recipe`, `biome`, `world_feature`, `crop`, and `animal`
+  - `map_layer`, `ui_panel`, `network`, `ward`, and `admin_command`
 - id lookup
 - kind indexes
 - staged prototype patches applied before registry build
@@ -55,12 +52,19 @@ Aggregate content validation materializes selected engine-owned prototype output
 - item prototypes into `ItemDefinition` records
 - cargo prototypes into `CargoDefinition` records
 - entity prototypes into `EntityDefinition` records
-- voxel prototypes into `VoxelPalette`
+- voxel and block-model prototypes into `VoxelPalette`/`BlockModelDatabase` data
 - assembly prototypes into `AssemblyDefinition` records
 - process prototypes into `ProcessDefinition` records
+- room descriptor prototypes into `RoomDescriptorDefinition` records
 - workpiece prototypes into `WorkpieceDefinition` records
 - material prototypes into renderer material definitions
 - scenario prototypes into `ScenarioDefinition` records
+
+Pattern and fire prototypes also pass through their typed definition parsers during semantic
+validation, and pattern libraries/fire definitions can be built on demand. The reserved
+gameplay-owned kinds still receive generic shape validation, patching, deterministic
+fingerprinting, indexing, and inspection, but the engine does not invent field semantics or typed
+materializers for them.
 
 The registry deliberately validates representation kind, not gameplay meaning. Game
 runtime systems should use it to reject references such as an item id where a cargo id,
