@@ -206,17 +206,17 @@ class PosixDatagramTransportHost final : public ITransportHost {
                        core::NetId client_id, TransportReliabilityConfig reliability_config)
             : socket(std::move(socket_value)), address(address_value), reassembler(fragment_config),
               server_reliability(server_id, client_id, reliability_config),
-              client_reliability(client_id, server_id, reliability_config) {}
+              client_reliability(client_id, server_id, reliability_config),
+              server_command_sequencer(reliability_config.max_in_flight) {}
 
         PosixDatagramSocket socket;
         sockaddr_in address{};
         TransportPacketReassembler reassembler;
         TransportReliabilityTracker server_reliability;
         TransportReliabilityTracker client_reliability;
+        TransportReliableCommandSequencer server_command_sequencer;
         std::uint64_t last_sent_reliable_command_sequence = 0;
         bool has_sent_reliable_command_sequence = false;
-        std::uint64_t last_received_reliable_command_sequence = 0;
-        bool has_received_reliable_command_sequence = false;
         bool connected = true;
     };
 
@@ -347,6 +347,7 @@ class PosixDatagramTransportHost final : public ITransportHost {
         }
         server_reassembler_.discard_source(fragment_source_scope(client.value()->address));
         client.value()->reassembler.clear();
+        client.value()->server_command_sequencer.clear();
         client.value()->connected = false;
         return core::Status::ok();
     }
@@ -491,6 +492,12 @@ class PosixDatagramTransportHost final : public ITransportHost {
                     return;
                 }
                 if (envelope.message.channel == TransportChannel::reliable) {
+                    if (envelope.message.kind == TransportMessageKind::command) {
+                        status = client.value()->server_command_sequencer.preflight(envelope);
+                        if (!status) {
+                            return;
+                        }
+                    }
                     auto reliable = client.value()->server_reliability.accept_reliable_message(
                         envelope, current_time_ms_);
                     if (!reliable) {
@@ -502,11 +509,18 @@ class PosixDatagramTransportHost final : public ITransportHost {
                         return;
                     }
                 }
-                status = validate_server_receive_sequence(*client.value(), envelope.message);
-                if (!status) {
+                if (envelope.message.kind == TransportMessageKind::command &&
+                    envelope.message.channel == TransportChannel::reliable) {
+                    auto ordered =
+                        client.value()->server_command_sequencer.accept(std::move(envelope));
+                    if (!ordered) {
+                        return;
+                    }
+                    for (auto& ready : ordered.value()) {
+                        result.push_back(std::move(ready));
+                    }
                     return;
                 }
-                record_server_receive_sequence(*client.value(), envelope.message);
                 result.push_back(std::move(envelope));
             });
         return result;
@@ -621,31 +635,6 @@ class PosixDatagramTransportHost final : public ITransportHost {
             message.channel == TransportChannel::reliable) {
             client.last_sent_reliable_command_sequence = message.sequence;
             client.has_sent_reliable_command_sequence = true;
-        }
-    }
-
-    [[nodiscard]] core::Status
-    validate_server_receive_sequence(const ClientEndpoint& client,
-                                     const TransportMessage& message) const {
-        if (message.kind != TransportMessageKind::command ||
-            message.channel != TransportChannel::reliable) {
-            return core::Status::ok();
-        }
-        if (client.has_received_reliable_command_sequence &&
-            message.sequence <= client.last_received_reliable_command_sequence) {
-            return core::Status::failure("transport.reliable_command_replayed",
-                                         "reliable command sequence must be greater than the last "
-                                         "accepted command sequence");
-        }
-        return core::Status::ok();
-    }
-
-    void record_server_receive_sequence(ClientEndpoint& client,
-                                        const TransportMessage& message) const {
-        if (message.kind == TransportMessageKind::command &&
-            message.channel == TransportChannel::reliable) {
-            client.last_received_reliable_command_sequence = message.sequence;
-            client.has_received_reliable_command_sequence = true;
         }
     }
 

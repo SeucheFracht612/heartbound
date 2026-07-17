@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -51,6 +52,22 @@ class TransportReliabilityAckTextCodec {
   public:
     [[nodiscard]] static std::string encode(const TransportReliableMessageKey& message);
     [[nodiscard]] static core::Result<TransportReliableMessageKey> decode(std::string_view text);
+};
+
+class TransportReliableCommandSequencer final {
+  public:
+    explicit TransportReliableCommandSequencer(std::uint32_t max_pending_commands);
+
+    [[nodiscard]] core::Status preflight(const TransportEnvelope& envelope) const;
+    [[nodiscard]] core::Result<std::vector<TransportEnvelope>> accept(TransportEnvelope envelope);
+    [[nodiscard]] std::uint64_t next_expected_sequence() const noexcept;
+    [[nodiscard]] std::size_t pending_count() const noexcept;
+    void clear();
+
+  private:
+    std::uint32_t max_pending_commands_ = 0;
+    std::uint64_t next_expected_sequence_ = 1;
+    std::map<std::uint64_t, TransportEnvelope> pending_;
 };
 
 class TransportReliabilityTracker final {

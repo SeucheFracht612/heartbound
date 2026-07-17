@@ -3,6 +3,7 @@
 #include "engine/net/command_payload.hpp"
 
 #include <charconv>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -118,6 +119,87 @@ TransportReliabilityAckTextCodec::decode(std::string_view text) {
                                                                   status.error().message);
     }
     return core::Result<TransportReliableMessageKey>::success(std::move(key));
+}
+
+TransportReliableCommandSequencer::TransportReliableCommandSequencer(
+    std::uint32_t max_pending_commands)
+    : max_pending_commands_(max_pending_commands) {}
+
+core::Status TransportReliableCommandSequencer::preflight(const TransportEnvelope& envelope) const {
+    if (max_pending_commands_ == 0) {
+        return core::Status::failure("transport_reliability.invalid_sequence_buffer_limit",
+                                     "reliable command sequence buffer limit must be non-zero");
+    }
+    if (envelope.message.kind != TransportMessageKind::command ||
+        envelope.message.channel != TransportChannel::reliable || envelope.message.sequence == 0) {
+        return core::Status::failure(
+            "transport_reliability.invalid_sequenced_command",
+            "ordered reliable delivery accepts non-zero reliable command messages only");
+    }
+    if (next_expected_sequence_ == 0) {
+        return core::Status::failure(
+            "transport_reliability.sequence_exhausted",
+            "ordered reliable command delivery exhausted its sequence space");
+    }
+
+    const auto sequence = envelope.message.sequence;
+    if (sequence <= next_expected_sequence_ || pending_.contains(sequence)) {
+        return core::Status::ok();
+    }
+    if (sequence - next_expected_sequence_ > max_pending_commands_) {
+        return core::Status::failure(
+            "transport_reliability.sequence_window_exceeded",
+            "reliable command sequence is beyond the bounded reorder window");
+    }
+    if (pending_.size() >= static_cast<std::size_t>(max_pending_commands_)) {
+        return core::Status::failure("transport_reliability.sequence_buffer_full",
+                                     "reliable command reorder buffer reached its capacity");
+    }
+    return core::Status::ok();
+}
+
+core::Result<std::vector<TransportEnvelope>>
+TransportReliableCommandSequencer::accept(TransportEnvelope envelope) {
+    auto status = preflight(envelope);
+    if (!status) {
+        return core::Result<std::vector<TransportEnvelope>>::failure(status.error().code,
+                                                                     status.error().message);
+    }
+
+    const auto sequence = envelope.message.sequence;
+    if (sequence < next_expected_sequence_ || pending_.contains(sequence)) {
+        return core::Result<std::vector<TransportEnvelope>>::success(
+            std::vector<TransportEnvelope>{});
+    }
+    pending_.emplace(sequence, std::move(envelope));
+
+    std::vector<TransportEnvelope> ready;
+    while (next_expected_sequence_ != 0) {
+        auto pending = pending_.find(next_expected_sequence_);
+        if (pending == pending_.end()) {
+            break;
+        }
+        ready.push_back(std::move(pending->second));
+        pending_.erase(pending);
+        next_expected_sequence_ =
+            next_expected_sequence_ == std::numeric_limits<std::uint64_t>::max()
+                ? 0
+                : next_expected_sequence_ + 1;
+    }
+    return core::Result<std::vector<TransportEnvelope>>::success(std::move(ready));
+}
+
+std::uint64_t TransportReliableCommandSequencer::next_expected_sequence() const noexcept {
+    return next_expected_sequence_;
+}
+
+std::size_t TransportReliableCommandSequencer::pending_count() const noexcept {
+    return pending_.size();
+}
+
+void TransportReliableCommandSequencer::clear() {
+    pending_.clear();
+    next_expected_sequence_ = 1;
 }
 
 TransportReliabilityTracker::TransportReliabilityTracker(core::NetId local_id,

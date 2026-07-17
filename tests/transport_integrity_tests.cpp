@@ -133,11 +133,51 @@ void test_fragment_reassembly_is_scoped_and_expires() {
     assert(expiring.pending_packet_count() == 0);
 }
 
+void test_reliable_commands_are_delivered_only_after_gaps_close() {
+    const auto client_id = core::NetId::from_value(2);
+    const auto server_id = core::NetId::from_value(1);
+    const auto envelope = [client_id, server_id](std::uint64_t sequence, std::string payload) {
+        return net::TransportEnvelope{
+            client_id, server_id,
+            reliable_message(net::TransportMessageKind::command, sequence, std::move(payload))};
+    };
+
+    net::TransportReliableCommandSequencer sequencer(2);
+    auto second = sequencer.accept(envelope(2, "second"));
+    assert(second && second.value().empty());
+    assert(sequencer.next_expected_sequence() == 1);
+    assert(sequencer.pending_count() == 1);
+
+    auto duplicate_second = sequencer.accept(envelope(2, "duplicate-second"));
+    assert(duplicate_second && duplicate_second.value().empty());
+    assert(sequencer.pending_count() == 1);
+
+    auto third = sequencer.accept(envelope(3, "third"));
+    assert(third && third.value().empty());
+    assert(sequencer.pending_count() == 2);
+    auto beyond_window = sequencer.accept(envelope(4, "fourth"));
+    assert(!beyond_window);
+    assert(beyond_window.error().code == "transport_reliability.sequence_window_exceeded");
+
+    auto first = sequencer.accept(envelope(1, "first"));
+    assert(first && first.value().size() == 3);
+    assert(first.value()[0].message.sequence == 1);
+    assert(first.value()[1].message.sequence == 2);
+    assert(first.value()[2].message.sequence == 3);
+    assert(first.value()[1].message.payload == "second");
+    assert(sequencer.next_expected_sequence() == 4);
+    assert(sequencer.pending_count() == 0);
+
+    auto stale = sequencer.accept(envelope(2, "stale"));
+    assert(stale && stale.value().empty());
+}
+
 } // namespace
 
 int main() {
     test_tracking_can_be_rolled_back_before_retry();
     test_external_capacity_failure_does_not_leak_untracked_datagram();
     test_fragment_reassembly_is_scoped_and_expires();
+    test_reliable_commands_are_delivered_only_after_gaps_close();
     return 0;
 }
