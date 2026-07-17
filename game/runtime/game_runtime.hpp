@@ -3,9 +3,11 @@
 #include "engine/core/result.hpp"
 #include "engine/modding/mod_validation.hpp"
 #include "engine/scripting/script_runtime.hpp"
+#include "game/runtime/runtime_session.hpp"
 #include "game/runtime/script_host_commands.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -81,6 +83,13 @@ struct GameRuntimeStartupReport {
 
 class GameRuntime {
   public:
+    GameRuntime();
+    ~GameRuntime();
+    GameRuntime(const GameRuntime&) = delete;
+    GameRuntime& operator=(const GameRuntime&) = delete;
+    GameRuntime(GameRuntime&&) noexcept;
+    GameRuntime& operator=(GameRuntime&&) noexcept;
+
     [[nodiscard]] static std::vector<std::string> default_required_prototype_kinds();
     [[nodiscard]] static std::vector<GameSystemDescriptor> default_systems();
     [[nodiscard]] static std::vector<scripting::ScriptHostApiDesc> default_script_host_apis();
@@ -102,10 +111,21 @@ class GameRuntime {
     [[nodiscard]] const GameSystemDescriptor* find_system(GameSystemKind kind) const noexcept;
     [[nodiscard]] core::Status require_system(GameSystemKind kind) const;
     [[nodiscard]] core::Status require_prototype_kind(std::string_view kind) const;
+    [[nodiscard]] core::Status start_session(RuntimeConfiguration config,
+                                             SessionRequest request);
+    [[nodiscard]] core::Result<RuntimeFrameStats> run_frame(RuntimeFrameInput input);
+    [[nodiscard]] core::Status submit_command(std::string type, std::string payload,
+                                              std::int64_t now_ms = 0);
+    [[nodiscard]] core::Status shutdown();
+    [[nodiscard]] RuntimeSession* session() noexcept;
+    [[nodiscard]] const RuntimeSession* session() const noexcept;
 
   private:
     GameRuntimeConfig config_;
     GameRuntimeStartupReport startup_report_;
+    std::shared_ptr<const modding::PrototypeRegistry> prototypes_;
+    std::shared_ptr<const world::VoxelPalette> voxel_palette_;
+    std::unique_ptr<RuntimeSession> session_;
 };
 
 [[nodiscard]] std::string_view game_system_kind_name(GameSystemKind kind) noexcept;

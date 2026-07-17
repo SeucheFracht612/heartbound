@@ -13,6 +13,14 @@ heartstead_configure_target(heartstead_game_runtime_tests)
 
 add_test(NAME heartstead_game_runtime_tests COMMAND heartstead_game_runtime_tests)
 
+add_executable(heartstead_runtime_spine_tests runtime_spine_tests.cpp)
+target_link_libraries(heartstead_runtime_spine_tests PRIVATE Heartstead::GameRuntime)
+target_compile_definitions(
+  heartstead_runtime_spine_tests PRIVATE HEARTSTEAD_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+heartstead_configure_target(heartstead_runtime_spine_tests)
+add_test(NAME heartstead_runtime_spine_tests COMMAND heartstead_runtime_spine_tests)
+
 function(heartstead_add_foundation_test target_name source_file)
   add_executable(${target_name} ${source_file})
   target_link_libraries(${target_name} PRIVATE Heartstead::Engine)
@@ -75,6 +83,8 @@ heartstead_add_smoke_test(
   --output
   ${CMAKE_CURRENT_BINARY_DIR}/smoke_render_benchmark.json
 )
+heartstead_add_smoke_test(smoke.dev_game heartstead_dev_game --frames 3)
+heartstead_add_smoke_test(smoke.dedicated_server heartstead_dedicated_server --ticks 3)
 heartstead_add_smoke_test(smoke.physics heartstead_physics_sandbox)
 heartstead_add_smoke_test(smoke.network heartstead_network_sandbox)
 heartstead_add_smoke_test(smoke.scripting heartstead_scripting_sandbox)

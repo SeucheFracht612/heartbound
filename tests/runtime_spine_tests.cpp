@@ -1,0 +1,138 @@
+#include "engine/content/content_validation.hpp"
+#include "engine/net/command_payload.hpp"
+#include "game/runtime/game_runtime.hpp"
+
+#include <cassert>
+#include <filesystem>
+#include <string>
+
+using namespace heartstead;
+
+namespace {
+
+std::filesystem::path source_root() {
+    return std::filesystem::path(HEARTSTEAD_TEST_SOURCE_DIR);
+}
+
+game::GameRuntime make_runtime(const content::ContentValidationReport& content_report) {
+    auto runtime = game::GameRuntime::initialize(game::GameRuntimeConfig{}, content_report);
+    assert(runtime);
+    return std::move(runtime).value();
+}
+
+game::SessionRequest make_session_request(const content::ContentValidationReport& report) {
+    auto metadata = content::save_metadata_from_content_report(report, "runtime-spine-test", 1234);
+    assert(metadata);
+    game::SessionRequest request;
+    request.metadata = std::move(metadata).value();
+    request.scenario_id = "base:scenarios/homestead";
+    return request;
+}
+
+std::string set_voxel_payload() {
+    net::CommandPayload payload;
+    assert(payload.set("chunk", "0|0|0"));
+    assert(payload.set("voxel", "1|2|3"));
+    assert(payload.set("prototype", "base:voxels/clay"));
+    return net::CommandPayloadTextCodec::encode(payload);
+}
+
+void test_local_runtime_advances_authority_through_loopback() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+
+    game::RuntimeConfiguration config;
+    config.create_server = true;
+    config.create_client = true;
+    config.create_renderer = false;
+    config.create_audio = false;
+    config.use_in_memory_transport = true;
+    config.headless = true;
+    config.fixed_step = {60, 4, 250'000};
+    assert(runtime.start_session(config, make_session_request(report)));
+    assert(runtime.session() != nullptr);
+    assert(runtime.session()->server() != nullptr);
+    assert(runtime.session()->client() != nullptr);
+    assert(runtime.session()->client()->is_connected());
+
+    runtime.session()->server()->world().chunks().get_or_create({0, 0, 0}).clear_all_dirty();
+    assert(runtime.submit_command("world.set_voxel", set_voxel_payload(), 10));
+
+    auto frame = runtime.run_frame({16'667, 17});
+    assert(frame);
+    assert(frame.value().fixed_step.step_count == 1);
+    assert(frame.value().server_ticks.size() == 1);
+    assert(frame.value().server_ticks.front().commands.command_message_count == 1);
+    assert(frame.value().server_ticks.front().commands.command_reports.size() == 1);
+    assert(frame.value().server_ticks.front().commands.command_reports.front().success);
+    assert(frame.value().client.command_result_count == 1);
+    assert(frame.value().authoritative_world_tick == 1);
+    assert(runtime.session()->server()->events().is_sealed());
+
+    auto voxel = runtime.session()->server()->world().chunks().get({0, 0, 0}, {1, 2, 3});
+    assert(voxel);
+    const auto clay = report.voxel_palette.type_for(
+        *core::PrototypeId::parse("base:voxels/clay"));
+    assert(clay.has_value());
+    assert(voxel.value().type == *clay);
+    assert(runtime.session()->client()->command_results().size() == 1);
+    assert(runtime.session()->client()->command_results().front().success);
+
+    auto no_tick = runtime.run_frame({0, 17});
+    assert(no_tick);
+    assert(no_tick.value().fixed_step.step_count == 0);
+    assert(no_tick.value().server_ticks.empty());
+    assert(runtime.shutdown());
+    assert(runtime.session() == nullptr);
+}
+
+void test_dedicated_headless_runtime_uses_same_scheduler() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    game::RuntimeConfiguration config;
+    config.create_server = true;
+    config.create_client = false;
+    config.headless = true;
+    assert(runtime.start_session(config, make_session_request(report)));
+    assert(runtime.session()->server() != nullptr);
+    assert(runtime.session()->client() == nullptr);
+
+    auto frame = runtime.run_frame({50'000, 50});
+    assert(frame);
+    assert(frame.value().fixed_step.step_count == 3);
+    assert(frame.value().server_ticks.size() == 3);
+    assert(frame.value().authoritative_world_tick == 3);
+    const auto names = runtime.session()->server()->scheduler().ordered_system_names();
+    assert(names.front() == "runtime.command_gateway");
+    assert(names.back() == "runtime.replication");
+    assert(runtime.shutdown());
+}
+
+void test_runtime_configuration_rejects_invalid_compositions() {
+    game::RuntimeConfiguration empty;
+    empty.create_server = false;
+    empty.create_client = false;
+    assert(!empty.validate());
+
+    game::RuntimeConfiguration loopback_client;
+    loopback_client.create_server = false;
+    loopback_client.create_client = true;
+    loopback_client.use_in_memory_transport = true;
+    assert(!loopback_client.validate());
+
+    game::RuntimeConfiguration headless_renderer;
+    headless_renderer.create_renderer = true;
+    headless_renderer.headless = true;
+    assert(!headless_renderer.validate());
+}
+
+} // namespace
+
+int main() {
+    test_local_runtime_advances_authority_through_loopback();
+    test_dedicated_headless_runtime_uses_same_scheduler();
+    test_runtime_configuration_rejects_invalid_compositions();
+    return 0;
+}

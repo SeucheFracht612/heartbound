@@ -1,0 +1,6 @@
+add_executable(heartstead_dedicated_server main.cpp)
+target_link_libraries(heartstead_dedicated_server PRIVATE Heartstead::GameRuntime)
+target_compile_definitions(
+  heartstead_dedicated_server PRIVATE HEARTSTEAD_SOURCE_ROOT="${PROJECT_SOURCE_DIR}"
+)
+heartstead_configure_target(heartstead_dedicated_server)

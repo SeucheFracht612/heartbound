@@ -227,6 +227,16 @@ find_scenario_definition(const std::vector<scenarios::ScenarioDefinition>& defin
 GameRuntimeConfig::GameRuntimeConfig()
     : required_prototype_kinds(GameRuntime::default_required_prototype_kinds()) {}
 
+GameRuntime::GameRuntime() = default;
+
+GameRuntime::~GameRuntime() {
+    (void)shutdown();
+}
+
+GameRuntime::GameRuntime(GameRuntime&&) noexcept = default;
+
+GameRuntime& GameRuntime::operator=(GameRuntime&&) noexcept = default;
+
 std::size_t GameRuntimeStartupReport::count_kind(std::string_view kind) const noexcept {
     const auto found = prototypes_by_kind.find(std::string(kind));
     return found == prototypes_by_kind.end() ? 0 : found->second;
@@ -321,6 +331,14 @@ GameRuntime::initialize(GameRuntimeConfig config,
 
     GameRuntime runtime;
     runtime.config_ = std::move(config);
+    runtime.prototypes_ =
+        std::make_shared<modding::PrototypeRegistry>(content_report.registry);
+    auto palette = world::voxel_palette_from_prototypes(content_report.registry);
+    if (!palette) {
+        return core::Result<GameRuntime>::failure(palette.error().code, palette.error().message);
+    }
+    runtime.voxel_palette_ =
+        std::make_shared<world::VoxelPalette>(std::move(palette).value());
     auto startup_status =
         populate_startup_report(runtime.startup_report_, runtime.config_, content_report.mods,
                                 content_report.registry, 0, 0, 0, 0, 0, false);
@@ -347,6 +365,10 @@ GameRuntime::initialize(GameRuntimeConfig config,
 
     GameRuntime runtime;
     runtime.config_ = std::move(config);
+    runtime.prototypes_ =
+        std::make_shared<modding::PrototypeRegistry>(content_report.registry);
+    runtime.voxel_palette_ =
+        std::make_shared<world::VoxelPalette>(content_report.voxel_palette);
     auto startup_status = populate_startup_report(
         runtime.startup_report_, runtime.config_, content_report.mods, content_report.registry,
         content_report.resource_packs.size(), content_report.asset_catalog.active_count(),
@@ -426,6 +448,61 @@ core::Status GameRuntime::require_prototype_kind(std::string_view kind) const {
                                      missing_kind_message(kind));
     }
     return core::Status::ok();
+}
+
+core::Status GameRuntime::start_session(RuntimeConfiguration config, SessionRequest request) {
+    if (!is_initialized() || prototypes_ == nullptr || voxel_palette_ == nullptr) {
+        return core::Status::failure("game_runtime.not_initialized",
+                                     "game runtime content must be initialized first");
+    }
+    if (session_ != nullptr) {
+        return core::Status::failure("game_runtime.session_active",
+                                     "game runtime already owns an active session");
+    }
+    if (request.scenario_id.empty()) {
+        request.scenario_id = startup_report_.selected_scenario_id;
+    }
+    auto created = RuntimeSession::create(std::move(config), std::move(request), *prototypes_,
+                                          *voxel_palette_);
+    if (!created) {
+        return core::Status::failure(created.error().code, created.error().message);
+    }
+    session_ = std::move(created).value();
+    return core::Status::ok();
+}
+
+core::Result<RuntimeFrameStats> GameRuntime::run_frame(RuntimeFrameInput input) {
+    if (session_ == nullptr) {
+        return core::Result<RuntimeFrameStats>::failure(
+            "game_runtime.no_session", "game runtime has no active session to advance");
+    }
+    return session_->run_frame(input);
+}
+
+core::Status GameRuntime::submit_command(std::string type, std::string payload,
+                                         std::int64_t now_ms) {
+    if (session_ == nullptr) {
+        return core::Status::failure("game_runtime.no_session",
+                                     "game runtime has no active command path");
+    }
+    return session_->submit_command(std::move(type), std::move(payload), now_ms);
+}
+
+core::Status GameRuntime::shutdown() {
+    if (session_ == nullptr) {
+        return core::Status::ok();
+    }
+    auto status = session_->shutdown();
+    session_.reset();
+    return status;
+}
+
+RuntimeSession* GameRuntime::session() noexcept {
+    return session_.get();
+}
+
+const RuntimeSession* GameRuntime::session() const noexcept {
+    return session_.get();
 }
 
 std::string_view game_system_kind_name(GameSystemKind kind) noexcept {
