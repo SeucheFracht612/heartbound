@@ -137,13 +137,8 @@ int main() {
                   !settled_status ? settled_status.error().message : frozen_status.error().message);
         return 1;
     }
-    auto destroy_tree_status = world.value()->destroy_body(tree_body.value());
-    if (!destroy_tree_status) {
-        core::log(core::LogLevel::error, destroy_tree_status.error().message);
-        return 1;
-    }
-    auto cargo_record =
-        entities::convert_physical_resource_to_cargo(felled_tree, core::SaveId::from_value(201));
+    auto cargo_record = entities::convert_physical_resource_to_cargo(
+        felled_tree, core::SaveId::from_value(201), *world.value());
     if (!cargo_record) {
         core::log(core::LogLevel::error, cargo_record.error().message);
         return 1;

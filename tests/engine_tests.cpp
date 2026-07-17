@@ -3361,15 +3361,36 @@ void test_physical_resource_lifecycle() {
     assert(entities::freeze_physical_resource(resource));
     assert(resource.state == entities::PhysicalResourceState::frozen_static);
 
-    auto cargo_record =
-        entities::convert_physical_resource_to_cargo(resource, core::SaveId::from_value(1201));
+    auto cargo_record = entities::convert_physical_resource_to_cargo(
+        resource, core::SaveId::from_value(1201), *world.value());
     assert(cargo_record);
     assert(cargo_record.value().prototype_id == cargo_id.value());
     assert(cargo_record.value().mass_grams == 90000);
     assert(cargo_record.value().allowed_transport_modes.allows(cargo::CargoTransportMode::wagon));
     assert(resource.state == entities::PhysicalResourceState::converted_to_cargo);
     assert(!resource.physics_body_id.is_valid());
+    assert(world.value()->body_count() == 0);
+    assert(!world.value()->body_state(body.value()).has_value());
     assert(!entities::make_physical_resource_body_desc(resource));
+
+    auto frozen_resource = resource;
+    frozen_resource.state = entities::PhysicalResourceState::frozen_static;
+    frozen_resource.physics_body_id = {};
+    frozen_resource.needs_physics_rebuild = true;
+    auto frozen_desc = entities::make_physical_resource_body_desc(
+        frozen_resource, physics::Vec3{1.0F, 2.0F, 3.0F}, physics::Vec3{4.0F, 5.0F, 6.0F});
+    assert(frozen_desc);
+    assert(frozen_desc.value().motion_type == physics::BodyMotionType::static_body);
+    assert(frozen_desc.value().mass == 0.0F);
+    assert((frozen_desc.value().linear_velocity == physics::Vec3{}));
+    auto frozen_body = world.value()->create_body(frozen_desc.value());
+    assert(frozen_body);
+    assert(entities::attach_physical_resource_body(frozen_resource, frozen_body.value()));
+    assert(frozen_resource.state == entities::PhysicalResourceState::frozen_static);
+    assert(!frozen_resource.needs_physics_rebuild);
+    auto frozen_body_state = world.value()->body_state(frozen_body.value());
+    assert(frozen_body_state);
+    assert(frozen_body_state->motion_type == physics::BodyMotionType::static_body);
 }
 
 void test_scripting_runtime() {

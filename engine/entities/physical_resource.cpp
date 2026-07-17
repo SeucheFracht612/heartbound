@@ -138,10 +138,12 @@ make_physical_resource_body_desc(const PhysicalResourceRecord& resource, physics
     }
 
     physics::PhysicsBodyDesc desc;
-    desc.motion_type = physics::BodyMotionType::dynamic;
-    desc.mass = static_cast<float>(resource.mass_grams) / 1000.0F;
+    const auto frozen = resource.state == PhysicalResourceState::frozen_static;
+    desc.motion_type =
+        frozen ? physics::BodyMotionType::static_body : physics::BodyMotionType::dynamic;
+    desc.mass = frozen ? 0.0F : static_cast<float>(resource.mass_grams) / 1000.0F;
     desc.position = position;
-    desc.linear_velocity = linear_velocity;
+    desc.linear_velocity = frozen ? physics::Vec3{} : linear_velocity;
     desc.user_data = resource.resource_id.value();
     desc.shape.kind = physics::ShapeKind::compound;
     desc.shape.children.reserve(resource.segments.size());
@@ -167,10 +169,23 @@ core::Status attach_physical_resource_body(PhysicalResourceRecord& resource,
         return core::Status::failure("physical_resource.already_cargo",
                                      "converted physical resources cannot attach physics bodies");
     }
-    resource.physics_body_id = body_id;
-    resource.state = PhysicalResourceState::dynamic;
-    resource.needs_physics_rebuild = false;
-    return resource.validate();
+    if (resource.physics_body_id.is_valid()) {
+        return core::Status::failure("physical_resource.physics_body_already_attached",
+                                     "physical resource already owns a physics body");
+    }
+
+    auto staged = resource;
+    const auto restoring_frozen =
+        staged.needs_physics_rebuild && staged.state == PhysicalResourceState::frozen_static;
+    staged.physics_body_id = body_id;
+    staged.state =
+        restoring_frozen ? PhysicalResourceState::frozen_static : PhysicalResourceState::dynamic;
+    staged.needs_physics_rebuild = false;
+    auto status = staged.validate();
+    if (status) {
+        resource = std::move(staged);
+    }
+    return status;
 }
 
 core::Status mark_physical_resource_settled(PhysicalResourceRecord& resource) {
@@ -192,7 +207,8 @@ core::Status freeze_physical_resource(PhysicalResourceRecord& resource) {
 }
 
 core::Result<cargo::CargoRecord>
-convert_physical_resource_to_cargo(PhysicalResourceRecord& resource, core::SaveId cargo_id) {
+convert_physical_resource_to_cargo(PhysicalResourceRecord& resource, core::SaveId cargo_id,
+                                   physics::IPhysicsWorld& physics_world) {
     if (!can_convert_to_cargo(resource.state)) {
         return core::Result<cargo::CargoRecord>::failure(
             "physical_resource.not_convertible",
@@ -217,6 +233,14 @@ convert_physical_resource_to_cargo(PhysicalResourceRecord& resource, core::SaveI
     if (!status) {
         return core::Result<cargo::CargoRecord>::failure(status.error().code,
                                                          status.error().message);
+    }
+
+    if (resource.physics_body_id.is_valid()) {
+        status = physics_world.destroy_body(resource.physics_body_id);
+        if (!status) {
+            return core::Result<cargo::CargoRecord>::failure(status.error().code,
+                                                             status.error().message);
+        }
     }
 
     resource.state = PhysicalResourceState::converted_to_cargo;

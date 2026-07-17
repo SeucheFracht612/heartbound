@@ -75,7 +75,8 @@ make_physical_resource_body_desc(const PhysicalResourceRecord& resource,
 [[nodiscard]] core::Status mark_physical_resource_settled(PhysicalResourceRecord& resource);
 [[nodiscard]] core::Status freeze_physical_resource(PhysicalResourceRecord& resource);
 [[nodiscard]] core::Result<cargo::CargoRecord>
-convert_physical_resource_to_cargo(PhysicalResourceRecord& resource, core::SaveId cargo_id);
+convert_physical_resource_to_cargo(PhysicalResourceRecord& resource, core::SaveId cargo_id,
+                                   physics::IPhysicsWorld& physics_world);
 
 [[nodiscard]] std::string_view physical_resource_kind_name(PhysicalResourceKind kind) noexcept;
 [[nodiscard]] std::string_view physical_resource_state_name(PhysicalResourceState state) noexcept;
