@@ -6448,6 +6448,113 @@ void test_file_save_database() {
     assert(validated_wrong_kind_loaded.error().code == "prototype_registry.kind_mismatch");
 }
 
+void test_file_save_database_safety() {
+    constexpr std::string_view chunk_index_magic = "heartstead.save_database_chunks.v1";
+
+    heartstead::save::SaveSnapshot snapshot;
+    snapshot.metadata.game_version = "0.1.0";
+    snapshot.metadata.world_seed = 42;
+    snapshot.metadata.enabled_mods.push_back({"base", "0.0.1", "hash"});
+    snapshot.chunk_edits = {{{1, 0, 0}, "first"}, {{2, 0, 0}, "second"}};
+
+    const auto transaction_root = make_temp_root() / "transactional_chunks";
+    heartstead::save::FileSaveDatabase transaction_database(transaction_root);
+    assert(transaction_database.write_snapshot(snapshot));
+    const auto active_chunks = transaction_root / "generations" / "generation_1" / "chunks";
+    write_text(active_chunks / "orphan.delta", "not indexed");
+
+    assert(transaction_database.write_chunk_delta({{1, 0, 0}, "updated"}));
+    auto deltas = transaction_database.read_chunk_deltas();
+    assert(deltas && deltas.value().size() == 2);
+    assert(deltas.value()[0].coord == (heartstead::world::ChunkCoord{1, 0, 0}));
+    assert(deltas.value()[0].encoded_edit_delta == "updated");
+    assert(deltas.value()[1].coord == (heartstead::world::ChunkCoord{2, 0, 0}));
+    assert(deltas.value()[1].encoded_edit_delta == "second");
+    assert(!std::filesystem::exists(active_chunks / "orphan.delta"));
+
+    const auto index_path = active_chunks / "index.txt";
+    const auto expect_invalid_index = [&](std::string text, std::string_view error_code) {
+        write_text(index_path, text);
+        const auto result = transaction_database.read_chunk_deltas();
+        assert(!result);
+        assert(result.error().code == error_code);
+    };
+    expect_invalid_index(std::string(chunk_index_magic) + "\nchunk|1|0|0|renamed.delta\nend\n",
+                         "save_database.noncanonical_chunk_filename");
+    expect_invalid_index(std::string(chunk_index_magic) + "\nchunk|1|0|0|c_1_0_0.delta\n"
+                                                          "chunk|1|0|0|different.delta\nend\n",
+                         "save_database.duplicate_chunk_coordinate");
+    expect_invalid_index(std::string(chunk_index_magic) + "\nchunk|1|0|0|c_1_0_0.delta\n"
+                                                          "chunk|2|0|0|c_1_0_0.delta\nend\n",
+                         "save_database.duplicate_chunk_filename");
+    expect_invalid_index(std::string(chunk_index_magic) +
+                             "\nchunk|1|0|0|c_1_0_0.delta\nend\ntrailing\n",
+                         "save_database.invalid_chunk_index");
+    write_text(index_path, std::string(chunk_index_magic) + "\nchunk|1|0|0|c_1_0_0.delta\n"
+                                                            "chunk|2|0|0|c_2_0_0.delta\nend\n");
+    deltas = transaction_database.read_chunk_deltas();
+    assert(deltas && deltas.value().size() == 2);
+
+    const auto legacy_root = make_temp_root() / "legacy_chunks";
+    write_bytes(legacy_root / "snapshot.hssb",
+                heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot));
+    heartstead::save::FileSaveDatabase legacy_database(legacy_root);
+    assert(legacy_database.write_chunk_delta({{3, 0, 0}, "third"}));
+    const auto legacy_loaded = legacy_database.read_snapshot();
+    assert(legacy_loaded && legacy_loaded.value().chunk_edits.size() == 3);
+
+    const auto oversized_snapshot_root = make_temp_root() / "oversized_snapshot";
+    const auto oversized_snapshot_path = oversized_snapshot_root / "snapshot.hssb";
+    write_text(oversized_snapshot_path, "x");
+    std::filesystem::resize_file(oversized_snapshot_path,
+                                 static_cast<std::uintmax_t>(512U) * 1024U * 1024U + 1U);
+    heartstead::save::FileSaveDatabase oversized_snapshot_database(oversized_snapshot_root);
+    const auto oversized_snapshot = oversized_snapshot_database.read_snapshot();
+    assert(!oversized_snapshot);
+    assert(oversized_snapshot.error().code == "save_database.snapshot_too_large");
+
+    const auto oversized_index_root = make_temp_root() / "oversized_index";
+    const auto oversized_index_path = oversized_index_root / "chunks" / "index.txt";
+    write_text(oversized_index_path, "x");
+    std::filesystem::resize_file(oversized_index_path,
+                                 static_cast<std::uintmax_t>(64U) * 1024U * 1024U + 1U);
+    heartstead::save::FileSaveDatabase oversized_index_database(oversized_index_root);
+    const auto oversized_index = oversized_index_database.read_chunk_deltas();
+    assert(!oversized_index);
+    assert(oversized_index.error().code == "save_database.chunk_index_too_large");
+
+    const auto oversized_delta_root = make_temp_root() / "oversized_delta";
+    const auto oversized_delta_path = oversized_delta_root / "chunks" / "c_1_0_0.delta";
+    write_text(oversized_delta_root / "chunks" / "index.txt",
+               std::string(chunk_index_magic) + "\nchunk|1|0|0|c_1_0_0.delta\nend\n");
+    write_text(oversized_delta_path, "x");
+    std::filesystem::resize_file(oversized_delta_path,
+                                 static_cast<std::uintmax_t>(16U) * 1024U * 1024U + 1U);
+    heartstead::save::FileSaveDatabase oversized_delta_database(oversized_delta_root);
+    const auto oversized_delta = oversized_delta_database.read_chunk_deltas();
+    assert(!oversized_delta);
+    assert(oversized_delta.error().code == "save_database.chunk_delta_too_large");
+
+    const auto oversized_manifest_root = make_temp_root() / "oversized_manifest";
+    const auto oversized_manifest_path = oversized_manifest_root / "current.txt";
+    write_text(oversized_manifest_path, "x");
+    std::filesystem::resize_file(oversized_manifest_path,
+                                 static_cast<std::uintmax_t>(64U) * 1024U + 1U);
+    heartstead::save::FileSaveDatabase oversized_manifest_database(oversized_manifest_root);
+    const auto oversized_manifest = oversized_manifest_database.stats();
+    assert(!oversized_manifest);
+    assert(oversized_manifest.error().code == "save_database.generation_manifest_too_large");
+
+    const auto exhausted_root = make_temp_root() / "exhausted_generation";
+    std::filesystem::create_directories(exhausted_root / "generations" /
+                                        "generation_18446744073709551615");
+    heartstead::save::FileSaveDatabase exhausted_database(exhausted_root);
+    const auto exhausted = exhausted_database.write_snapshot(snapshot);
+    assert(!exhausted);
+    assert(exhausted.error().code == "save_database.generation_exhausted");
+    assert(!std::filesystem::exists(exhausted_root / "generations" / "generation_0"));
+}
+
 void test_file_save_database_migration() {
     const auto root = make_temp_root() / "save_database_migration";
     heartstead::save::FileSaveDatabase database(root);
@@ -13849,6 +13956,7 @@ int main() {
     test_save_migration_registry();
     test_save_snapshot_validation();
     test_file_save_database();
+    test_file_save_database_safety();
     test_file_save_database_migration();
     test_file_save_slot_catalog();
     test_debug_inspection();

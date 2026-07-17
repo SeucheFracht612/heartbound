@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <charconv>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -20,6 +21,12 @@ namespace {
 constexpr std::string_view chunk_index_magic = "heartstead.save_database_chunks.v1";
 constexpr std::string_view current_generation_magic = "heartstead.save_database_current.v1";
 constexpr std::string_view generation_prefix = "generation_";
+constexpr std::size_t max_snapshot_file_bytes = 512U * 1024U * 1024U;
+constexpr std::size_t max_chunk_index_file_bytes = 64U * 1024U * 1024U;
+constexpr std::size_t max_generation_manifest_file_bytes = 64U * 1024U;
+constexpr std::size_t max_chunk_delta_file_bytes = 16U * 1024U * 1024U;
+constexpr std::size_t max_chunk_delta_table_bytes = 512U * 1024U * 1024U;
+constexpr std::size_t max_chunk_delta_count = 1'000'000U;
 
 struct ChunkIndexEntry {
     world::ChunkCoord coord;
@@ -83,7 +90,11 @@ struct StagedGenerationEntry {
     if (!name.starts_with(generation_prefix) || name.size() == generation_prefix.size()) {
         return false;
     }
-    for (const auto character : name.substr(generation_prefix.size())) {
+    const auto digits = name.substr(generation_prefix.size());
+    if (digits.front() < '1' || digits.front() > '9') {
+        return false;
+    }
+    for (const auto character : digits) {
         if (character < '0' || character > '9') {
             return false;
         }
@@ -190,8 +201,10 @@ struct StagedGenerationEntry {
                                             text.size()));
 }
 
-[[nodiscard]] core::Result<std::vector<std::uint8_t>>
-read_bytes(const std::filesystem::path& path) {
+[[nodiscard]] core::Result<std::vector<std::uint8_t>> read_bytes(const std::filesystem::path& path,
+                                                                 std::size_t max_bytes,
+                                                                 std::string_view too_large_code,
+                                                                 std::string_view description) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         return core::Result<std::vector<std::uint8_t>>::failure(
@@ -204,7 +217,16 @@ read_bytes(const std::filesystem::path& path) {
         return core::Result<std::vector<std::uint8_t>>::failure(
             "save_database.read_failed", "failed to determine save database file size");
     }
+    if (static_cast<std::uintmax_t>(end) > max_bytes) {
+        return core::Result<std::vector<std::uint8_t>>::failure(
+            std::string(too_large_code),
+            std::string(description) + " exceeds the configured safety limit");
+    }
     input.seekg(0, std::ios::beg);
+    if (!input) {
+        return core::Result<std::vector<std::uint8_t>>::failure(
+            "save_database.read_failed", "failed to seek save database file: " + path.string());
+    }
 
     std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
     if (!bytes.empty()) {
@@ -250,11 +272,18 @@ read_bytes(const std::filesystem::path& path) {
 [[nodiscard]] core::Result<std::vector<ChunkIndexEntry>>
 read_chunk_index(const std::filesystem::path& root) {
     const auto path = chunk_index_path(root);
-    if (!std::filesystem::exists(path)) {
+    std::error_code filesystem_error;
+    const bool has_index = std::filesystem::exists(path, filesystem_error);
+    if (filesystem_error) {
+        return core::Result<std::vector<ChunkIndexEntry>>::failure("save_database.read_failed",
+                                                                   filesystem_error.message());
+    }
+    if (!has_index) {
         return core::Result<std::vector<ChunkIndexEntry>>::success({});
     }
 
-    auto bytes = read_bytes(path);
+    auto bytes = read_bytes(path, max_chunk_index_file_bytes, "save_database.chunk_index_too_large",
+                            "chunk index");
     if (!bytes) {
         return core::Result<std::vector<ChunkIndexEntry>>::failure(bytes.error().code,
                                                                    bytes.error().message);
@@ -262,6 +291,8 @@ read_chunk_index(const std::filesystem::path& root) {
     const auto text =
         std::string_view(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size());
     std::vector<ChunkIndexEntry> entries;
+    std::unordered_set<std::string> seen_coordinates;
+    std::unordered_set<std::string> seen_filenames;
     bool saw_magic = false;
     bool saw_end = false;
 
@@ -275,7 +306,13 @@ read_chunk_index(const std::filesystem::path& root) {
             line.remove_suffix(1);
         }
 
-        if (!saw_magic) {
+        if (saw_end) {
+            if (!line.empty()) {
+                return core::Result<std::vector<ChunkIndexEntry>>::failure(
+                    "save_database.invalid_chunk_index",
+                    "chunk index contains data after its end marker");
+            }
+        } else if (!saw_magic) {
             if (line != chunk_index_magic) {
                 return core::Result<std::vector<ChunkIndexEntry>>::failure(
                     "save_database.invalid_chunk_index", "chunk index has invalid magic");
@@ -283,7 +320,6 @@ read_chunk_index(const std::filesystem::path& root) {
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
-            break;
         } else if (!line.empty()) {
             const auto fields = split(line, '|');
             if (fields.size() != 5 || fields.front() != "chunk") {
@@ -300,7 +336,29 @@ read_chunk_index(const std::filesystem::path& root) {
                 return core::Result<std::vector<ChunkIndexEntry>>::failure(
                     "save_database.invalid_chunk_index", "chunk index row contains invalid fields");
             }
-            entries.push_back({{x.value(), y.value(), z.value()}, std::string(fields[4])});
+            const world::ChunkCoord coord{x.value(), y.value(), z.value()};
+            const auto canonical_filename = chunk_filename(coord);
+            if (!seen_coordinates.insert(canonical_filename).second) {
+                return core::Result<std::vector<ChunkIndexEntry>>::failure(
+                    "save_database.duplicate_chunk_coordinate",
+                    "chunk index contains a duplicate chunk coordinate");
+            }
+            if (!seen_filenames.emplace(fields[4]).second) {
+                return core::Result<std::vector<ChunkIndexEntry>>::failure(
+                    "save_database.duplicate_chunk_filename",
+                    "chunk index contains a duplicate chunk filename");
+            }
+            if (fields[4] != canonical_filename) {
+                return core::Result<std::vector<ChunkIndexEntry>>::failure(
+                    "save_database.noncanonical_chunk_filename",
+                    "chunk index filename does not match its chunk coordinate");
+            }
+            if (entries.size() == max_chunk_delta_count) {
+                return core::Result<std::vector<ChunkIndexEntry>>::failure(
+                    "save_database.too_many_chunk_deltas",
+                    "chunk index exceeds the configured record limit");
+            }
+            entries.push_back({coord, std::string(fields[4])});
         }
 
         if (line_end == std::string_view::npos) {
@@ -319,6 +377,21 @@ read_chunk_index(const std::filesystem::path& root) {
 [[nodiscard]] core::Status
 write_chunk_index_to_directory(const std::filesystem::path& directory,
                                const std::vector<ChunkIndexEntry>& entries) {
+    std::size_t encoded_size = chunk_index_magic.size() + 1U + std::string_view("end\n").size();
+    for (const auto& entry : entries) {
+        const auto x = std::to_string(entry.coord.x);
+        const auto y = std::to_string(entry.coord.y);
+        const auto z = std::to_string(entry.coord.z);
+        constexpr std::size_t fixed_row_bytes = std::string_view("chunk||||\n").size();
+        const auto row_size =
+            fixed_row_bytes + x.size() + y.size() + z.size() + entry.filename.size();
+        if (row_size > max_chunk_index_file_bytes - encoded_size) {
+            return core::Status::failure("save_database.chunk_index_too_large",
+                                         "chunk index exceeds the configured safety limit");
+        }
+        encoded_size += row_size;
+    }
+
     std::ostringstream output;
     output << chunk_index_magic << '\n';
     for (const auto& entry : entries) {
@@ -327,11 +400,6 @@ write_chunk_index_to_directory(const std::filesystem::path& directory,
     }
     output << "end\n";
     return write_text_atomic(directory / "index.txt", output.str());
-}
-
-[[nodiscard]] core::Status write_chunk_index(const std::filesystem::path& root,
-                                             const std::vector<ChunkIndexEntry>& entries) {
-    return write_chunk_index_to_directory(chunk_directory(root), entries);
 }
 
 [[nodiscard]] core::Result<bool> has_external_chunk_table(const std::filesystem::path& root) {
@@ -358,7 +426,9 @@ write_chunk_index_to_directory(const std::filesystem::path& directory,
 }
 
 [[nodiscard]] core::Result<std::string> read_current_generation(const std::filesystem::path& root) {
-    auto bytes = read_bytes(current_generation_path(root));
+    auto bytes =
+        read_bytes(current_generation_path(root), max_generation_manifest_file_bytes,
+                   "save_database.generation_manifest_too_large", "save generation manifest");
     if (!bytes) {
         return core::Result<std::string>::failure(bytes.error().code, bytes.error().message);
     }
@@ -379,7 +449,13 @@ write_chunk_index_to_directory(const std::filesystem::path& directory,
             line.remove_suffix(1);
         }
 
-        if (!saw_magic) {
+        if (saw_end) {
+            if (!line.empty()) {
+                return core::Result<std::string>::failure(
+                    "save_database.invalid_generation_manifest",
+                    "save generation manifest contains data after its end marker");
+            }
+        } else if (!saw_magic) {
             if (line != current_generation_magic) {
                 return core::Result<std::string>::failure(
                     "save_database.invalid_generation_manifest",
@@ -388,7 +464,6 @@ write_chunk_index_to_directory(const std::filesystem::path& directory,
             saw_magic = true;
         } else if (line == "end") {
             saw_end = true;
-            break;
         } else if (!line.empty()) {
             const auto fields = split(line, '|');
             if (fields.size() != 2 || fields.front() != "active") {
@@ -491,6 +566,10 @@ active_save_root(const std::filesystem::path& root) {
         return core::Result<std::string>::failure("save_database.read_failed", error.message());
     }
 
+    if (highest_generation == std::numeric_limits<std::uint64_t>::max()) {
+        return core::Result<std::string>::failure("save_database.generation_exhausted",
+                                                  "save generation identifier range is exhausted");
+    }
     return core::Result<std::string>::success(generation_name(highest_generation + 1));
 }
 
@@ -626,7 +705,8 @@ collect_staged_generations(const std::filesystem::path& root) {
 
 [[nodiscard]] core::Result<std::string>
 read_chunk_delta_payload(const std::filesystem::path& path) {
-    auto bytes = read_bytes(path);
+    auto bytes = read_bytes(path, max_chunk_delta_file_bytes, "save_database.chunk_delta_too_large",
+                            "chunk delta payload");
     if (!bytes) {
         return core::Result<std::string>::failure(bytes.error().code, bytes.error().message);
     }
@@ -651,28 +731,89 @@ read_chunk_deltas_from_root(const std::filesystem::path& save_root) {
 
     std::vector<ChunkEditSaveRecord> result;
     result.reserve(entries.value().size());
+    std::size_t total_payload_bytes = 0;
     for (const auto& entry : entries.value()) {
         auto payload = read_chunk_delta_payload(chunk_directory(save_root) / entry.filename);
         if (!payload) {
             return core::Result<std::vector<ChunkEditSaveRecord>>::failure(payload.error().code,
                                                                            payload.error().message);
         }
+        if (payload.value().size() > max_chunk_delta_table_bytes - total_payload_bytes) {
+            return core::Result<std::vector<ChunkEditSaveRecord>>::failure(
+                "save_database.chunk_delta_table_too_large",
+                "chunk delta table exceeds the configured aggregate safety limit");
+        }
+        total_payload_bytes += payload.value().size();
         result.push_back({entry.coord, std::move(payload).value()});
     }
     return core::Result<std::vector<ChunkEditSaveRecord>>::success(std::move(result));
 }
 
+[[nodiscard]] core::Result<std::vector<ChunkEditSaveRecord>>
+read_effective_chunk_deltas_from_root(const std::filesystem::path& save_root) {
+    auto has_chunk_table = has_external_chunk_table(save_root);
+    if (!has_chunk_table) {
+        return core::Result<std::vector<ChunkEditSaveRecord>>::failure(
+            has_chunk_table.error().code, has_chunk_table.error().message);
+    }
+    if (has_chunk_table.value()) {
+        return read_chunk_deltas_from_root(save_root);
+    }
+
+    std::error_code error;
+    const auto path = snapshot_path(save_root);
+    const bool has_snapshot = std::filesystem::exists(path, error);
+    if (error) {
+        return core::Result<std::vector<ChunkEditSaveRecord>>::failure("save_database.read_failed",
+                                                                       error.message());
+    }
+    if (!has_snapshot) {
+        return core::Result<std::vector<ChunkEditSaveRecord>>::success({});
+    }
+
+    auto bytes = read_bytes(path, max_snapshot_file_bytes, "save_database.snapshot_too_large",
+                            "binary save snapshot");
+    if (!bytes) {
+        return core::Result<std::vector<ChunkEditSaveRecord>>::failure(bytes.error().code,
+                                                                       bytes.error().message);
+    }
+    auto snapshot = SaveBinaryCodec::decode_snapshot(bytes.value());
+    if (!snapshot) {
+        return core::Result<std::vector<ChunkEditSaveRecord>>::failure(snapshot.error().code,
+                                                                       snapshot.error().message);
+    }
+    return core::Result<std::vector<ChunkEditSaveRecord>>::success(
+        std::move(snapshot).value().chunk_edits);
+}
+
 [[nodiscard]] core::Status
 write_chunk_deltas_to_root(const std::filesystem::path& save_root,
                            std::span<const ChunkEditSaveRecord> chunk_deltas) {
+    if (chunk_deltas.size() > max_chunk_delta_count) {
+        return core::Status::failure("save_database.too_many_chunk_deltas",
+                                     "chunk delta table exceeds the configured record limit");
+    }
+
     std::vector<ChunkIndexEntry> entries;
     entries.reserve(chunk_deltas.size());
 
+    std::size_t total_payload_bytes = 0;
     for (const auto& chunk_delta : chunk_deltas) {
         if (chunk_delta.encoded_edit_delta.empty()) {
             return core::Status::failure("save_database.empty_chunk_delta",
                                          "chunk delta payload must not be empty");
         }
+        if (chunk_delta.encoded_edit_delta.size() > max_chunk_delta_file_bytes) {
+            return core::Status::failure("save_database.chunk_delta_too_large",
+                                         "chunk delta payload exceeds the configured safety limit");
+        }
+        if (chunk_delta.encoded_edit_delta.size() >
+            max_chunk_delta_table_bytes - total_payload_bytes) {
+            return core::Status::failure(
+                "save_database.chunk_delta_table_too_large",
+                "chunk delta table exceeds the configured aggregate safety limit");
+        }
+        total_payload_bytes += chunk_delta.encoded_edit_delta.size();
         const auto filename = chunk_filename(chunk_delta.coord);
         const auto found =
             std::ranges::find_if(entries, [&chunk_delta](const ChunkIndexEntry& entry) {
@@ -807,6 +948,11 @@ core::Status FileSaveDatabase::write_snapshot(const SaveSnapshot& snapshot) cons
     }
 
     const auto encoded = SaveBinaryCodec::encode_snapshot(snapshot);
+    if (encoded.size() > max_snapshot_file_bytes) {
+        (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
+        return core::Status::failure("save_database.snapshot_too_large",
+                                     "binary save snapshot exceeds the configured safety limit");
+    }
     status = write_bytes_atomic(snapshot_path(staged_root), encoded);
     if (!status) {
         (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
@@ -835,7 +981,8 @@ core::Result<SaveSnapshot> FileSaveDatabase::read_snapshot() const {
                                                    save_root.error().message);
     }
 
-    auto bytes = read_bytes(snapshot_path(save_root.value()));
+    auto bytes = read_bytes(snapshot_path(save_root.value()), max_snapshot_file_bytes,
+                            "save_database.snapshot_too_large", "binary save snapshot");
     if (!bytes) {
         return core::Result<SaveSnapshot>::failure(bytes.error().code, bytes.error().message);
     }
@@ -889,28 +1036,21 @@ core::Status FileSaveDatabase::write_chunk_delta(const ChunkEditSaveRecord& chun
         return core::Status::failure(save_root.error().code, save_root.error().message);
     }
 
-    auto entries = read_chunk_index(save_root.value());
-    if (!entries) {
-        return core::Status::failure(entries.error().code, entries.error().message);
+    auto chunk_deltas = read_effective_chunk_deltas_from_root(save_root.value());
+    if (!chunk_deltas) {
+        return core::Status::failure(chunk_deltas.error().code, chunk_deltas.error().message);
     }
 
-    const auto filename = chunk_filename(chunk_delta.coord);
-    const auto found =
-        std::ranges::find_if(entries.value(), [&chunk_delta](const ChunkIndexEntry& entry) {
-            return same_coord(entry.coord, chunk_delta.coord);
+    const auto found = std::ranges::find_if(
+        chunk_deltas.value(), [&chunk_delta](const ChunkEditSaveRecord& existing) {
+            return same_coord(existing.coord, chunk_delta.coord);
         });
-    if (found == entries.value().end()) {
-        entries.value().push_back({chunk_delta.coord, filename});
+    if (found == chunk_deltas.value().end()) {
+        chunk_deltas.value().push_back(chunk_delta);
     } else {
-        found->filename = filename;
+        *found = chunk_delta;
     }
-
-    auto status = write_chunk_delta_payload(chunk_directory(save_root.value()) / filename,
-                                            chunk_delta.encoded_edit_delta);
-    if (!status) {
-        return status;
-    }
-    return write_chunk_index(save_root.value(), entries.value());
+    return write_chunk_deltas_to_root(save_root.value(), chunk_deltas.value());
 }
 
 core::Status
