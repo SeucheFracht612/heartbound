@@ -1,6 +1,17 @@
+function(heartstead_configure_test_target target_name)
+  heartstead_configure_target(${target_name})
+  # The tests deliberately use assert() as their lightweight check primitive. Keep those checks
+  # active in Release/RelWithDebInfo configurations, where toolchains otherwise define NDEBUG.
+  if(MSVC)
+    target_compile_options(${target_name} PRIVATE /UNDEBUG)
+  else()
+    target_compile_options(${target_name} PRIVATE -UNDEBUG)
+  endif()
+endfunction()
+
 add_executable(heartstead_engine_tests engine_tests.cpp)
 target_link_libraries(heartstead_engine_tests PRIVATE Heartstead::Engine)
-heartstead_configure_target(heartstead_engine_tests)
+heartstead_configure_test_target(heartstead_engine_tests)
 
 add_test(NAME heartstead_engine_tests COMMAND heartstead_engine_tests)
 
@@ -9,7 +20,7 @@ target_link_libraries(heartstead_game_runtime_tests PRIVATE Heartstead::GameRunt
 target_compile_definitions(
   heartstead_game_runtime_tests PRIVATE HEARTSTEAD_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
-heartstead_configure_target(heartstead_game_runtime_tests)
+heartstead_configure_test_target(heartstead_game_runtime_tests)
 
 add_test(NAME heartstead_game_runtime_tests COMMAND heartstead_game_runtime_tests)
 
@@ -18,12 +29,12 @@ target_link_libraries(heartstead_runtime_spine_tests PRIVATE Heartstead::GameRun
 target_compile_definitions(
   heartstead_runtime_spine_tests PRIVATE HEARTSTEAD_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
-heartstead_configure_target(heartstead_runtime_spine_tests)
+heartstead_configure_test_target(heartstead_runtime_spine_tests)
 add_test(NAME heartstead_runtime_spine_tests COMMAND heartstead_runtime_spine_tests)
 
 add_executable(heartstead_presentation_world_tests presentation_world_tests.cpp)
 target_link_libraries(heartstead_presentation_world_tests PRIVATE Heartstead::GameRuntime)
-heartstead_configure_target(heartstead_presentation_world_tests)
+heartstead_configure_test_target(heartstead_presentation_world_tests)
 add_test(NAME heartstead_presentation_world_tests COMMAND heartstead_presentation_world_tests)
 
 add_executable(heartstead_headless_session_tests headless_session_tests.cpp)
@@ -31,13 +42,13 @@ target_link_libraries(heartstead_headless_session_tests PRIVATE Heartstead::Game
 target_compile_definitions(
   heartstead_headless_session_tests PRIVATE HEARTSTEAD_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
-heartstead_configure_target(heartstead_headless_session_tests)
+heartstead_configure_test_target(heartstead_headless_session_tests)
 add_test(NAME heartstead_headless_session_tests COMMAND heartstead_headless_session_tests)
 
 function(heartstead_add_foundation_test target_name source_file)
   add_executable(${target_name} ${source_file})
   target_link_libraries(${target_name} PRIVATE Heartstead::Engine)
-  heartstead_configure_target(${target_name})
+  heartstead_configure_test_target(${target_name})
   add_test(NAME ${target_name} COMMAND ${target_name})
 endfunction()
 
@@ -76,7 +87,7 @@ heartstead_add_foundation_test(heartstead_movement_controller_tests movement_con
 
 add_executable(heartstead_gameplay_input_tests gameplay_input_tests.cpp)
 target_link_libraries(heartstead_gameplay_input_tests PRIVATE Heartstead::GameRuntime)
-heartstead_configure_target(heartstead_gameplay_input_tests)
+heartstead_configure_test_target(heartstead_gameplay_input_tests)
 add_test(NAME heartstead_gameplay_input_tests COMMAND heartstead_gameplay_input_tests)
 
 function(heartstead_add_smoke_test test_name target_name)
