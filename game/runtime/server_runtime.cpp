@@ -1,6 +1,8 @@
 #include "game/runtime/server_runtime.hpp"
 
+#include "engine/cargo/cargo_prototype.hpp"
 #include "engine/entities/entity_prototype.hpp"
+#include "engine/items/item_prototype.hpp"
 #include "engine/world/chunks/chunk_replication.hpp"
 #include "engine/world/chunks/chunk_edit_delta_codec.hpp"
 #include "engine/world/voxel_change.hpp"
@@ -24,6 +26,11 @@ core::Result<std::unique_ptr<ServerRuntime>> ServerRuntime::create(ServerRuntime
         return core::Result<std::unique_ptr<ServerRuntime>>::failure(
             "server_runtime.missing_content",
             "authoritative runtime requires immutable prototype and voxel registries");
+    }
+    auto scenario_status = desc.scenario.validate();
+    if (!scenario_status) {
+        return core::Result<std::unique_ptr<ServerRuntime>>::failure(
+            scenario_status.error().code, scenario_status.error().message);
     }
     auto runtime = std::unique_ptr<ServerRuntime>(new ServerRuntime(std::move(desc)));
     auto status = runtime->initialize();
@@ -62,6 +69,13 @@ core::Status ServerRuntime::initialize() {
         return core::Status::failure(physics.error().code, physics.error().message);
     }
     physics_ = std::move(physics).value();
+
+    if (!desc_.initial_snapshot.has_value()) {
+        auto scenario_status = initialize_new_world_scenario();
+        if (!scenario_status) {
+            return scenario_status;
+        }
+    }
 
     auto status = world::WorldCommandRegistry::register_engine_commands(commands_);
     if (!status) {
@@ -445,6 +459,94 @@ core::Status ServerRuntime::ensure_spawn_area() {
     return core::Status::ok();
 }
 
+world::WorldPosition ServerRuntime::scenario_spawn_position() const noexcept {
+    switch (desc_.scenario.spawn_mode) {
+    case scenarios::ScenarioSpawnMode::homestead:
+        return {8.5, 1.0, 8.5};
+    case scenarios::ScenarioSpawnMode::outpost:
+        return {16.5, 1.0, 16.5};
+    case scenarios::ScenarioSpawnMode::debug:
+        return {1.5, 1.0, 1.5};
+    }
+    return {8.5, 1.0, 8.5};
+}
+
+core::Status ServerRuntime::initialize_new_world_scenario() {
+    auto status = world_.mod_states().insert(
+        {"engine", "scenario.id", desc_.scenario.prototype_id.value()});
+    if (!status) {
+        return status;
+    }
+    status = world_.mod_states().insert(
+        {"engine", "scenario.start_region", desc_.scenario.start_region});
+    if (!status) {
+        return status;
+    }
+    status = world_.mod_states().insert(
+        {"engine", "scenario.spawn_mode",
+         std::string(scenarios::scenario_spawn_mode_name(desc_.scenario.spawn_mode))});
+    if (!status) {
+        return status;
+    }
+
+    auto spawn = scenario_spawn_position();
+    std::size_t cargo_offset = 0;
+    for (const auto& cargo_id : desc_.scenario.starting_cargo) {
+        const auto* prototype = desc_.prototypes->find(cargo_id);
+        if (prototype == nullptr) {
+            return core::Status::failure(
+                "server_runtime.starting_cargo_missing",
+                "scenario starting cargo prototype is not loaded: " + cargo_id.value());
+        }
+        auto definition = cargo::cargo_definition_from_prototype(*prototype);
+        if (!definition) {
+            return core::Status::failure(definition.error().code, definition.error().message);
+        }
+        auto save_id = world_.save_ids().reserve();
+        if (!save_id) {
+            return core::Status::failure(save_id.error().code, save_id.error().message);
+        }
+        auto position = spawn;
+        position.anchor.x += 2 + static_cast<std::int64_t>(cargo_offset);
+        auto record = definition.value().create_record(save_id.value(), position);
+        if (!record) {
+            return core::Status::failure(record.error().code, record.error().message);
+        }
+        status = world_.cargo().insert(std::move(record).value());
+        if (!status) {
+            return status;
+        }
+        ++cargo_offset;
+    }
+    return ensure_spawn_area();
+}
+
+core::Status ServerRuntime::grant_starting_inventory(core::SaveId owner_id) {
+    if (world_.inventories().find(owner_id) != nullptr) {
+        return core::Status::ok();
+    }
+    std::vector<items::ItemStack> stacks;
+    stacks.reserve(desc_.scenario.starting_items.size());
+    for (const auto& item_id : desc_.scenario.starting_items) {
+        const auto* prototype = desc_.prototypes->find(item_id);
+        if (prototype == nullptr) {
+            return core::Status::failure(
+                "server_runtime.starting_item_missing",
+                "scenario starting item prototype is not loaded: " + item_id.value());
+        }
+        auto definition = items::item_definition_from_prototype(*prototype);
+        if (!definition) {
+            return core::Status::failure(definition.error().code, definition.error().message);
+        }
+        auto stack = definition.value().create_stack(1);
+        if (!stack) {
+            return core::Status::failure(stack.error().code, stack.error().message);
+        }
+        stacks.push_back(std::move(stack).value());
+    }
+    return world_.inventories().insert({owner_id, std::move(stacks)});
+}
+
 core::Status ServerRuntime::spawn_player(core::NetId client_id) {
     if (!client_id.is_valid() || player_connections_.contains(client_id.value())) {
         return core::Status::failure("server_runtime.invalid_player_connection",
@@ -495,7 +597,7 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
         runtime_handle = allocated_runtime.value();
         net_id = allocated_net_id.value();
         save_id = allocated_save_id.value();
-        transform.position = world::WorldPosition{8.5, 1.0, 8.5};
+        transform.position = scenario_spawn_position();
         auto legacy_record =
             definition.value().create_record(runtime_handle, net_id, save_id, transform);
         if (!legacy_record) {
@@ -559,6 +661,12 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
     controller_record.persistent = definition.value().persistent;
     status = players_.insert(std::move(controller_record), player_controller_.config());
     if (!status) {
+        cleanup_entity();
+        return status;
+    }
+    status = grant_starting_inventory(save_id);
+    if (!status) {
+        (void)players_.erase(runtime_handle);
         cleanup_entity();
         return status;
     }

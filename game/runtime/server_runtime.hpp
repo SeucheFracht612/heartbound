@@ -7,6 +7,7 @@
 #include "engine/net/host_session.hpp"
 #include "engine/physics/physics_world.hpp"
 #include "engine/save/save_snapshot.hpp"
+#include "engine/scenarios/scenario.hpp"
 #include "engine/simulation/simulation_scheduler.hpp"
 #include "engine/world/replication_delta.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
@@ -26,6 +27,7 @@ struct ServerRuntimeDesc {
     physics::PhysicsWorldDesc physics;
     const modding::PrototypeRegistry* prototypes = nullptr;
     const world::VoxelPalette* voxel_palette = nullptr;
+    scenarios::ScenarioDefinition scenario;
     std::optional<save::SaveSnapshot> initial_snapshot;
     std::vector<std::shared_ptr<IGameplayModule>> gameplay_modules;
 };
@@ -95,7 +97,10 @@ class ServerRuntime final {
 
     explicit ServerRuntime(ServerRuntimeDesc desc);
     [[nodiscard]] core::Status initialize();
+    [[nodiscard]] core::Status initialize_new_world_scenario();
     [[nodiscard]] core::Status ensure_spawn_area();
+    [[nodiscard]] core::Status grant_starting_inventory(core::SaveId owner_id);
+    [[nodiscard]] world::WorldPosition scenario_spawn_position() const noexcept;
     [[nodiscard]] core::Status spawn_player(core::NetId client_id);
     [[nodiscard]] core::Status simulate_players(simulation::SimulationContext& context);
     [[nodiscard]] core::Status replicate_players();

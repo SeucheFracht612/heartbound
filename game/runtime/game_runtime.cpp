@@ -485,6 +485,15 @@ core::Status GameRuntime::start_session_from_save(RuntimeConfiguration config,
     }
     SessionRequest request;
     request.metadata = snapshot.value().metadata;
+    if (scenario_id.empty()) {
+        const auto saved_scenario = std::ranges::find_if(
+            snapshot.value().mod_states, [](const save::ModStateSaveRecord& record) {
+                return record.mod_id == "engine" && record.state_key == "scenario.id";
+            });
+        if (saved_scenario != snapshot.value().mod_states.end()) {
+            scenario_id = saved_scenario->encoded_state;
+        }
+    }
     request.scenario_id = std::move(scenario_id);
     request.initial_snapshot = std::move(snapshot).value();
     return start_session(std::move(config), std::move(request));

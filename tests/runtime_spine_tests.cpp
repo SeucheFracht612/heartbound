@@ -261,6 +261,54 @@ void test_local_runtime_advances_authority_through_loopback() {
     assert(runtime.session() == nullptr);
 }
 
+void test_selected_scenario_drives_authoritative_bootstrap() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    assert(runtime.start_session({}, make_session_request(report)));
+    const auto* session = runtime.session();
+    assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
+    const auto& world = session->server()->world();
+    const auto* scenario_id = world.mod_states().find("engine", "scenario.id");
+    const auto* start_region = world.mod_states().find("engine", "scenario.start_region");
+    const auto* spawn_mode = world.mod_states().find("engine", "scenario.spawn_mode");
+    assert(scenario_id != nullptr &&
+           scenario_id->encoded_state == "base:scenarios/homestead");
+    assert(start_region != nullptr && start_region->encoded_state == "temperate_valley");
+    assert(spawn_mode != nullptr && spawn_mode->encoded_state == "homestead");
+    assert(world.cargo().count() == 1);
+    const auto cargo = world.cargo().records();
+    assert(cargo.front()->prototype_id == *core::PrototypeId::parse("base:cargo/heavy_log"));
+
+    const auto* player = session->server()->player_for_client(session->client()->client_id());
+    assert(player != nullptr);
+    assert(player->state.position == (world::WorldPosition{8.5, 1.0, 8.5}));
+    const auto* inventory = world.inventories().find(player->save_id);
+    assert(inventory != nullptr && inventory->stacks.size() == 2);
+    assert(inventory->stacks[0].prototype_id ==
+           *core::PrototypeId::parse("base:items/raw_clay"));
+    assert(inventory->stacks[1].prototype_id ==
+           *core::PrototypeId::parse("base:items/nails"));
+    assert(std::ranges::all_of(inventory->stacks,
+                               [](const auto& stack) { return stack.count == 1; }));
+    assert(runtime.shutdown());
+}
+
+void test_session_rejects_unknown_or_wrong_kind_scenarios() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    auto missing = make_session_request(report);
+    missing.scenario_id = "base:scenarios/missing";
+    auto status = runtime.start_session({}, std::move(missing));
+    assert(!status && status.error().code == "runtime_session.scenario_missing");
+
+    auto wrong_kind = make_session_request(report);
+    wrong_kind.scenario_id = "base:items/raw_clay";
+    status = runtime.start_session({}, std::move(wrong_kind));
+    assert(!status && status.error().code == "scenario_prototype.kind_mismatch");
+}
+
 void test_dedicated_headless_runtime_uses_same_scheduler() {
     const auto report = content::ContentValidation::validate(source_root());
     assert(!report.has_errors());
@@ -428,7 +476,7 @@ void test_session_save_and_reload_restores_authoritative_state() {
     assert(!persisted.value().entities.empty());
     assert(runtime.shutdown());
 
-    assert(runtime.start_session_from_save({}, database, request.scenario_id));
+    assert(runtime.start_session_from_save({}, database));
     session = runtime.session();
     assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
     const auto address = world::block_to_chunk_local(placed_voxel.position);
@@ -491,7 +539,15 @@ void test_gameplay_modules_extend_runtime_through_registration_contract() {
     assert(runtime.session()->presentation()->find_object(core::NetId::from_value(9'001)) !=
            nullptr);
     auto save_snapshot = runtime.capture_save_snapshot();
-    assert(save_snapshot && save_snapshot.value().mod_states.size() == 1);
+    assert(save_snapshot);
+    assert(std::ranges::any_of(save_snapshot.value().mod_states, [](const auto& record) {
+        return record.mod_id == "test" && record.state_key == "feature_visible" &&
+               record.encoded_state == "true";
+    }));
+    assert(std::ranges::any_of(save_snapshot.value().mod_states, [](const auto& record) {
+        return record.mod_id == "engine" && record.state_key == "scenario.id" &&
+               record.encoded_state == "base:scenarios/homestead";
+    }));
     assert(module->persistence_capture_count == 1);
     const auto session_diagnostics = game::GameInspector::inspect(*runtime.session());
     assert(session_diagnostics.state == "running");
@@ -604,6 +660,8 @@ void test_runtime_configuration_rejects_invalid_compositions() {
 
 int main() {
     test_local_runtime_advances_authority_through_loopback();
+    test_selected_scenario_drives_authoritative_bootstrap();
+    test_session_rejects_unknown_or_wrong_kind_scenarios();
     test_dedicated_headless_runtime_uses_same_scheduler();
     test_authoritative_player_input_moves_and_replicates();
     test_typed_voxel_commands_validate_and_replicate();

@@ -1,7 +1,9 @@
 #include "game/runtime/runtime_session.hpp"
 
+#include "engine/scenarios/scenario_prototype.hpp"
 #include "engine/world/world_snapshot.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -75,6 +77,35 @@ RuntimeSession::create(RuntimeConfiguration config, SessionRequest request,
 }
 
 core::Status RuntimeSession::initialize() {
+    const auto scenario_id = core::PrototypeId::parse(request_.scenario_id);
+    if (!scenario_id) {
+        return core::Status::failure("runtime_session.invalid_scenario_id",
+                                     "session scenario id is not a valid prototype id: " +
+                                         request_.scenario_id);
+    }
+    const auto* scenario_prototype = prototypes_->find(scenario_id.value());
+    if (scenario_prototype == nullptr) {
+        return core::Status::failure("runtime_session.scenario_missing",
+                                     "session scenario prototype is not loaded: " +
+                                         request_.scenario_id);
+    }
+    auto scenario = scenarios::scenario_definition_from_prototype(*scenario_prototype);
+    if (!scenario) {
+        return core::Status::failure(scenario.error().code, scenario.error().message);
+    }
+    if (request_.initial_snapshot.has_value()) {
+        const auto saved_scenario = std::ranges::find_if(
+            request_.initial_snapshot->mod_states, [](const save::ModStateSaveRecord& record) {
+                return record.mod_id == "engine" && record.state_key == "scenario.id";
+            });
+        if (saved_scenario != request_.initial_snapshot->mod_states.end() &&
+            saved_scenario->encoded_state != scenario.value().prototype_id.value()) {
+            return core::Status::failure(
+                "runtime_session.scenario_mismatch",
+                "requested scenario does not match the scenario recorded by the save");
+        }
+    }
+
     if (config_.create_server) {
         ServerRuntimeDesc server_desc;
         server_desc.world.metadata = request_.metadata;
@@ -85,6 +116,7 @@ core::Status RuntimeSession::initialize() {
         server_desc.physics.backend = config_.physics_backend;
         server_desc.prototypes = prototypes_;
         server_desc.voxel_palette = voxel_palette_;
+        server_desc.scenario = std::move(scenario).value();
         server_desc.initial_snapshot = request_.initial_snapshot;
         server_desc.gameplay_modules = config_.gameplay_modules;
         auto server = ServerRuntime::create(std::move(server_desc));
