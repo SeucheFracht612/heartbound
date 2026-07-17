@@ -287,4 +287,82 @@ Result<std::vector<std::filesystem::path>> list_directories(const std::filesyste
     return Result<std::vector<std::filesystem::path>>::success(std::move(directories));
 }
 
+Result<std::vector<std::filesystem::path>> list_regular_files(const std::filesystem::path& root,
+                                                              FileListOptions options) {
+    if (options.maximum_entries == 0) {
+        return Result<std::vector<std::filesystem::path>>::failure(
+            "core.directory_invalid_limit", "directory entry limit must be non-zero");
+    }
+
+    std::error_code error;
+    const auto root_status = std::filesystem::symlink_status(root, error);
+    if (error) {
+        if (error == std::errc::no_such_file_or_directory) {
+            return Result<std::vector<std::filesystem::path>>::failure(
+                "core.directory_not_directory",
+                "directory root is not a directory: " + root.string());
+        }
+        return Result<std::vector<std::filesystem::path>>::failure(
+            "core.directory_status_failed",
+            "failed to inspect directory root: " + root.string() + ": " + error.message());
+    }
+    if (options.reject_symbolic_links && std::filesystem::is_symlink(root_status)) {
+        return Result<std::vector<std::filesystem::path>>::failure(
+            "core.directory_symlink_forbidden",
+            "directory root must not be a symbolic link: " + root.string());
+    }
+    if (!std::filesystem::is_directory(root_status)) {
+        return Result<std::vector<std::filesystem::path>>::failure(
+            "core.directory_not_directory", "directory root is not a directory: " + root.string());
+    }
+
+    auto canonical_root = canonical_existing(root, "directory root");
+    if (!canonical_root) {
+        return Result<std::vector<std::filesystem::path>>::failure(canonical_root.error().code,
+                                                                   canonical_root.error().message);
+    }
+
+    std::filesystem::directory_iterator iterator(canonical_root.value(), error);
+    if (error) {
+        return Result<std::vector<std::filesystem::path>>::failure(
+            "core.directory_list_failed",
+            "failed to open directory: " + root.string() + ": " + error.message());
+    }
+
+    std::vector<std::filesystem::path> files;
+    std::size_t entry_count = 0;
+    const std::filesystem::directory_iterator end;
+    while (iterator != end) {
+        ++entry_count;
+        if (entry_count > options.maximum_entries) {
+            return Result<std::vector<std::filesystem::path>>::failure(
+                "core.directory_too_large", "directory exceeds its entry limit: " + root.string());
+        }
+        const auto status = iterator->symlink_status(error);
+        if (error) {
+            return Result<std::vector<std::filesystem::path>>::failure(
+                "core.directory_status_failed",
+                "failed to inspect directory entry: " + iterator->path().string() + ": " +
+                    error.message());
+        }
+        if (std::filesystem::is_symlink(status) && options.reject_symbolic_links) {
+            return Result<std::vector<std::filesystem::path>>::failure(
+                "core.directory_symlink_forbidden",
+                "directory contains a symbolic link: " + iterator->path().string());
+        }
+        if (std::filesystem::is_regular_file(status)) {
+            files.push_back(iterator->path());
+        }
+        iterator.increment(error);
+        if (error) {
+            return Result<std::vector<std::filesystem::path>>::failure(
+                "core.directory_list_failed",
+                "failed while listing directory: " + root.string() + ": " + error.message());
+        }
+    }
+
+    std::ranges::sort(files);
+    return Result<std::vector<std::filesystem::path>>::success(std::move(files));
+}
+
 } // namespace heartstead::core

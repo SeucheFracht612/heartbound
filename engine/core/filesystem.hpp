@@ -25,6 +25,11 @@ struct DirectoryListOptions {
     bool reject_symbolic_links = true;
 };
 
+struct FileListOptions {
+    std::size_t maximum_entries = 4'096;
+    bool reject_symbolic_links = true;
+};
+
 // Resolves an existing candidate and returns its canonical path relative to an existing root.
 // Both the lexical and resolved path must remain below the root. The final candidate may also be
 // required not to be a symbolic link.
@@ -42,5 +47,10 @@ list_regular_files_recursive(const std::filesystem::path& root,
 // entry, including non-directory entries.
 [[nodiscard]] Result<std::vector<std::filesystem::path>>
 list_directories(const std::filesystem::path& root, DirectoryListOptions options = {});
+
+// Lists immediate regular-file children with deterministic ordering and a bound on every
+// inspected entry, including directories and other non-regular entries.
+[[nodiscard]] Result<std::vector<std::filesystem::path>>
+list_regular_files(const std::filesystem::path& root, FileListOptions options = {});
 
 } // namespace heartstead::core

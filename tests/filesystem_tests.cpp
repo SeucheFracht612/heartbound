@@ -106,6 +106,14 @@ void test_bounded_recursive_listing_and_root_confinement() {
     assert(!directory_limited);
     assert(directory_limited.error().code == "core.directory_too_large");
 
+    const auto files = heartstead::core::list_regular_files(root);
+    assert(files);
+    assert(files.value().size() == 1);
+    assert(files.value().front().filename() == "top.txt");
+    const auto file_limited = heartstead::core::list_regular_files(root, {.maximum_entries = 1});
+    assert(!file_limited);
+    assert(file_limited.error().code == "core.directory_too_large");
+
     std::error_code link_error;
     std::filesystem::create_symlink(root / "top.txt", root / "linked.txt", link_error);
     if (!link_error) {
@@ -115,6 +123,9 @@ void test_bounded_recursive_listing_and_root_confinement() {
         const auto linked_directories = heartstead::core::list_directories(root);
         assert(!linked_directories);
         assert(linked_directories.error().code == "core.directory_symlink_forbidden");
+        const auto linked_files = heartstead::core::list_regular_files(root);
+        assert(!linked_files);
+        assert(linked_files.error().code == "core.directory_symlink_forbidden");
         const auto linked_relative =
             heartstead::core::relative_path_below(root, root / "linked.txt");
         assert(!linked_relative);
