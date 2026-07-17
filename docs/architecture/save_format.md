@@ -22,8 +22,9 @@ save-slot catalog for safe per-slot database roots and validated per-slot displa
 The file save database has both raw snapshot reads for storage/migration code and a validated read
 path for load code that has an active prototype registry.
 
-The current save snapshot model already keeps typed sections for chunk edits, build
-pieces, entities, inventories, cargo, workpieces, assemblies, processes, and mod state.
+The current save snapshot model already keeps a persisted voxel-palette manifest and typed sections
+for chunk edits, build pieces, entities, inventories, cargo, workpieces, assemblies, processes,
+fires, mod state, and missing-prototype placeholders.
 The validator checks stable ids, prototype kinds, and cross-section references so these
 sections do not collapse into one generic saved-object blob.
 
@@ -52,5 +53,8 @@ arbitrary repeatable notes.
 
 `SaveCompatibilityChecker` compares saved mod records against the active mod prototype
 fingerprints. Missing saved mods, prototype-hash changes, and extra active mods are compatibility
-errors until saves persist the runtime voxel-palette mapping needed to prove that compact numeric
-cell types cannot be reinterpreted. Version differences remain migration-policy diagnostics.
+errors under the current strict load policy. Saves already persist the compact numeric voxel type to
+stable prototype-id mapping, which prevents a codec from silently guessing that mapping, but it
+does not prove that changed prototype definitions or a changed mod set are semantically compatible.
+Version differences remain migration-policy warnings; an explicit migration/recovery policy must
+authorize any content change rather than the compatibility checker accepting it implicitly.

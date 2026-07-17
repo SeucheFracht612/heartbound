@@ -9,6 +9,7 @@ Implemented foundation:
 - length-prefixed strings and vectors
 - explicit typed sections for:
   - metadata
+  - voxel palette manifest
   - chunk edit records
   - build pieces
   - entities
@@ -17,7 +18,9 @@ Implemented foundation:
   - workpieces
   - assemblies
   - processes
+  - fires
   - mod state
+  - missing-prototype placeholders
 - decode errors for invalid magic, unsupported format version, truncation, invalid enum
   values, invalid prototype ids, and trailing data
 

@@ -11,16 +11,27 @@ Implemented foundation:
   - terrain material token
   - mining tool token
   - optional tags
+  - optional block-model prototype, logical occupancy, collision/selection/occlusion bounds,
+    occlusion behavior, light emission/absorption, and metadata requirement
+  - explicit missing-prototype marker for a persisted mapping whose definition is unavailable
 
 - `VoxelPalette`
   - reserves type `0` for air
   - assigns content voxel types starting at `1`
   - looks up definitions by type or prototype id
   - creates `VoxelCell` values from prototype ids
+  - owns validated block-model definitions and exposes mesh/neighbor invalidation radii
+  - exports a `VoxelPaletteManifest` of compact type-to-prototype assignments
 
 - aggregate content validation
   - builds the palette from loaded `voxel` prototypes
   - exposes the palette to tools and game-runtime startup reports
+
+- save/recovery construction
+  - text and binary snapshots persist the palette manifest
+  - the persisted-manifest builder preserves every saved numeric assignment, materializes a visible
+    missing-block definition for an unavailable voxel prototype, and can append new prototypes
+    above the highest persisted type without renumbering saved entries
 
 Chunks intentionally store compact numeric `VoxelCell` values. Mods and gameplay systems
 should speak stable prototype ids such as `base:voxels/clay`, then resolve through the
@@ -29,5 +40,7 @@ turning chunk cells into the only source of voxel meaning.
 
 Type `0` is permanently reserved for air. Content voxel ids are deterministic for a given
 loaded prototype set because the palette sorts voxel prototype ids before assigning types.
-Future save migration work can record prototype hashes alongside save metadata to detect
-when a saved numeric type table needs migration.
+Save metadata already records normalized per-mod prototype fingerprints and the snapshot records
+the exact numeric mapping. The current normal runtime policy still requires matching active mod
+fingerprints; the persisted-manifest builder is a recovery/migration primitive, not permission to
+silently accept semantically changed voxel definitions.

@@ -27,7 +27,7 @@ Implemented behavior:
 - exposes a validated read helper that checks the loaded snapshot against the active
   `PrototypeRegistry` before callers materialize gameplay/runtime state
 - stages full snapshot commits in `generations/generation_<n>.tmp`, promotes the finished
-  generation directory, then atomically publishes `current.txt`
+  generation directory, then replaces `current.txt` through a temporary-file rename
 - falls back to the older flat `snapshot.hssb` plus `chunks/` layout when no generation manifest
   exists, so early save fixtures remain readable
 - writes chunk edit deltas as independent per-chunk payload files
@@ -36,7 +36,8 @@ Implemented behavior:
 - reports whether the active save is legacy or generation-backed, the active generation name,
   committed generation count, staged generation count, and stale generation count through
   `SaveDatabaseStats`
-- lets the full snapshot loader prefer the external chunk-delta table when present
+- treats the external chunk-delta table as authoritative whenever its index exists, including an
+  intentionally empty index, instead of falling back to chunk records embedded in the snapshot
 - writes streamed chunk-delta updates into the active generation when a generation manifest exists
 - provides a world-streaming adapter that converts a missing per-chunk delta into an empty optional
   while preserving real save/database errors
@@ -64,6 +65,19 @@ Implemented behavior:
 - exposes a save-slot catalog summary for aggregate inspection of slot count, empty slots, active
   generation slots, legacy slots, staged generations, and chunk-delta totals
 
+`current.txt` is the only authority for the active generation. Readers do not guess the newest
+generation if the manifest is malformed or points to a missing directory. A completed generation
+that was promoted before manifest publication failed is therefore stale, not implicitly active.
+Maintenance validates an existing active generation before deleting staged directories; it does
+not repair a corrupt manifest or choose an older generation automatically.
+
+The replacement helpers close files and rename temporary paths, but they do not `fsync` file or
+directory contents and do not provide inter-process locking. On filesystems where replacing an
+existing path by rename fails, the compatibility fallback removes the destination before retrying.
+Consequently this foundation provides staged failure isolation for ordinary API errors, not a
+formal power-loss durability or concurrent-writer guarantee. Callers must serialize writes and use
+an external backup/export policy for production data.
+
 This is not a final production save store. It establishes the engine boundary:
 
 - permanent world state remains typed `SaveSnapshot` data
@@ -71,4 +85,5 @@ This is not a final production save store. It establishes the engine boundary:
 - derived data remains rebuildable and is not saved as authoritative state
 - file layout and slot naming are owned by the engine, not by gameplay systems or mods
 
-Future work should add production-scale backup/export policy and save-slot UI workflows.
+Future work should add durable commit/fsync policy, concurrent-writer exclusion, production-scale
+backup/export policy, and save-slot UI workflows.
