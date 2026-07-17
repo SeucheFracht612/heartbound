@@ -39,8 +39,19 @@ class ThreadPoolJobSystem final : public IJobSystem {
   public:
     explicit ThreadPoolJobSystem(JobSystemDesc desc) : desc_(desc) {
         workers_.reserve(desc_.worker_count);
-        for (std::uint32_t index = 0; index < desc_.worker_count; ++index) {
-            workers_.emplace_back([this] { worker_loop(); });
+        try {
+            for (std::uint32_t index = 0; index < desc_.worker_count; ++index) {
+                workers_.emplace_back([this] { worker_loop(); });
+            }
+        } catch (...) {
+            stopping_.store(true);
+            jobs_ready_.notify_all();
+            for (auto& worker : workers_) {
+                if (worker.joinable()) {
+                    worker.join();
+                }
+            }
+            throw;
         }
     }
 
@@ -162,14 +173,25 @@ class ThreadPoolJobSystem final : public IJobSystem {
             result.priority = job.priority;
             result.state = JobState::running;
 
-            const JobContext context{job.id, job.name, job.priority, false};
-            auto status = job.work(context);
-            if (status) {
-                result.state = JobState::succeeded;
-            } else {
+            try {
+                const JobContext context{job.id, job.name, job.priority, false};
+                auto status = job.work(context);
+                if (status) {
+                    result.state = JobState::succeeded;
+                } else {
+                    result.state = JobState::failed;
+                    result.error_code = status.error().code;
+                    result.error_message = status.error().message;
+                }
+            } catch (const std::exception& exception) {
                 result.state = JobState::failed;
-                result.error_code = status.error().code;
-                result.error_message = status.error().message;
+                result.error_code = "jobs.callback_exception";
+                result.error_message =
+                    std::string("job callback threw an exception: ") + exception.what();
+            } catch (...) {
+                result.state = JobState::failed;
+                result.error_code = "jobs.callback_exception";
+                result.error_message = "job callback threw a non-standard exception";
             }
 
             publish_result(std::move(result));

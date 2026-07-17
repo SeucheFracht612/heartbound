@@ -2,6 +2,7 @@
 
 #include "engine/jobs/thread_pool/thread_pool_backend.hpp"
 
+#include <exception>
 #include <utility>
 
 namespace heartstead::jobs {
@@ -61,14 +62,25 @@ class ImmediateJobSystem final : public IJobSystem {
         result.priority = desc.priority;
         result.state = JobState::running;
 
-        const JobContext context{id, desc.name, desc.priority, false};
-        auto work_status = desc.work(context);
-        if (work_status) {
-            result.state = JobState::succeeded;
-        } else {
+        try {
+            const JobContext context{id, desc.name, desc.priority, false};
+            auto work_status = desc.work(context);
+            if (work_status) {
+                result.state = JobState::succeeded;
+            } else {
+                result.state = JobState::failed;
+                result.error_code = work_status.error().code;
+                result.error_message = work_status.error().message;
+            }
+        } catch (const std::exception& exception) {
             result.state = JobState::failed;
-            result.error_code = work_status.error().code;
-            result.error_message = work_status.error().message;
+            result.error_code = "jobs.callback_exception";
+            result.error_message =
+                std::string("job callback threw an exception: ") + exception.what();
+        } catch (...) {
+            result.state = JobState::failed;
+            result.error_code = "jobs.callback_exception";
+            result.error_message = "job callback threw a non-standard exception";
         }
 
         result.completion_order = ++completed_count_;

@@ -3997,6 +3997,21 @@ void test_job_system() {
     });
     assert(after_drain);
     assert(after_drain.value().value() == 3);
+    auto immediate_exception = system.value()->submit(JobDesc{
+        "immediate.exception",
+        JobPriority::normal,
+        [](const JobContext&) -> heartstead::core::Status {
+            throw std::runtime_error("immediate callback failure");
+        },
+    });
+    assert(immediate_exception);
+    auto immediate_exception_results = system.value()->drain_completed();
+    assert(immediate_exception_results.size() == 2);
+    assert(immediate_exception_results[1].id == immediate_exception.value());
+    assert(immediate_exception_results[1].state == JobState::failed);
+    assert(immediate_exception_results[1].error_code == "jobs.callback_exception");
+    assert(immediate_exception_results[1].error_message.find("immediate callback failure") !=
+           std::string::npos);
 
     auto thread_pool = create_job_system(JobSystemDesc{JobBackend::thread_pool, 1, 8});
     assert(thread_pool);
@@ -4075,6 +4090,21 @@ void test_job_system() {
     assert(threaded_results[2].id == low.value());
     assert(threaded_results[2].state == JobState::succeeded);
     assert(threaded_results[2].completion_order == 3);
+
+    auto threaded_exception = thread_pool.value()->submit(JobDesc{
+        "thread.exception",
+        JobPriority::normal,
+        [](const JobContext&) -> heartstead::core::Status { throw 7; },
+    });
+    assert(threaded_exception);
+    assert(wait_for_completed_jobs(*thread_pool.value(), 4));
+    auto threaded_exception_results = thread_pool.value()->drain_completed();
+    assert(threaded_exception_results.size() == 1);
+    assert(threaded_exception_results.front().id == threaded_exception.value());
+    assert(threaded_exception_results.front().state == JobState::failed);
+    assert(threaded_exception_results.front().error_code == "jobs.callback_exception");
+    assert(threaded_exception_results.front().error_message ==
+           "job callback threw a non-standard exception");
 
     auto capacity_pool = create_job_system(JobSystemDesc{JobBackend::thread_pool, 1, 1});
     assert(capacity_pool);
