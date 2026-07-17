@@ -21,9 +21,10 @@ Implemented foundation:
   - dirty statistics
 
 - `engine/world/meshing/ChunkMesher`
-  - renderer-neutral surface extraction from terrain voxel chunks
-  - internal solid faces are hidden
-  - mesh vertices preserve voxel type and light metadata
+  - reference and greedy renderer-neutral extraction from immutable chunk-neighborhood snapshots
+  - cross-chunk occlusion and prototype-declared neighbor halos
+  - material/render-phase mesh sections and separate rich-model instances
+  - mesh vertices preserve voxel type, light, and state bits
 
 - `engine/world/worldgen/DeterministicTerrainGenerator`
   - seed/region/palette-driven baseline chunk generation
@@ -67,7 +68,8 @@ Implemented foundation:
 - `engine/world/WorldState`
   - authoritative runtime container
   - separate stores for regions, chunks, build objects, entities, cargo, inventories,
-    workpieces, assemblies, processes, derived rooms, networks, and mod state
+    workpieces, physical resources, assemblies, processes, fires, derived rooms, networks, missing
+    prototype placeholders, and mod state
   - shared save id and runtime handle allocation
   - shared dirty-region tracker
 
@@ -82,7 +84,7 @@ Implemented foundation:
   - can apply the derived policy to a live host session while returning the same report for
     inspection
   - keeps network relevance connected to world state without making the net layer understand
-    build pieces, entities, cargo, assemblies, processes, networks, or terrain chunks
+    build pieces, entities, cargo, workpieces, assemblies, processes, networks, or terrain chunks
 
 - `engine/world/ReplicationDelta`
   - plans authoritative replication deltas from committed event batches and `WorldState`
@@ -90,7 +92,7 @@ Implemented foundation:
   - classifies saved subjects by the concrete world stores that own them instead of introducing a
     universal replicated object store
   - materializes typed delta sections using existing build-piece, entity-save, cargo, inventory,
-    assembly, and process record shapes
+    workpiece, assembly, and process record shapes
   - converts authoritative host tick command reports into per-command typed delta snapshots while
     leaving failed, read-only, and eventless commands explicit
   - applies typed delta snapshots back into `WorldState` through per-representation upserts while
@@ -124,8 +126,8 @@ inspectable at runtime, but it is not exported as authoritative save data.
 
 Future world model work:
 
-1. richer terrain generation features from region descriptors
-2. greedy/cross-chunk mesh optimization
+1. richer biome/region transitions and runtime placement of generated feature records
+2. further mesh compression, LOD, and rich-model batching optimization
 3. scheduling save/replication flushes from the streaming interest plan automatically
 4. richer derived worlds for roads, power, smoke, heat, and navigation
 

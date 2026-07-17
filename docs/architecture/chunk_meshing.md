@@ -11,14 +11,19 @@ Implemented foundation:
   - UVs
   - source voxel type
   - source voxel light
+  - source voxel state bits
 
 - `ChunkMesh`
   - source chunk coordinate
   - local bounds
   - vertices
   - uint32 indices
+  - material/render-phase index sections
+  - separate rich block-model instances with owning cell, render bounds, state bits, and metadata
   - face count
-  - validation for counts, bounds, finite vertices, and index ranges
+  - required/provided halo radii
+  - validation for counts, bounds, finite vertices, index ranges, exact section coverage, rich
+    instances, and sufficient halo input
 
 - `ChunkMesher::build_surface_mesh`
   - emits faces for solid voxel sides exposed to air or chunk boundaries
@@ -26,6 +31,12 @@ Implemented foundation:
   - returns an empty valid mesh for fully air chunks
   - has a worker-safe overload that consumes only `ChunkNeighborhoodSnapshot` and
     `BlockRenderTableSnapshot`
+
+- `GreedyChunkMesher::build`
+  - is the default mode for `ChunkMeshScheduler` and `ChunkRenderSystem`
+  - merges compatible exposed terrain faces while retaining material/render phase, voxel type,
+    light, state bits, and block flags as merge boundaries
+  - emits the same validated `ChunkMesh` contract as the reference extractor
 
 - Immutable worker input
   - `ChunkNeighborhoodSnapshot` stores contiguous center-plus-halo cells; ordinary cube visibility
@@ -48,5 +59,5 @@ Implemented foundation:
   - dirty state is cleared only after a validated replacement is resident
 
 This remains a CPU-side extraction contract. Workers must never retain or query mutable world or
-chunk objects. Future meshing work can add greedy meshing and material buckets without changing
+chunk objects. Further mesh compression, LOD, and rich-model batching can evolve without changing
 chunk storage into renderer data or weakening the snapshot boundary.

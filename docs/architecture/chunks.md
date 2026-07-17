@@ -8,6 +8,7 @@ Implemented foundation:
 
 - `VoxelChunk`
   - fixed-size terrain voxel storage
+  - each `VoxelCell` preserves compact type, light, state bits, and metadata handle
   - cubic chunk coordinates use signed 64-bit `x/y/z` components for near-unbounded world height
     and distance
   - dirty flags for mesh, collision, lighting, save, and replication
@@ -34,15 +35,20 @@ Implemented foundation:
   - apply saved chunk edit deltas without re-marking loaded chunks dirty for save or replication
     while preserving those deltas for later snapshot export
   - mark existing face-neighbor chunks dirty for rebuild when boundary voxels change
+  - palette-aware edits additionally mark every resident chunk reached by the old/new block
+    model's declared mesh invalidation radius
   - expose dirty/edit statistics
   - optionally emit dirty regions for mesh, collision, and lighting rebuild queues
   - preserves signed 64-bit chunk coordinates in dirty-region rebuild queues without clamping
 
 - `ChunkEditDeltaTextCodec`
-  - versioned text format for chunk edit deltas
+  - writes version 2 text deltas with complete previous/next type, light, state-bit, and metadata
+    cells; accepts version 1 by supplying zero state/metadata defaults
   - preserves signed 64-bit chunk coordinates in saved edit payloads
   - validates saved chunk coordinates against encoded payload coordinates
   - shared by world snapshot export/import and save snapshot validation
+  - rejects discontinuous multi-edit chains for one voxel when a delta is applied by
+    `ChunkDatabase`
 
 - `ChunkStreamer`
   - loads chunk coordinates into `WorldState` on demand
@@ -58,8 +64,9 @@ Implemented foundation:
     save or replication dirtiness
   - stages generated data plus saved edits transactionally, leaving no loaded chunk when validation
     or delta application fails
-  - validates every saved local coordinate before mutation and restores canonical edit history
-    without duplicating records across reloads
+  - validates every saved local coordinate and edit chain before mutation, verifies the first
+    `previous` cell against the generated baseline, and restores canonical edit history without
+    duplicating records across reloads
   - plans viewer-interest load requests from a cylindrical horizontal radius plus an independent
     vertical radius without mutating world state; diagonal columns outside the circle are not
     loaded merely because they fit a square bounding box
@@ -85,9 +92,11 @@ Implemented foundation:
     deterministic generation plus optional saved edit deltas before the flush/evict pass
 
 - `ChunkMesher`
-  - extracts renderer-neutral surface mesh data from terrain voxel chunks
-  - hides internal faces between adjacent solid cells
-  - preserves voxel type and light metadata per vertex
+  - provides a reference surface extractor and a production greedy extractor
+  - uses immutable center-plus-halo snapshots for cross-chunk visibility and rich block-model
+    dependencies
+  - emits material/render-phase sections plus rich-model instances separately from indexed terrain
+  - preserves voxel type, light, and state bits per vertex
 
 Neighbor invalidation marks rebuild state only. It must not mutate neighboring voxel
 data. Save and replication dirtiness remain attached to chunks whose stored data changed.
@@ -98,7 +107,6 @@ changes stored voxel data after load.
 Future work:
 
 - budgeted/asynchronous streaming jobs for large load and eviction waves
-- greedy/cross-chunk mesh optimization
-- neighbor-halo input and prototype-declared rich-block invalidation radii
+- further mesh compression, LOD, and rich-model batching optimization
 - collision generation
 - lighting propagation
