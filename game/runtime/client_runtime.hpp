@@ -1,15 +1,14 @@
 #pragma once
 
-#include "engine/net/client_session.hpp"
 #include "engine/movement/movement_prediction.hpp"
+#include "engine/net/client_session.hpp"
 #include "engine/world/chunks/chunk_replication.hpp"
-#include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/replication_delta.hpp"
 #include "engine/world/world_state.hpp"
 #include "game/framework/gameplay_module.hpp"
 
-#include <cstdint>
 #include <array>
+#include <cstdint>
 #include <map>
 #include <span>
 #include <unordered_map>
@@ -31,11 +30,9 @@ struct ClientRuntimeStats {
 class ClientRuntime final {
   public:
     ClientRuntime(core::NetId expected_client_id, world::WorldStateDesc world_desc,
-                  const world::VoxelPalette* voxel_palette,
                   const ReplicationRegistry* replication_registry = nullptr);
 
-    [[nodiscard]] core::Status
-    receive(std::span<const net::TransportEnvelope> messages);
+    [[nodiscard]] core::Status receive(std::span<const net::TransportEnvelope> messages);
     [[nodiscard]] core::Result<ClientRuntimeStats> synchronize();
     [[nodiscard]] core::Result<net::CommandEnvelope>
     create_command(std::string type, std::string payload, std::int64_t now_ms);
@@ -51,8 +48,7 @@ class ClientRuntime final {
     player_snapshot(core::NetId player_net_id) const noexcept;
     [[nodiscard]] core::NetId local_player_net_id() const noexcept;
     [[nodiscard]] const movement::PlayerControllerSnapshot* local_player_snapshot() const noexcept;
-    [[nodiscard]] std::vector<const movement::PlayerControllerSnapshot*>
-    movement_snapshots() const;
+    [[nodiscard]] std::vector<const movement::PlayerControllerSnapshot*> movement_snapshots() const;
     [[nodiscard]] std::span<const core::NetId> player_tombstones() const noexcept;
     void clear_command_results() noexcept;
 
@@ -72,7 +68,6 @@ class ClientRuntime final {
     [[nodiscard]] core::Result<ChunkSnapshotApplyStats> apply_queued_chunk_snapshots();
 
     world::WorldState world_;
-    const world::VoxelPalette* voxel_palette_ = nullptr;
     const ReplicationRegistry* replication_registry_ = nullptr;
     net::ClientSession session_;
     std::vector<net::HostSessionCommandResult> command_results_;

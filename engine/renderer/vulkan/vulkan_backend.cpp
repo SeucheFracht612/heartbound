@@ -1668,7 +1668,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
         VkMemoryRequirements requirements{};
         vkGetBufferMemoryRequirements(device_, resource.buffer, &requirements);
-        const auto properties =
+        const VkMemoryPropertyFlags properties =
             desc.memory == rhi::RenderBufferMemory::device_local
                 ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
                 : VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
@@ -2767,8 +2767,7 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
             materials.insert(draw.material_id.value());
             stats.total_vertices += draw.vertex_count;
-            stats.total_indices +=
-                static_cast<std::size_t>(draw.index_count) * draw.instance_count;
+            stats.total_indices += static_cast<std::size_t>(draw.index_count) * draw.instance_count;
         }
 
         status = submit_offscreen_mesh_draws(draws);
@@ -3283,11 +3282,10 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                 timestamp_milliseconds(values[frame_start_timestamp], values[frame_end_timestamp]);
             sample.opaque_ms = timestamp_milliseconds(values[opaque_start_timestamp],
                                                       values[opaque_end_timestamp]);
-            sample.alpha_tested_ms =
-                timestamp_milliseconds(values[alpha_tested_start_timestamp],
-                                       values[alpha_tested_end_timestamp]);
+            sample.alpha_tested_ms = timestamp_milliseconds(values[alpha_tested_start_timestamp],
+                                                            values[alpha_tested_end_timestamp]);
             sample.transparent_ms = timestamp_milliseconds(values[transparent_start_timestamp],
-                                                            values[transparent_end_timestamp]);
+                                                           values[transparent_end_timestamp]);
             sample.transfer_ms = timestamp_milliseconds(values[transfer_start_timestamp],
                                                         values[transfer_end_timestamp]);
             sample.final_copy_ms = timestamp_milliseconds(values[final_copy_start_timestamp],
@@ -4373,9 +4371,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             for (const auto& draw : pass_commands.draws) {
                 const auto pipeline = graphics_pipelines_.find(draw.pipeline.value);
                 if (pipeline == graphics_pipelines_.end()) {
-                    return core::Status::failure(
-                        "renderer.unknown_graphics_pipeline",
-                        "render draw references a graphics pipeline not owned by this Vulkan device");
+                    return core::Status::failure("renderer.unknown_graphics_pipeline",
+                                                 "render draw references a graphics pipeline not "
+                                                 "owned by this Vulkan device");
                 }
                 if (reference_pipeline == nullptr) {
                     reference_pipeline = &pipeline->second;
@@ -4743,8 +4741,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
 
             VkPipeline bound_pipeline = VK_NULL_HANDLE;
             std::size_t pipeline_bind_count = 0;
-            const auto find_commands = [&frame](std::string_view pass_name)
-                -> const rhi::RenderPassCommands* {
+            const auto find_commands =
+                [&frame](std::string_view pass_name) -> const rhi::RenderPassCommands* {
                 const auto found = std::ranges::find_if(
                     frame.pass_commands, [&frame, pass_name](const auto& commands) {
                         return frame.plan.passes[commands.pass_index].name == pass_name;
@@ -4767,9 +4765,9 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
                         vkCmdBindPipeline(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                           pipeline.pipeline);
                         if (layout.descriptor_set != VK_NULL_HANDLE) {
-                            vkCmdBindDescriptorSets(
-                                frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                layout.pipeline_layout, 0, 1, &layout.descriptor_set, 0, nullptr);
+                            vkCmdBindDescriptorSets(frame_commands, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                    layout.pipeline_layout, 0, 1,
+                                                    &layout.descriptor_set, 0, nullptr);
                         }
                     }
                     const VkDeviceSize vertex_buffer_offset = 0;
@@ -4832,8 +4830,8 @@ class VulkanSmokeDevice final : public rhi::IRenderDevice {
             record_labelled_pass("rich_static_instances", "Rich/static instances pass", 0.75F,
                                  0.62F, 0.20F);
             record_timed_pass("transparent_terrain", "Transparent terrain and fluids pass",
-                              transparent_start_timestamp, transparent_end_timestamp, 0.20F,
-                              0.60F, 0.86F);
+                              transparent_start_timestamp, transparent_end_timestamp, 0.20F, 0.60F,
+                              0.86F);
             record_labelled_pass("debug", "Debug pass", 0.86F, 0.28F, 0.76F);
             record_labelled_pass("ui", "UI pass", 0.80F, 0.80F, 0.80F);
             vkCmdEndRenderPass(frame_commands);

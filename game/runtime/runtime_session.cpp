@@ -24,14 +24,12 @@ core::Status RuntimeConfiguration::validate() const {
             "an in-memory client requires an authoritative server in the same process");
     }
     if (create_renderer && (!create_client || headless)) {
-        return core::Status::failure(
-            "runtime_configuration.invalid_renderer",
-            "renderer creation requires a non-headless client runtime");
+        return core::Status::failure("runtime_configuration.invalid_renderer",
+                                     "renderer creation requires a non-headless client runtime");
     }
     if (create_audio && (!create_client || headless)) {
-        return core::Status::failure(
-            "runtime_configuration.invalid_audio",
-            "audio creation requires a non-headless client runtime");
+        return core::Status::failure("runtime_configuration.invalid_audio",
+                                     "audio creation requires a non-headless client runtime");
     }
     return core::Status::ok();
 }
@@ -143,9 +141,8 @@ core::Status RuntimeSession::initialize() {
         world::WorldStateDesc client_world;
         client_world.metadata = request_.metadata;
         client_world.voxel_palette = voxel_palette_->manifest();
-        client_ = std::make_unique<ClientRuntime>(
-            connected.value(), std::move(client_world), voxel_palette_,
-            &server_->replication_registry());
+        client_ = std::make_unique<ClientRuntime>(connected.value(), std::move(client_world),
+                                                  &server_->replication_registry());
         auto status = pump_client_messages();
         if (!status) {
             return status;
@@ -156,8 +153,7 @@ core::Status RuntimeSession::initialize() {
         }
         auto synchronized = client_->synchronize();
         if (!synchronized) {
-            return core::Status::failure(synchronized.error().code,
-                                         synchronized.error().message);
+            return core::Status::failure(synchronized.error().code, synchronized.error().message);
         }
         auto presented = synchronize_presentation();
         if (!presented) {
@@ -170,10 +166,9 @@ core::Status RuntimeSession::initialize() {
 
 core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput input) {
     if (fault_.has_value()) {
-        return core::Result<RuntimeFrameStats>::failure(
-            "runtime_session.faulted",
-            "runtime session cannot continue after '" + fault_->code + "': " +
-                fault_->message);
+        return core::Result<RuntimeFrameStats>::failure("runtime_session.faulted",
+                                                        "runtime session cannot continue after '" +
+                                                            fault_->code + "': " + fault_->message);
     }
     if (!running_) {
         return core::Result<RuntimeFrameStats>::failure(

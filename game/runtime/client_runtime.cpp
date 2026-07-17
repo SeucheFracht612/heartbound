@@ -7,10 +7,9 @@
 namespace heartstead::game {
 
 ClientRuntime::ClientRuntime(core::NetId expected_client_id, world::WorldStateDesc world_desc,
-                             const world::VoxelPalette* voxel_palette,
                              const ReplicationRegistry* replication_registry)
-    : world_(std::move(world_desc)), voxel_palette_(voxel_palette),
-      replication_registry_(replication_registry), session_(expected_client_id) {}
+    : world_(std::move(world_desc)), replication_registry_(replication_registry),
+      session_(expected_client_id) {}
 
 core::Status ClientRuntime::receive(std::span<const net::TransportEnvelope> messages) {
     for (const auto& message : messages) {
@@ -37,8 +36,8 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
     }
     ClientReplicationDispatchStats feature_replication;
     if (replication_registry_ != nullptr) {
-        auto dispatched = replication_registry_->dispatch(replication.value().observed_events,
-                                                          *this);
+        auto dispatched =
+            replication_registry_->dispatch(replication.value().observed_events, *this);
         if (!dispatched) {
             return core::Result<ClientRuntimeStats>::failure(dispatched.error().code,
                                                              dispatched.error().message);
@@ -57,8 +56,7 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
         session_.drain_replication_messages(movement::movement_snapshot_payload_type);
     auto assignments =
         session_.drain_replication_messages(movement::player_assignment_payload_type);
-    auto removals =
-        session_.drain_replication_messages(movement::player_removal_payload_type);
+    auto removals = session_.drain_replication_messages(movement::player_removal_payload_type);
     for (const auto& assignment_message : assignments) {
         auto assignment = movement::player_assignment_from_transport(assignment_message);
         if (!assignment) {
@@ -110,9 +108,8 @@ core::Result<ClientRuntimeStats> ClientRuntime::synchronize() {
     return core::Result<ClientRuntimeStats>::success(std::move(stats));
 }
 
-core::Result<net::CommandEnvelope> ClientRuntime::create_command(std::string type,
-                                                                 std::string payload,
-                                                                 std::int64_t now_ms) {
+core::Result<net::CommandEnvelope>
+ClientRuntime::create_command(std::string type, std::string payload, std::int64_t now_ms) {
     return session_.create_command(std::move(type), std::move(payload), now_ms);
 }
 
@@ -178,10 +175,8 @@ void ClientRuntime::clear_command_results() noexcept {
     command_results_.clear();
 }
 
-core::Result<ClientRuntime::ChunkSnapshotApplyStats>
-ClientRuntime::apply_queued_chunk_snapshots() {
-    auto messages =
-        session_.drain_replication_messages(world::chunk_snapshot_slice_payload_type);
+core::Result<ClientRuntime::ChunkSnapshotApplyStats> ClientRuntime::apply_queued_chunk_snapshots() {
+    auto messages = session_.drain_replication_messages(world::chunk_snapshot_slice_payload_type);
     std::uint32_t completed_count = 0;
     for (const auto& message : messages) {
         auto slice = world::chunk_snapshot_slice_from_transport(message);
@@ -242,8 +237,8 @@ ClientRuntime::apply_queued_chunk_snapshots() {
             return core::Result<ChunkSnapshotApplyStats>::failure(status.error().code,
                                                                   status.error().message);
         }
-        remote_chunks_.insert_or_assign(
-            coordinate, std::pair{assembly.identity, assembly.content_revision});
+        remote_chunks_.insert_or_assign(coordinate,
+                                        std::pair{assembly.identity, assembly.content_revision});
         chunk_snapshot_assemblies_.erase(coordinate);
         ++completed_count;
     }
