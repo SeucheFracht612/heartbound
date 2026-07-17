@@ -1,5 +1,6 @@
 #include "engine/renderer/shaders/shader_compiler.hpp"
 
+#include "engine/core/file_io.hpp"
 #include "engine/core/hash.hpp"
 #include "engine/core/ids.hpp"
 #include "engine/renderer/shaders/spirv_loader.hpp"
@@ -7,7 +8,6 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
-#include <iterator>
 #include <span>
 #include <sstream>
 #include <system_error>
@@ -60,15 +60,15 @@ constexpr std::string_view manifest_magic = "heartstead.shader_manifest.v1";
 }
 
 [[nodiscard]] core::Result<std::vector<std::uint8_t>>
-read_file_bytes(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
+read_file_bytes(const std::filesystem::path& path, std::size_t maximum_bytes) {
+    auto bytes = core::read_binary_file(path, {.maximum_bytes = maximum_bytes});
+    if (!bytes) {
         return core::Result<std::vector<std::uint8_t>>::failure(
-            "shader_compiler.read_failed", "failed to open shader source: " + path.string());
+            bytes.error().code == "core.file_too_large" ? "shader_compiler.source_too_large"
+                                                        : "shader_compiler.read_failed",
+            bytes.error().message);
     }
-
-    return core::Result<std::vector<std::uint8_t>>::success(std::vector<std::uint8_t>(
-        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()));
+    return bytes;
 }
 
 void add_diagnostic(ShaderCompileResult& result, modding::DiagnosticSeverity severity,
@@ -228,6 +228,11 @@ core::Result<ShaderCompileResult> ShaderCompiler::compile(const assets::AssetCat
             "shader_compiler.invalid_pipeline_version",
             "shader compiler pipeline version must be non-zero");
     }
+    if (config.maximum_source_bytes == 0) {
+        return core::Result<ShaderCompileResult>::failure(
+            "shader_compiler.invalid_source_limit",
+            "shader compiler source byte limit must be non-zero");
+    }
 
     auto output_root = assets::canonical_asset_root(config.output_root);
     if (!output_root) {
@@ -278,7 +283,7 @@ core::Result<ShaderCompileResult> ShaderCompiler::compile(const assets::AssetCat
             continue;
         }
 
-        auto source_bytes = read_file_bytes(source->source_path);
+        auto source_bytes = read_file_bytes(source->source_path, config.maximum_source_bytes);
         if (!source_bytes) {
             add_diagnostic(result, modding::DiagnosticSeverity::error, source->source_path,
                            source_bytes.error().code, source_bytes.error().message);

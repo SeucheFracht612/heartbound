@@ -50,6 +50,7 @@ struct ShaderCompileConfig {
     std::filesystem::path manifest_relative_path = "shader_manifest.txt";
     std::string profile = "development";
     std::uint32_t pipeline_version = 1;
+    std::size_t maximum_source_bytes = 16U * 1024U * 1024U;
 };
 
 struct ShaderCompileResult {

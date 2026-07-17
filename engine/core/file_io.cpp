@@ -39,4 +39,40 @@ Result<std::string> read_text_file(const std::filesystem::path& path, ReadTextFi
     return Result<std::string>::success(std::move(output));
 }
 
+Result<std::vector<std::uint8_t>> read_binary_file(const std::filesystem::path& path,
+                                                   ReadBinaryFileOptions options) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) {
+        return Result<std::vector<std::uint8_t>>::failure(
+            "core.file_open_failed", "failed to open binary file: " + path.string());
+    }
+
+    constexpr std::size_t read_buffer_size = 64U * 1024U;
+    std::array<std::uint8_t, read_buffer_size> buffer{};
+    std::vector<std::uint8_t> output;
+    while (input) {
+        input.read(reinterpret_cast<char*>(buffer.data()),
+                   static_cast<std::streamsize>(buffer.size()));
+        const auto bytes_read = input.gcount();
+        if (bytes_read <= 0) {
+            continue;
+        }
+        const auto byte_count = static_cast<std::size_t>(bytes_read);
+        if (output.size() > options.maximum_bytes ||
+            byte_count > options.maximum_bytes - output.size()) {
+            return Result<std::vector<std::uint8_t>>::failure(
+                "core.file_too_large", "binary file exceeds the " +
+                                           std::to_string(options.maximum_bytes) +
+                                           " byte read limit: " + path.string());
+        }
+        output.insert(output.end(), buffer.begin(),
+                      buffer.begin() + static_cast<std::ptrdiff_t>(byte_count));
+    }
+    if (input.bad() || (!input.eof() && input.fail())) {
+        return Result<std::vector<std::uint8_t>>::failure(
+            "core.file_read_failed", "failed while reading binary file: " + path.string());
+    }
+    return Result<std::vector<std::uint8_t>>::success(std::move(output));
+}
+
 } // namespace heartstead::core

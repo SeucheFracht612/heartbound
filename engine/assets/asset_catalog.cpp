@@ -30,7 +30,8 @@ namespace {
     return first != path.end() && first->generic_string() == segment;
 }
 
-[[nodiscard]] core::Result<std::string> hash_file(const std::filesystem::path& path) {
+[[nodiscard]] core::Result<std::string> hash_file(const std::filesystem::path& path,
+                                                  std::size_t maximum_bytes) {
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         return core::Result<std::string>::failure(
@@ -38,16 +39,28 @@ namespace {
     }
 
     core::StableHash64 hasher;
+    std::size_t total_bytes = 0;
     char buffer[4096]{};
     while (input) {
         input.read(buffer, sizeof(buffer));
         const auto read_count = input.gcount();
         if (read_count > 0) {
+            const auto byte_count = static_cast<std::size_t>(read_count);
+            if (total_bytes > maximum_bytes || byte_count > maximum_bytes - total_bytes) {
+                return core::Result<std::string>::failure(
+                    "asset_catalog.file_too_large",
+                    "asset exceeds the catalog hashing byte limit: " + path.string());
+            }
             hasher.add_bytes(std::span{
                 reinterpret_cast<const std::uint8_t*>(buffer),
-                static_cast<std::size_t>(read_count),
+                byte_count,
             });
+            total_bytes += byte_count;
         }
+    }
+    if (input.bad() || (!input.eof() && input.fail())) {
+        return core::Result<std::string>::failure("asset_catalog.hash_failed",
+                                                  "failed while hashing asset: " + path.string());
     }
 
     return core::Result<std::string>::success(hasher.hex());
@@ -169,7 +182,8 @@ std::size_t AssetCatalog::count_kind(AssetKind kind) const noexcept {
 AssetCatalogBuildResult
 AssetCatalogBuilder::index_directory(AssetCatalog& catalog, const std::filesystem::path& root,
                                      std::string namespace_id, AssetSourceKind source_kind,
-                                     std::string source_id, std::uint32_t priority) {
+                                     std::string source_id, std::uint32_t priority,
+                                     std::size_t maximum_file_bytes) {
     AssetCatalogBuildResult result;
 
     if (!core::is_valid_namespace_id(namespace_id)) {
@@ -195,14 +209,22 @@ AssetCatalogBuilder::index_directory(AssetCatalog& catalog, const std::filesyste
     }
 
     return index_virtual_namespace(catalog, vfs, std::move(namespace_id), source_kind,
-                                   std::move(source_id), priority);
+                                   std::move(source_id), priority, maximum_file_bytes);
 }
 
 AssetCatalogBuildResult
 AssetCatalogBuilder::index_virtual_namespace(AssetCatalog& catalog, const VirtualFileSystem& vfs,
                                              std::string namespace_id, AssetSourceKind source_kind,
-                                             std::string source_id, std::uint32_t priority) {
+                                             std::string source_id, std::uint32_t priority,
+                                             std::size_t maximum_file_bytes) {
     AssetCatalogBuildResult result;
+
+    if (maximum_file_bytes == 0) {
+        result.diagnostics.push_back(modding::ModDiagnostic{
+            modding::DiagnosticSeverity::error, std::filesystem::path{namespace_id},
+            "asset_catalog.invalid_file_limit", "asset catalog file byte limit must be non-zero"});
+        return result;
+    }
 
     auto entries = vfs.list_namespace_files(namespace_id);
     if (!entries) {
@@ -214,7 +236,7 @@ AssetCatalogBuilder::index_virtual_namespace(AssetCatalog& catalog, const Virtua
 
     for (const auto& entry : entries.value()) {
         const auto logical_id = asset_logical_id(entry.virtual_path);
-        auto hash = hash_file(entry.resolved_path);
+        auto hash = hash_file(entry.resolved_path, maximum_file_bytes);
         if (!hash) {
             result.diagnostics.push_back(
                 modding::ModDiagnostic{modding::DiagnosticSeverity::error, entry.resolved_path,
@@ -246,8 +268,17 @@ AssetCatalogBuilder::index_virtual_namespace(AssetCatalog& catalog, const Virtua
 
 AssetCatalogBuildResult AssetCatalogBuilder::index_virtual_directory(
     AssetCatalog& catalog, const VirtualFileSystem& vfs, std::string_view virtual_directory,
-    AssetSourceKind source_kind, std::string source_id, std::uint32_t priority) {
+    AssetSourceKind source_kind, std::string source_id, std::uint32_t priority,
+    std::size_t maximum_file_bytes) {
     AssetCatalogBuildResult result;
+
+    if (maximum_file_bytes == 0) {
+        result.diagnostics.push_back(modding::ModDiagnostic{
+            modding::DiagnosticSeverity::error,
+            std::filesystem::path{std::string(virtual_directory)},
+            "asset_catalog.invalid_file_limit", "asset catalog file byte limit must be non-zero"});
+        return result;
+    }
 
     auto entries = vfs.list_files(virtual_directory);
     if (!entries) {
@@ -260,7 +291,7 @@ AssetCatalogBuildResult AssetCatalogBuilder::index_virtual_directory(
 
     for (const auto& entry : entries.value()) {
         const auto logical_id = asset_logical_id(entry.virtual_path);
-        auto hash = hash_file(entry.resolved_path);
+        auto hash = hash_file(entry.resolved_path, maximum_file_bytes);
         if (!hash) {
             result.diagnostics.push_back(
                 modding::ModDiagnostic{modding::DiagnosticSeverity::error, entry.resolved_path,

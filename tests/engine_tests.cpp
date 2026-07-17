@@ -356,6 +356,12 @@ void test_virtual_file_system() {
     assert(bytes.value()[0] == 0x00);
     assert(bytes.value()[2] == 0x80);
     assert(bytes.value()[3] == 0xff);
+    auto bounded_bytes = vfs.read_bytes("base:textures/items/raw_clay.bin", 4);
+    assert(!bounded_bytes);
+    assert(bounded_bytes.error().code == "vfs.file_too_large");
+    auto bounded_text = vfs.read_text("base:textures/items/raw_clay.txt", 4);
+    assert(!bounded_text);
+    assert(bounded_text.error().code == "vfs.file_too_large");
 
     auto listed = vfs.list_files("base:textures");
     assert(listed);
@@ -576,6 +582,15 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(missing_vfs_index.has_errors());
     assert(missing_vfs_index.diagnostics.front().code == "vfs.namespace_not_mounted");
 
+    heartstead::assets::AssetCatalog bounded_catalog;
+    auto bounded_index = heartstead::assets::AssetCatalogBuilder::index_directory(
+        bounded_catalog, mod_assets, "base", heartstead::assets::AssetSourceKind::mod, "base", 0,
+        4);
+    assert(bounded_index.has_errors());
+    assert(std::ranges::any_of(bounded_index.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "asset_catalog.file_too_large";
+    }));
+
     assert(heartstead::assets::infer_asset_kind("models/building/wall.glb") ==
            heartstead::assets::AssetKind::model);
     assert(heartstead::assets::infer_asset_kind("sounds/tools/hammer.wav") ==
@@ -776,6 +791,15 @@ void test_resource_pack_discovery_and_asset_catalog() {
     bad_cook_config = cook_config;
     bad_cook_config.manifest_relative_path = "/absolute_manifest.txt";
     assert(!heartstead::assets::validate_asset_cook_config(bad_cook_config));
+    bad_cook_config = cook_config;
+    bad_cook_config.maximum_source_bytes = 0;
+    assert(!heartstead::assets::validate_asset_cook_config(bad_cook_config));
+    auto bounded_cook_config = cook_config;
+    bounded_cook_config.output_root = root / "bounded_cooked_assets";
+    bounded_cook_config.maximum_source_bytes = 4;
+    auto bounded_cook =
+        heartstead::assets::AssetCooker::cook(catalog, std::move(bounded_cook_config));
+    assert(!bounded_cook && bounded_cook.error().code == "asset_cooker.source_too_large");
     auto production_cook_config = cook_config;
     production_cook_config.backend = heartstead::assets::AssetCookBackend::production_converters;
     auto invalid_production_cook =
@@ -1328,6 +1352,24 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(shader_result_inspection.find_field("first_record_backend")->value ==
            "slang_dev_validation_v1");
 
+    auto invalid_shader_limit_config = shader_config;
+    invalid_shader_limit_config.maximum_source_bytes = 0;
+    auto invalid_shader_limit = heartstead::renderer::shaders::ShaderCompiler::compile(
+        catalog, std::move(invalid_shader_limit_config));
+    assert(!invalid_shader_limit &&
+           invalid_shader_limit.error().code == "shader_compiler.invalid_source_limit");
+
+    auto bounded_shader_config = shader_config;
+    bounded_shader_config.output_root = root / "bounded_compiled_shaders";
+    bounded_shader_config.maximum_source_bytes = 4;
+    auto bounded_shader_compile = heartstead::renderer::shaders::ShaderCompiler::compile(
+        catalog, std::move(bounded_shader_config));
+    assert(bounded_shader_compile && bounded_shader_compile.value().has_errors());
+    assert(
+        std::ranges::any_of(bounded_shader_compile.value().diagnostics, [](const auto& diagnostic) {
+            return diagnostic.code == "shader_compiler.source_too_large";
+        }));
+
     auto invalid_shader_record = shader_compile.value().records.front();
     invalid_shader_record.compiled_hash.clear();
     auto invalid_shader_record_inspection =
@@ -1458,6 +1500,20 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(!missing_payload);
     assert(missing_payload.error().code == "cooked_asset_store.asset_not_found");
 
+    auto bounded_manifest_store = heartstead::assets::CookedAssetStore::load(
+        cooked_output, "asset_manifest.txt",
+        {.maximum_manifest_bytes = 4, .maximum_payload_bytes = 1024});
+    assert(!bounded_manifest_store &&
+           bounded_manifest_store.error().code == "cooked_asset_store.file_too_large");
+
+    auto bounded_payload_store = heartstead::assets::CookedAssetStore::load(
+        cooked_output, "asset_manifest.txt",
+        {.maximum_manifest_bytes = 1024 * 1024, .maximum_payload_bytes = 4});
+    assert(bounded_payload_store);
+    auto bounded_payload =
+        bounded_payload_store.value().load_payload("base:textures/items/raw_clay.txt");
+    assert(!bounded_payload && bounded_payload.error().code == "cooked_asset_store.file_too_large");
+
     const auto raw_payload_path = cooked_output / cooked_output_raw_clay->cooked_relative_path;
     const auto raw_payload_text = read_text(raw_payload_path);
     const std::vector<std::uint8_t> raw_payload_bytes(raw_payload_text.begin(),
@@ -1489,6 +1545,12 @@ void test_resource_pack_discovery_and_asset_catalog() {
         tampered_header_bytes, tampered_header_record, cooked_result.value().manifest.profile);
     assert(!tampered_header_payload);
     assert(tampered_header_payload.error().code == "cooked_asset_store.header_mismatch");
+
+    auto bounded_direct_payload = heartstead::assets::CookedAssetPayloadCodec::decode(
+        raw_payload_bytes, *cooked_output_raw_clay, cooked_result.value().manifest.profile,
+        raw_payload_bytes.size() - 1U);
+    assert(!bounded_direct_payload &&
+           bounded_direct_payload.error().code == "cooked_asset_store.file_too_large");
 
     auto invalid_decode = heartstead::assets::CookedAssetManifestTextCodec::decode("bad\n");
     assert(!invalid_decode);

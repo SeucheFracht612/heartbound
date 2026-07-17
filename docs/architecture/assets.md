@@ -9,7 +9,8 @@ Implemented foundation:
   - parses namespace-relative virtual paths
   - rejects absolute paths, backslashes, empty segments, `.`, and `..`
   - resolves mounted namespaces in override order without escaping mount roots
-  - reads both text and binary payloads through the same safe resolution path
+  - reads both text and binary payloads through the same safe resolution path and a configurable
+    byte limit (256 MiB by default)
   - lists active files below a virtual directory with later mounts overriding earlier files at the
     same virtual path
 
@@ -30,6 +31,7 @@ Implemented foundation:
   - asset kind inference
   - source kind tracking for mods, resource packs, and engine assets
   - simple content hashes
+  - bounded streaming hashes that report short reads and oversized source files
   - priority-based active asset selection
 
 - Material prototype assets
@@ -65,12 +67,15 @@ Implemented foundation:
     pipeline version, and byte count against the manifest record
   - decodes deterministic `meta.*` payload fields into a generic metadata map for tools/runtime
   - exposes source payload bytes behind the cooked manifest identity
+  - applies configurable manifest/payload byte limits plus fixed header line/field limits before
+    allocating decoded payload state
 
 - `AssetCooker`
   - builds the cooked manifest from the catalog
   - fails early when an active cooked asset dependency cannot resolve to another active cooked
     record
   - selects an explicit cook backend through `AssetCookConfig`
+  - rejects a source that exceeds the configured per-asset byte limit (256 MiB by default)
   - reports backend and per-kind pipeline metadata for tooling
   - writes cooked payload files under deterministic relative paths
   - uses explicit development passthrough backends for textures, models, shaders,
@@ -89,6 +94,7 @@ Implemented foundation:
   - writes deterministic compiled-shader payload wrappers and a shader manifest
   - supports a development profile for source validation and a production profile for validated
     SPIR-V passthrough
+  - rejects shader sources above its configurable 16 MiB default limit
   - keeps shader processing behind a renderer-owned validation/cook stage instead of exposing
     backend graphics API access to mods or resource packs
 

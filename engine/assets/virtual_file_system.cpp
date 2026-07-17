@@ -1,12 +1,11 @@
 #include "engine/assets/virtual_file_system.hpp"
 
+#include "engine/core/file_io.hpp"
 #include "engine/core/ids.hpp"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
-#include <iterator>
 #include <system_error>
 #include <unordered_set>
 
@@ -296,25 +295,26 @@ VirtualFileSystem::list_namespace_files(std::string_view namespace_id) const {
     return list_files_impl(mounts_, namespace_id, nullptr, namespace_id);
 }
 
-core::Result<std::vector<std::uint8_t>> VirtualFileSystem::read_bytes(std::string_view path) const {
+core::Result<std::vector<std::uint8_t>>
+VirtualFileSystem::read_bytes(std::string_view path, std::size_t maximum_bytes) const {
     auto resolved = resolve_existing(path);
     if (!resolved) {
         return core::Result<std::vector<std::uint8_t>>::failure(resolved.error().code,
                                                                 resolved.error().message);
     }
 
-    std::ifstream input(resolved.value(), std::ios::binary);
-    if (!input) {
+    auto bytes = core::read_binary_file(resolved.value(), {.maximum_bytes = maximum_bytes});
+    if (!bytes) {
         return core::Result<std::vector<std::uint8_t>>::failure(
-            "vfs.read_failed", "failed to open file: " + resolved.value().string());
+            bytes.error().code == "core.file_too_large" ? "vfs.file_too_large" : "vfs.read_failed",
+            bytes.error().message);
     }
-
-    return core::Result<std::vector<std::uint8_t>>::success(std::vector<std::uint8_t>(
-        std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()));
+    return bytes;
 }
 
-core::Result<std::string> VirtualFileSystem::read_text(std::string_view path) const {
-    auto bytes = read_bytes(path);
+core::Result<std::string> VirtualFileSystem::read_text(std::string_view path,
+                                                       std::size_t maximum_bytes) const {
+    auto bytes = read_bytes(path, maximum_bytes);
     if (!bytes) {
         return core::Result<std::string>::failure(bytes.error().code, bytes.error().message);
     }

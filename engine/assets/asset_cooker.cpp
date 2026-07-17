@@ -1,5 +1,6 @@
 #include "engine/assets/asset_cooker.hpp"
 
+#include "engine/core/file_io.hpp"
 #include "engine/core/hash.hpp"
 #include "engine/renderer/shaders/shader_compiler.hpp"
 
@@ -35,32 +36,15 @@ void add_metadata(CookedAssetMetadataFields& metadata, std::string key, std::uin
 }
 
 [[nodiscard]] core::Result<std::vector<std::uint8_t>>
-read_file_bytes(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
+read_file_bytes(const std::filesystem::path& path, std::size_t maximum_bytes) {
+    auto bytes = core::read_binary_file(path, {.maximum_bytes = maximum_bytes});
+    if (!bytes) {
         return core::Result<std::vector<std::uint8_t>>::failure(
-            "asset_cooker.read_failed", "failed to open asset source: " + path.string());
+            bytes.error().code == "core.file_too_large" ? "asset_cooker.source_too_large"
+                                                        : "asset_cooker.read_failed",
+            bytes.error().message);
     }
-
-    input.seekg(0, std::ios::end);
-    const auto end = input.tellg();
-    if (end < 0) {
-        return core::Result<std::vector<std::uint8_t>>::failure(
-            "asset_cooker.read_failed", "failed to determine asset source size");
-    }
-    input.seekg(0, std::ios::beg);
-
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-    }
-    if (!input) {
-        return core::Result<std::vector<std::uint8_t>>::failure(
-            "asset_cooker.read_failed", "failed to read asset source: " + path.string());
-    }
-
-    return core::Result<std::vector<std::uint8_t>>::success(std::move(bytes));
+    return bytes;
 }
 
 [[nodiscard]] const AssetRecord* find_source_record(const AssetCatalog& catalog,
@@ -1142,7 +1126,7 @@ core::Result<AssetCookResult> AssetCooker::cook(const AssetCatalog& catalog,
                 "asset_cooker.pipeline_unavailable", pipeline_unavailable_message(source->kind));
         }
 
-        auto source_bytes = read_file_bytes(source->source_path);
+        auto source_bytes = read_file_bytes(source->source_path, config.maximum_source_bytes);
         if (!source_bytes) {
             return core::Result<AssetCookResult>::failure(source_bytes.error().code,
                                                           source_bytes.error().message);
@@ -1192,6 +1176,10 @@ core::Status validate_asset_cook_config(const AssetCookConfig& config) {
     if (!is_safe_asset_relative_path(config.manifest_relative_path)) {
         return core::Status::failure("asset_cooker.invalid_manifest_path",
                                      "asset cooker manifest path must be a safe relative path");
+    }
+    if (config.maximum_source_bytes == 0) {
+        return core::Status::failure("asset_cooker.invalid_source_limit",
+                                     "asset cooker source byte limit must be non-zero");
     }
 
     switch (config.backend) {

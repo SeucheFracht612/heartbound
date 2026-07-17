@@ -4,6 +4,7 @@
 #include "engine/core/result.hpp"
 #include "engine/modding/mod_diagnostic.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -13,6 +14,8 @@
 #include <vector>
 
 namespace heartstead::assets {
+
+inline constexpr std::size_t default_maximum_asset_source_bytes = 256U * 1024U * 1024U;
 
 enum class AssetKind {
     texture,
@@ -75,15 +78,18 @@ class AssetCatalogBuilder {
     [[nodiscard]] static AssetCatalogBuildResult
     index_directory(AssetCatalog& catalog, const std::filesystem::path& root,
                     std::string namespace_id, AssetSourceKind source_kind, std::string source_id,
-                    std::uint32_t priority);
+                    std::uint32_t priority,
+                    std::size_t maximum_file_bytes = default_maximum_asset_source_bytes);
     [[nodiscard]] static AssetCatalogBuildResult
     index_virtual_namespace(AssetCatalog& catalog, const VirtualFileSystem& vfs,
                             std::string namespace_id, AssetSourceKind source_kind,
-                            std::string source_id, std::uint32_t priority);
+                            std::string source_id, std::uint32_t priority,
+                            std::size_t maximum_file_bytes = default_maximum_asset_source_bytes);
     [[nodiscard]] static AssetCatalogBuildResult
     index_virtual_directory(AssetCatalog& catalog, const VirtualFileSystem& vfs,
                             std::string_view virtual_directory, AssetSourceKind source_kind,
-                            std::string source_id, std::uint32_t priority);
+                            std::string source_id, std::uint32_t priority,
+                            std::size_t maximum_file_bytes = default_maximum_asset_source_bytes);
 };
 
 [[nodiscard]] std::string_view asset_kind_name(AssetKind kind) noexcept;

@@ -11,6 +11,8 @@
 
 namespace heartstead::assets {
 
+inline constexpr std::size_t default_virtual_file_read_limit = 256U * 1024U * 1024U;
+
 struct VirtualPath {
     std::string namespace_id;
     std::filesystem::path relative_path;
@@ -50,8 +52,12 @@ class VirtualFileSystem {
     list_files(std::string_view directory) const;
     [[nodiscard]] core::Result<std::vector<VirtualFileEntry>>
     list_namespace_files(std::string_view namespace_id) const;
-    [[nodiscard]] core::Result<std::vector<std::uint8_t>> read_bytes(std::string_view path) const;
-    [[nodiscard]] core::Result<std::string> read_text(std::string_view path) const;
+    [[nodiscard]] core::Result<std::vector<std::uint8_t>>
+    read_bytes(std::string_view path,
+               std::size_t maximum_bytes = default_virtual_file_read_limit) const;
+    [[nodiscard]] core::Result<std::string>
+    read_text(std::string_view path,
+              std::size_t maximum_bytes = default_virtual_file_read_limit) const;
 
     [[nodiscard]] const std::vector<MountPoint>& mounts() const noexcept {
         return mounts_;

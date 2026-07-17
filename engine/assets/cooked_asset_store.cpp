@@ -1,12 +1,12 @@
 #include "engine/assets/cooked_asset_store.hpp"
 
 #include "engine/assets/asset_cooker.hpp"
+#include "engine/core/file_io.hpp"
 #include "engine/core/hash.hpp"
 
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
-#include <fstream>
 #include <map>
 #include <span>
 #include <string>
@@ -22,42 +22,32 @@ namespace {
 constexpr std::string_view payload_magic = "heartstead.cooked_asset_payload.v1";
 constexpr std::string_view payload_separator = "\n---\n";
 constexpr std::string_view metadata_prefix = "meta.";
+constexpr std::size_t max_payload_header_bytes = 1024U * 1024U;
+constexpr std::size_t max_payload_header_line_bytes = 64U * 1024U;
+constexpr std::size_t max_payload_header_fields = 256;
 
 [[nodiscard]] core::Result<std::vector<std::uint8_t>>
-read_file_bytes(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
+read_file_bytes(const std::filesystem::path& path, std::size_t maximum_bytes) {
+    auto bytes = core::read_binary_file(path, {.maximum_bytes = maximum_bytes});
+    if (!bytes) {
         return core::Result<std::vector<std::uint8_t>>::failure(
-            "cooked_asset_store.read_failed", "failed to open cooked asset file: " + path.string());
+            bytes.error().code == "core.file_too_large" ? "cooked_asset_store.file_too_large"
+                                                        : "cooked_asset_store.read_failed",
+            bytes.error().message);
     }
-
-    input.seekg(0, std::ios::end);
-    const auto end = input.tellg();
-    if (end < 0) {
-        return core::Result<std::vector<std::uint8_t>>::failure(
-            "cooked_asset_store.read_failed", "failed to determine cooked asset file size");
-    }
-    input.seekg(0, std::ios::beg);
-
-    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(end));
-    if (!bytes.empty()) {
-        input.read(reinterpret_cast<char*>(bytes.data()),
-                   static_cast<std::streamsize>(bytes.size()));
-    }
-    if (!input) {
-        return core::Result<std::vector<std::uint8_t>>::failure(
-            "cooked_asset_store.read_failed", "failed to read cooked asset file: " + path.string());
-    }
-    return core::Result<std::vector<std::uint8_t>>::success(std::move(bytes));
+    return bytes;
 }
 
-[[nodiscard]] core::Result<std::string> read_text_file(const std::filesystem::path& path) {
-    auto bytes = read_file_bytes(path);
-    if (!bytes) {
-        return core::Result<std::string>::failure(bytes.error().code, bytes.error().message);
+[[nodiscard]] core::Result<std::string> read_text_file(const std::filesystem::path& path,
+                                                       std::size_t maximum_bytes) {
+    auto text = core::read_text_file(path, {.maximum_bytes = maximum_bytes});
+    if (!text) {
+        return core::Result<std::string>::failure(text.error().code == "core.file_too_large"
+                                                      ? "cooked_asset_store.file_too_large"
+                                                      : "cooked_asset_store.read_failed",
+                                                  text.error().message);
     }
-    return core::Result<std::string>::success(
-        std::string(reinterpret_cast<const char*>(bytes.value().data()), bytes.value().size()));
+    return text;
 }
 
 [[nodiscard]] core::Result<std::uint64_t> parse_u64(std::string_view value,
@@ -101,6 +91,11 @@ parse_payload_header(std::string_view header) {
         if (!line.empty() && line.back() == '\r') {
             line.remove_suffix(1);
         }
+        if (line.size() > max_payload_header_line_bytes) {
+            return core::Result<std::map<std::string, std::string>>::failure(
+                "cooked_asset_store.header_too_large",
+                "cooked asset payload header line exceeds its safety limit");
+        }
 
         if (!saw_magic) {
             if (line != payload_magic) {
@@ -118,6 +113,11 @@ parse_payload_header(std::string_view header) {
             }
             auto key = std::string(line.substr(0, separator));
             auto value = std::string(line.substr(separator + 1));
+            if (!fields.contains(key) && fields.size() >= max_payload_header_fields) {
+                return core::Result<std::map<std::string, std::string>>::failure(
+                    "cooked_asset_store.header_too_large",
+                    "cooked asset payload header has too many fields");
+            }
             const auto [_, inserted] = fields.emplace(std::move(key), std::move(value));
             if (!inserted) {
                 return core::Result<std::map<std::string, std::string>>::failure(
@@ -187,7 +187,11 @@ payload_metadata_from_fields(const std::map<std::string, std::string>& fields) {
 core::Result<CookedAssetPayload>
 CookedAssetPayloadCodec::decode(std::span<const std::uint8_t> bytes,
                                 const CookedAssetRecord& expected,
-                                std::string_view expected_profile) {
+                                std::string_view expected_profile, std::size_t maximum_bytes) {
+    if (maximum_bytes == 0 || bytes.size() > maximum_bytes) {
+        return core::Result<CookedAssetPayload>::failure(
+            "cooked_asset_store.file_too_large", "cooked asset payload exceeds its safety limit");
+    }
     if (core::stable_hash64_hex(bytes) != expected.cooked_hash) {
         return core::Result<CookedAssetPayload>::failure(
             "cooked_asset_store.cooked_hash_mismatch",
@@ -200,6 +204,11 @@ CookedAssetPayloadCodec::decode(std::span<const std::uint8_t> bytes,
         return core::Result<CookedAssetPayload>::failure(
             "cooked_asset_store.missing_separator",
             "cooked asset payload is missing header separator");
+    }
+    if (separator > max_payload_header_bytes) {
+        return core::Result<CookedAssetPayload>::failure(
+            "cooked_asset_store.header_too_large",
+            "cooked asset payload header exceeds its safety limit");
     }
 
     auto fields = parse_payload_header(text.substr(0, separator));
@@ -285,8 +294,9 @@ CookedAssetPayloadCodec::decode(std::span<const std::uint8_t> bytes,
     return core::Result<CookedAssetPayload>::success(std::move(payload));
 }
 
-core::Result<CookedAssetStore>
-CookedAssetStore::load(std::filesystem::path root, std::filesystem::path manifest_relative_path) {
+core::Result<CookedAssetStore> CookedAssetStore::load(std::filesystem::path root,
+                                                      std::filesystem::path manifest_relative_path,
+                                                      CookedAssetStoreLoadOptions options) {
     if (root.empty()) {
         return core::Result<CookedAssetStore>::failure("cooked_asset_store.invalid_root",
                                                        "cooked asset store root is required");
@@ -295,6 +305,11 @@ CookedAssetStore::load(std::filesystem::path root, std::filesystem::path manifes
         return core::Result<CookedAssetStore>::failure(
             "cooked_asset_store.invalid_manifest_path",
             "cooked asset manifest path must be a safe relative path");
+    }
+    if (options.maximum_manifest_bytes == 0 || options.maximum_payload_bytes == 0) {
+        return core::Result<CookedAssetStore>::failure(
+            "cooked_asset_store.invalid_read_limit",
+            "cooked asset store read limits must be non-zero");
     }
 
     auto canonical_root = canonical_asset_root(root);
@@ -307,7 +322,7 @@ CookedAssetStore::load(std::filesystem::path root, std::filesystem::path manifes
         return core::Result<CookedAssetStore>::failure(manifest_path.error().code,
                                                        manifest_path.error().message);
     }
-    auto manifest_text = read_text_file(manifest_path.value());
+    auto manifest_text = read_text_file(manifest_path.value(), options.maximum_manifest_bytes);
     if (!manifest_text) {
         return core::Result<CookedAssetStore>::failure(manifest_text.error().code,
                                                        manifest_text.error().message);
@@ -321,6 +336,7 @@ CookedAssetStore::load(std::filesystem::path root, std::filesystem::path manifes
     CookedAssetStore store;
     store.root_ = std::move(canonical_root).value();
     store.manifest_ = std::move(manifest).value();
+    store.maximum_payload_bytes_ = options.maximum_payload_bytes;
     return core::Result<CookedAssetStore>::success(std::move(store));
 }
 
@@ -355,11 +371,12 @@ CookedAssetStore::load_payload(const CookedAssetRecord& record) const {
         return core::Result<CookedAssetPayload>::failure(payload_path.error().code,
                                                          payload_path.error().message);
     }
-    auto bytes = read_file_bytes(payload_path.value());
+    auto bytes = read_file_bytes(payload_path.value(), maximum_payload_bytes_);
     if (!bytes) {
         return core::Result<CookedAssetPayload>::failure(bytes.error().code, bytes.error().message);
     }
-    return CookedAssetPayloadCodec::decode(bytes.value(), record, manifest_.profile);
+    return CookedAssetPayloadCodec::decode(bytes.value(), record, manifest_.profile,
+                                           maximum_payload_bytes_);
 }
 
 } // namespace heartstead::assets
