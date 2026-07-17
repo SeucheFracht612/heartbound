@@ -74,6 +74,9 @@ struct InventoryTransferRequest {
     std::uint32_t count = 0;
 };
 
+// Provides the strong mutation guarantee: a failed transfer leaves both records unchanged.
+// Self-transfer requires both references to name the same record. The same slot is a validated
+// no-op; another slot merges, splits, or appends using pre-transfer slot indices.
 [[nodiscard]] core::Status transfer_inventory_items(InventoryRecord& source,
                                                     InventoryRecord& destination,
                                                     const InventoryTransferRequest& request);

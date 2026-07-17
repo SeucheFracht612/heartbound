@@ -1502,8 +1502,10 @@ handle_transfer_inventory_items(const net::CommandEnvelope& envelope,
     operation.record_derived_update("Inventory");
     operation.emit_event(
         {"inventory.items_transferred", payload.value().request.source_owner_id, envelope.payload});
-    operation.emit_event({"inventory.items_transferred",
-                          payload.value().request.destination_owner_id, envelope.payload});
+    if (payload.value().request.destination_owner_id != payload.value().request.source_owner_id) {
+        operation.emit_event({"inventory.items_transferred",
+                              payload.value().request.destination_owner_id, envelope.payload});
+    }
     operation.mark_replication_dirty();
     operation.mark_save_dirty();
     return core::Status::ok();

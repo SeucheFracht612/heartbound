@@ -10047,6 +10047,23 @@ void test_world_command_registry() {
     assert(source_inventory->stacks.front().count == 7);
     assert(destination_inventory->stacks.front().count == 13);
 
+    auto inventory_self_command = inventory_command;
+    inventory_self_command.sequence = 500;
+    heartstead::net::CommandPayload inventory_self_payload;
+    assert(inventory_self_payload.set("source_owner", "4000"));
+    assert(inventory_self_payload.set("destination_owner", "4000"));
+    assert(inventory_self_payload.set("source_slot", "0"));
+    assert(inventory_self_payload.set("destination_slot", "0"));
+    assert(inventory_self_payload.set("count", "1"));
+    inventory_self_command.payload =
+        heartstead::net::CommandPayloadTextCodec::encode(inventory_self_payload);
+    auto inventory_self_result = dispatcher.dispatch(inventory_self_command, context);
+    assert(inventory_self_result);
+    assert(inventory_self_result.value().events.size() == 1);
+    assert(inventory_self_result.value().events.front().subject ==
+           heartstead::core::SaveId::from_value(4000));
+    assert(source_inventory->stacks.front().count == 7);
+
     heartstead::net::CommandEnvelope process_command;
     process_command.sequence = 6;
     process_command.sender = heartstead::core::NetId::from_value(10);
@@ -11940,10 +11957,50 @@ void test_item_stacks() {
     assert(source_inventory.stacks.front().count == 5);
     assert(destination_inventory.stacks.size() == 2);
     assert(destination_inventory.stacks.back().count == 6);
+    const auto source_count_before_failure = source_inventory.stacks.front().count;
+    const auto destination_before_failure = destination_inventory.stacks;
     assert(!heartstead::world::transfer_inventory_items(source_inventory, destination_inventory,
                                                         {heartstead::core::SaveId::from_value(11),
                                                          heartstead::core::SaveId::from_value(12),
                                                          0, 0, 99}));
+    assert(source_inventory.stacks.front().count == source_count_before_failure);
+    assert(destination_inventory.stacks.size() == destination_before_failure.size());
+    assert(destination_inventory.stacks.front().count == destination_before_failure.front().count);
+    assert(destination_inventory.stacks.back().count == destination_before_failure.back().count);
+
+    const auto self_owner = heartstead::core::SaveId::from_value(21);
+    heartstead::world::InventoryRecord self_inventory{
+        self_owner, {source_inventory_stack.value(), destination_inventory_stack.value()}};
+    assert(heartstead::world::transfer_inventory_items(self_inventory, self_inventory,
+                                                       {self_owner, self_owner, 0, 0, 5}));
+    assert(self_inventory.stacks[0].count == 16);
+    assert(self_inventory.stacks[1].count == 3);
+
+    assert(heartstead::world::transfer_inventory_items(self_inventory, self_inventory,
+                                                       {self_owner, self_owner, 0, 2, 4}));
+    assert(self_inventory.stacks.size() == 3);
+    assert(self_inventory.stacks[0].count == 12);
+    assert(self_inventory.stacks[2].count == 4);
+    assert(heartstead::world::transfer_inventory_items(self_inventory, self_inventory,
+                                                       {self_owner, self_owner, 0, 1, 5}));
+    assert(self_inventory.stacks[0].count == 7);
+    assert(self_inventory.stacks[1].count == 8);
+    assert(heartstead::world::transfer_inventory_items(self_inventory, self_inventory,
+                                                       {self_owner, self_owner, 0, 1, 7}));
+    assert(self_inventory.stacks.size() == 2);
+    assert(self_inventory.stacks[0].count == 15);
+    assert(self_inventory.stacks[1].count == 4);
+
+    heartstead::world::InventoryRecord duplicate_owner_a{self_owner,
+                                                         {source_inventory_stack.value()}};
+    heartstead::world::InventoryRecord duplicate_owner_b{self_owner,
+                                                         {destination_inventory_stack.value()}};
+    auto ambiguous_self_transfer = heartstead::world::transfer_inventory_items(
+        duplicate_owner_a, duplicate_owner_b, {self_owner, self_owner, 0, 0, 1});
+    assert(!ambiguous_self_transfer);
+    assert(ambiguous_self_transfer.error().code == "inventory_transfer.owner_alias_mismatch");
+    assert(duplicate_owner_a.stacks.front().count == 16);
+    assert(duplicate_owner_b.stacks.front().count == 3);
 
     auto empty_stack_inventory = destination_inventory;
     empty_stack_inventory.stacks.front().count = 0;

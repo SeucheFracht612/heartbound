@@ -98,10 +98,11 @@ core::Status transfer_inventory_items(InventoryRecord& source, InventoryRecord& 
         return core::Status::failure("inventory_transfer.destination_owner_mismatch",
                                      "destination inventory owner does not match transfer request");
     }
-    if (source.owner_id == destination.owner_id) {
+    const bool same_inventory = source.owner_id == destination.owner_id;
+    if (same_inventory && &source != &destination) {
         return core::Status::failure(
-            "inventory_transfer.same_inventory",
-            "same-inventory transfers need a dedicated reorder/split path");
+            "inventory_transfer.owner_alias_mismatch",
+            "one inventory owner must resolve to the same inventory record for self-transfer");
     }
     if (request.count == 0) {
         return core::Status::failure("inventory_transfer.invalid_count",
@@ -111,19 +112,24 @@ core::Status transfer_inventory_items(InventoryRecord& source, InventoryRecord& 
         return core::Status::failure("inventory_transfer.source_slot_out_of_range",
                                      "source inventory slot is out of range");
     }
-    if (request.destination_slot > destination.stacks.size()) {
+    const auto& destination_stacks = same_inventory ? source.stacks : destination.stacks;
+    if (request.destination_slot > destination_stacks.size()) {
         return core::Status::failure("inventory_transfer.destination_slot_out_of_range",
                                      "destination inventory slot is out of range");
     }
 
-    auto& source_stack = source.stacks[request.source_slot];
+    const auto& source_stack = source.stacks[request.source_slot];
     if (request.count > source_stack.count) {
         return core::Status::failure("inventory_transfer.insufficient_items",
                                      "source stack does not contain the requested item count");
     }
 
-    if (request.destination_slot < destination.stacks.size()) {
-        auto& destination_stack = destination.stacks[request.destination_slot];
+    if (same_inventory && request.source_slot == request.destination_slot) {
+        return core::Status::ok();
+    }
+
+    if (request.destination_slot < destination_stacks.size()) {
+        const auto& destination_stack = destination_stacks[request.destination_slot];
         if (!destination_stack.can_merge_with(source_stack)) {
             return core::Status::failure(
                 "inventory_transfer.merge_mismatch",
@@ -133,22 +139,46 @@ core::Status transfer_inventory_items(InventoryRecord& source, InventoryRecord& 
             return core::Status::failure("inventory_transfer.destination_full",
                                          "destination stack does not have enough capacity");
         }
-
-        source_stack.count -= request.count;
-        destination_stack.count += request.count;
-    } else {
-        auto moved_stack = source_stack;
-        moved_stack.count = request.count;
-        source_stack.count -= request.count;
-        destination.stacks.push_back(std::move(moved_stack));
     }
 
-    if (source_stack.count == 0) {
-        source.stacks.erase(
-            source.stacks.begin() +
+    if (same_inventory) {
+        auto staged = source.stacks;
+        if (request.destination_slot < staged.size()) {
+            staged[request.source_slot].count -= request.count;
+            staged[request.destination_slot].count += request.count;
+        } else {
+            auto moved_stack = staged[request.source_slot];
+            moved_stack.count = request.count;
+            staged[request.source_slot].count -= request.count;
+            staged.push_back(std::move(moved_stack));
+        }
+        if (staged[request.source_slot].count == 0) {
+            staged.erase(
+                staged.begin() +
+                static_cast<std::vector<items::ItemStack>::difference_type>(request.source_slot));
+        }
+        source.stacks.swap(staged);
+        return core::Status::ok();
+    }
+
+    auto staged_source = source.stacks;
+    auto staged_destination = destination.stacks;
+    if (request.destination_slot < staged_destination.size()) {
+        staged_source[request.source_slot].count -= request.count;
+        staged_destination[request.destination_slot].count += request.count;
+    } else {
+        auto moved_stack = staged_source[request.source_slot];
+        moved_stack.count = request.count;
+        staged_source[request.source_slot].count -= request.count;
+        staged_destination.push_back(std::move(moved_stack));
+    }
+    if (staged_source[request.source_slot].count == 0) {
+        staged_source.erase(
+            staged_source.begin() +
             static_cast<std::vector<items::ItemStack>::difference_type>(request.source_slot));
     }
-
+    source.stacks.swap(staged_source);
+    destination.stacks.swap(staged_destination);
     return core::Status::ok();
 }
 
