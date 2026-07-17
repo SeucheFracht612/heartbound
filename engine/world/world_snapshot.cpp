@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -75,14 +76,17 @@ template <typename T, typename Less>
     for (const auto& cargo : snapshot.cargo_records) {
         visit(cargo.cargo_id);
     }
+    for (const auto& workpiece : snapshot.workpieces) {
+        visit(core::SaveId::from_value(workpiece.workpiece_id.value()));
+    }
     for (const auto& assembly : snapshot.assemblies) {
         visit(assembly.assembly_id);
     }
+    for (const auto& fire : snapshot.fires) {
+        visit(fire.fire_id);
+    }
     for (const auto& missing : snapshot.missing_prototypes) {
-        if (missing.kind == MissingPrototypeKind::build_piece ||
-            missing.kind == MissingPrototypeKind::entity ||
-            missing.kind == MissingPrototypeKind::cargo ||
-            missing.kind == MissingPrototypeKind::assembly) {
+        if (missing.kind != MissingPrototypeKind::process) {
             visit(core::SaveId::from_value(missing.stable_id));
         }
     }
@@ -96,7 +100,24 @@ template <typename T, typename Less>
             max_id = process.process_id.value();
         }
     }
+    for (const auto& missing : snapshot.missing_prototypes) {
+        if (missing.kind == MissingPrototypeKind::process && missing.stable_id > max_id) {
+            max_id = missing.stable_id;
+        }
+    }
     return max_id;
+}
+
+[[nodiscard]] core::Result<std::uint64_t> next_allocator_value(std::uint64_t configured_next,
+                                                               std::uint64_t maximum_used,
+                                                               std::string_view allocator_name) {
+    if (maximum_used == std::numeric_limits<std::uint64_t>::max()) {
+        return core::Result<std::uint64_t>::failure("world_snapshot.id_range_exhausted",
+                                                    std::string(allocator_name) +
+                                                        " id range is exhausted by the snapshot");
+    }
+    return core::Result<std::uint64_t>::success(
+        std::max(configured_next, maximum_used + std::uint64_t{1}));
 }
 
 } // namespace
@@ -254,16 +275,25 @@ core::Result<WorldState> WorldSnapshotBridge::import_snapshot(const save::SaveSn
                                                  metadata_status.error().message);
     }
 
-    const auto next_save_id = std::max(config.next_save_id, max_snapshot_save_id(snapshot) + 1);
-    const auto next_process_id =
-        std::max(config.next_process_id, max_snapshot_process_id(snapshot) + 1);
+    auto next_save_id =
+        next_allocator_value(config.next_save_id, max_snapshot_save_id(snapshot), "save");
+    if (!next_save_id) {
+        return core::Result<WorldState>::failure(next_save_id.error().code,
+                                                 next_save_id.error().message);
+    }
+    auto next_process_id =
+        next_allocator_value(config.next_process_id, max_snapshot_process_id(snapshot), "process");
+    if (!next_process_id) {
+        return core::Result<WorldState>::failure(next_process_id.error().code,
+                                                 next_process_id.error().message);
+    }
     WorldStateDesc desc;
     desc.metadata = snapshot.metadata;
     desc.voxel_palette = snapshot.voxel_palette;
-    desc.next_save_id = next_save_id;
+    desc.next_save_id = next_save_id.value();
     desc.next_runtime_handle = config.next_runtime_handle;
     desc.next_entity_net_id = config.next_entity_net_id;
-    desc.next_process_id = next_process_id;
+    desc.next_process_id = next_process_id.value();
     WorldState state(desc);
 
     std::set<std::uint64_t> save_ids;

@@ -80,6 +80,7 @@
 #include "engine/world/replication_interest.hpp"
 #include "engine/world/simulation_subjects.hpp"
 #include "engine/world/streaming/chunk_streamer.hpp"
+#include "engine/world/voxel_change.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/world_commands.hpp"
@@ -9717,7 +9718,7 @@ void test_world_command_registry() {
     assert(voxel_result);
     assert(voxel_result.value().committed_world_mutation);
     assert(voxel_result.value().events.size() == 1);
-    assert(voxel_result.value().events.front().type == "world.voxel_changed");
+    assert(voxel_result.value().events.front().type == heartstead::world::voxel_changed_event_type);
     assert(voxel_result.value().reserved_ids.empty());
 
     auto voxel = state.chunks().get({0, 0, 0}, {2, 3, 4});

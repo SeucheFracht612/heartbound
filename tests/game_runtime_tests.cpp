@@ -4,6 +4,7 @@
 #include "engine/net/command_payload.hpp"
 #include "engine/scripting/script_host_event.hpp"
 #include "engine/scripting/script_runtime.hpp"
+#include "engine/world/voxel_change.hpp"
 #include "engine/world/world_commands.hpp"
 #include "engine/world/world_state.hpp"
 #include "game/runtime/game_inspection.hpp"
@@ -140,7 +141,8 @@ void test_game_runtime_starts_from_base_mod() {
     assert(dispatched_batch.value().reports[0].success);
     assert(dispatched_batch.value().reports[0].committed_world_mutation);
     assert(dispatched_batch.value().reports[0].events.size() == 1);
-    assert(dispatched_batch.value().reports[0].events.front().type == "world.voxel_changed");
+    assert(dispatched_batch.value().reports[0].events.front().type ==
+           heartstead::world::voxel_changed_event_type);
     assert(heartstead::game::validate_script_host_command_batch_result(dispatched_batch.value()));
     auto report_inspection =
         heartstead::game::GameInspector::inspect(dispatched_batch.value().reports[0]);

@@ -11,6 +11,7 @@
 #include "engine/workpieces/pattern_library.hpp"
 #include "engine/workpieces/workpiece_grid.hpp"
 #include "engine/workpieces/workpiece_state.hpp"
+#include "engine/world/voxel_change.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/world_state.hpp"
 
@@ -1177,6 +1178,16 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
         return core::Status::failure("world_command.missing_voxel_palette",
                                      "stable voxel intents require the authoritative palette");
 
+    const auto* chunk = context.world_state->chunks().find(payload.value().chunk);
+    auto previous = chunk->get(payload.value().voxel);
+    if (!previous) {
+        return core::Status::failure(previous.error().code, previous.error().message);
+    }
+    auto position = chunk_local_to_block(payload.value().chunk, payload.value().voxel);
+    if (!position) {
+        return core::Status::failure(position.error().code, position.error().message);
+    }
+
     VoxelCell cell = VoxelCell::air();
     if (payload.value().prototype_id.has_value()) {
         const auto* definition =
@@ -1198,6 +1209,18 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
         return status;
     }
 
+    chunk = context.world_state->chunks().find(payload.value().chunk);
+    if (chunk == nullptr) {
+        return core::Status::failure("world_command.chunk_not_loaded",
+                                     "voxel edit removed its resident chunk unexpectedly");
+    }
+    const VoxelChangeRecord change{position.value(), previous.value(), cell, chunk->identity(),
+                                   chunk->content_revision()};
+    status = change.validate();
+    if (!status) {
+        return status;
+    }
+
     status = operation.record_mutation("set terrain voxel");
     if (!status) {
         return status;
@@ -1205,7 +1228,8 @@ resolve_process_modifiers(const WorldState& state, const modding::PrototypeRegis
     operation.record_derived_update("chunk_mesh");
     operation.record_derived_update("chunk_collision");
     operation.record_derived_update("chunk_lighting");
-    operation.emit_event({"world.voxel_changed", {}, envelope.payload});
+    operation.emit_event(
+        {std::string(voxel_changed_event_type), {}, VoxelChangeTextCodec::encode(change)});
     operation.mark_replication_dirty();
     operation.mark_save_dirty();
     return core::Status::ok();

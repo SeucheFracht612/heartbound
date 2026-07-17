@@ -3,11 +3,17 @@
 #include "engine/net/server_command.hpp"
 #include "engine/processes/process.hpp"
 #include "engine/save/save_compatibility.hpp"
+#include "engine/save/save_snapshot.hpp"
+#include "engine/simulation/fire.hpp"
+#include "engine/workpieces/workpiece_codec.hpp"
 #include "engine/world/chunks/chunk_database.hpp"
 #include "engine/world/chunks/chunk_edit_delta_codec.hpp"
+#include "engine/world/replication_delta.hpp"
 #include "engine/world/streaming/chunk_streamer.hpp"
+#include "engine/world/voxel_change.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/world_commands.hpp"
+#include "engine/world/world_snapshot.hpp"
 #include "engine/world/world_state.hpp"
 
 #include <algorithm>
@@ -222,6 +228,27 @@ void test_world_set_voxel_rejects_unloaded_chunk() {
     assert(state.chunks().insert_generated(std::move(loaded)));
     auto accepted = dispatcher.dispatch(command, context);
     assert(accepted);
+    assert(accepted.value().events.size() == 1);
+    assert(accepted.value().events.front().type == heartstead::world::voxel_changed_event_type);
+    auto change =
+        heartstead::world::VoxelChangeTextCodec::decode(accepted.value().events.front().message);
+    assert(change);
+    assert((change.value().position == heartstead::world::BlockCoord{289, 2, 3}));
+    assert(change.value().previous == heartstead::world::VoxelCell::air());
+    assert(change.value().current.type == 6);
+
+    heartstead::net::ReplicationBatch batch;
+    batch.command_sequence = command.sequence;
+    batch.command_type = command.type;
+    batch.events = accepted.value().events;
+    auto delta = heartstead::world::materialize_replication_delta(state, batch);
+    heartstead::world::WorldState client_state;
+    auto applied = heartstead::world::apply_replication_delta(client_state, delta);
+    assert(applied);
+    assert(applied.value().voxel_edits_applied == 1);
+    auto replicated = client_state.chunks().get({9, 0, 0}, {1, 2, 3});
+    assert(replicated);
+    assert(replicated.value().type == 6);
 }
 
 void test_process_advance_all_is_atomic() {
@@ -257,6 +284,57 @@ void test_process_advance_all_is_atomic() {
     }
 }
 
+void test_snapshot_allocator_recovery_is_complete_and_overflow_safe() {
+    using namespace heartstead;
+
+    save::SaveSnapshot snapshot;
+    snapshot.metadata.game_version = "allocator_recovery_test";
+
+    auto grid = workpieces::WorkpieceGrid::create({1, 1, 1});
+    assert(grid);
+    snapshot.workpieces.push_back({core::WorkpieceId::from_value(700),
+                                   core::PrototypeId::parse("test:workpieces/recovery").value(),
+                                   {1, 1, 1},
+                                   workpieces::WorkpieceGridTextCodec::encode(grid.value())});
+    snapshot.fires.push_back({core::SaveId::from_value(800),
+                              core::PrototypeId::parse("test:fire/recovery").value(),
+                              simulation::FireState::unlit});
+    snapshot.missing_prototypes.push_back(
+        {world::MissingPrototypeKind::workpiece,
+         900,
+         core::PrototypeId::parse("missing:workpieces/recovery").value(),
+         {},
+         {},
+         "saved",
+         "test"});
+    snapshot.missing_prototypes.push_back(
+        {world::MissingPrototypeKind::process,
+         1'000,
+         core::PrototypeId::parse("missing:processes/recovery").value(),
+         {},
+         {},
+         "saved",
+         "test"});
+
+    auto imported = world::WorldSnapshotBridge::import_snapshot(snapshot);
+    assert(imported);
+    assert(imported.value().save_ids().peek_next() == core::SaveId::from_value(901));
+    assert(imported.value().process_ids().peek_next() == core::ProcessId::from_value(1'001));
+
+    auto exhausted_save_ids = snapshot;
+    exhausted_save_ids.missing_prototypes[0].stable_id = std::numeric_limits<std::uint64_t>::max();
+    auto rejected_save_ids = world::WorldSnapshotBridge::import_snapshot(exhausted_save_ids);
+    assert(!rejected_save_ids);
+    assert(rejected_save_ids.error().code == "world_snapshot.id_range_exhausted");
+
+    auto exhausted_process_ids = snapshot;
+    exhausted_process_ids.missing_prototypes[1].stable_id =
+        std::numeric_limits<std::uint64_t>::max();
+    auto rejected_process_ids = world::WorldSnapshotBridge::import_snapshot(exhausted_process_ids);
+    assert(!rejected_process_ids);
+    assert(rejected_process_ids.error().code == "world_snapshot.id_range_exhausted");
+}
+
 void test_palette_fingerprint_changes_are_blocking() {
     heartstead::save::SaveMetadata metadata;
     metadata.game_version = "test";
@@ -290,6 +368,7 @@ int main() {
     test_stream_reload_preserves_one_canonical_delta();
     test_world_set_voxel_rejects_unloaded_chunk();
     test_process_advance_all_is_atomic();
+    test_snapshot_allocator_recovery_is_complete_and_overflow_safe();
     test_palette_fingerprint_changes_are_blocking();
     return 0;
 }
