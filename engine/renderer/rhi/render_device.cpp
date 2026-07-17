@@ -12,6 +12,7 @@
 #include <ranges>
 #include <set>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -812,6 +813,165 @@ class HeadlessRenderDevice final : public IRenderDevice {
     std::unordered_map<std::string, RenderPipelineLayoutDesc> pipeline_layouts_;
 };
 
+class OwnerThreadRenderDevice final : public IRenderDevice {
+  public:
+    explicit OwnerThreadRenderDevice(std::unique_ptr<IRenderDevice> implementation)
+        : implementation_(std::move(implementation)), owner_thread_(std::this_thread::get_id()) {}
+
+    [[nodiscard]] RenderBackend backend() const noexcept override {
+        return implementation_->backend();
+    }
+
+    [[nodiscard]] std::string_view backend_name() const noexcept override {
+        return implementation_->backend_name();
+    }
+
+    [[nodiscard]] RenderDeviceCapabilities capabilities() const noexcept override {
+        return implementation_->capabilities();
+    }
+
+    [[nodiscard]] RenderExtent current_extent() const noexcept override {
+        return implementation_->current_extent();
+    }
+
+    [[nodiscard]] std::uint64_t completed_frame_count() const noexcept override {
+        return implementation_->completed_frame_count();
+    }
+
+    [[nodiscard]] std::uint64_t last_submission_serial() const noexcept override {
+        return implementation_->last_submission_serial();
+    }
+
+    [[nodiscard]] std::uint64_t completed_submission_serial() const noexcept override {
+        return implementation_->completed_submission_serial();
+    }
+
+    [[nodiscard]] std::size_t live_resource_count() const noexcept override {
+        return implementation_->live_resource_count();
+    }
+
+    [[nodiscard]] core::Status resize(RenderExtent extent) override {
+        return invoke_status([&] { return implementation_->resize(extent); });
+    }
+
+    [[nodiscard]] core::Result<RenderFrameStats> render_frame(RenderFrameDesc desc) override {
+        return invoke<RenderFrameStats>([&] { return implementation_->render_frame(desc); });
+    }
+
+    [[nodiscard]] core::Result<RenderFrameStats>
+    execute_frame_plan(const RenderFramePlan& plan) override {
+        return invoke<RenderFrameStats>(
+            [&] { return implementation_->execute_frame_plan(plan); });
+    }
+
+    [[nodiscard]] core::Result<RenderFrameStats>
+    execute_frame(const RenderFrameSubmission& frame) override {
+        return invoke<RenderFrameStats>([&] { return implementation_->execute_frame(frame); });
+    }
+
+    [[nodiscard]] core::Result<RenderBufferCreateStats>
+    create_buffer(RenderBufferDesc desc) override {
+        return invoke<RenderBufferCreateStats>(
+            [&] { return implementation_->create_buffer(std::move(desc)); });
+    }
+
+    [[nodiscard]] core::Result<RenderBufferBatchUploadStats>
+    upload_buffer_batch(std::span<const RenderBufferWrite> writes) override {
+        return invoke<RenderBufferBatchUploadStats>(
+            [&] { return implementation_->upload_buffer_batch(writes); });
+    }
+
+    [[nodiscard]] core::Result<RenderUploadStats>
+    upload_buffer(RenderBufferDesc desc, std::span<const std::byte> bytes) override {
+        return invoke<RenderUploadStats>(
+            [&] { return implementation_->upload_buffer(std::move(desc), bytes); });
+    }
+
+    [[nodiscard]] core::Result<RenderImageUploadStats>
+    upload_image(RenderImageDesc desc, std::span<const std::byte> bytes) override {
+        return invoke<RenderImageUploadStats>(
+            [&] { return implementation_->upload_image(std::move(desc), bytes); });
+    }
+
+    [[nodiscard]] core::Result<RenderSamplerCreateStats>
+    create_sampler(RenderSamplerDesc desc) override {
+        return invoke<RenderSamplerCreateStats>(
+            [&] { return implementation_->create_sampler(std::move(desc)); });
+    }
+
+    [[nodiscard]] core::Result<RenderShaderModuleStats>
+    create_shader_module(RenderShaderModuleDesc desc,
+                         std::span<const std::uint32_t> spirv_words) override {
+        return invoke<RenderShaderModuleStats>([&] {
+            return implementation_->create_shader_module(std::move(desc), spirv_words);
+        });
+    }
+
+    [[nodiscard]] core::Result<RenderPipelineLayoutStats>
+    bind_pipeline_layout(RenderPipelineLayoutDesc desc) override {
+        return invoke<RenderPipelineLayoutStats>(
+            [&] { return implementation_->bind_pipeline_layout(std::move(desc)); });
+    }
+
+    [[nodiscard]] core::Result<RenderComputePipelineStats>
+    create_compute_pipeline(RenderComputePipelineDesc desc) override {
+        return invoke<RenderComputePipelineStats>(
+            [&] { return implementation_->create_compute_pipeline(std::move(desc)); });
+    }
+
+    [[nodiscard]] core::Result<RenderGraphicsPipelineStats>
+    create_graphics_pipeline(RenderGraphicsPipelineDesc desc) override {
+        return invoke<RenderGraphicsPipelineStats>(
+            [&] { return implementation_->create_graphics_pipeline(std::move(desc)); });
+    }
+
+    [[nodiscard]] core::Result<RenderDescriptorWriteStats>
+    write_descriptors(std::span<const RenderDescriptorWrite> writes) override {
+        return invoke<RenderDescriptorWriteStats>(
+            [&] { return implementation_->write_descriptors(writes); });
+    }
+
+    [[nodiscard]] core::Result<RenderDrawStats>
+    bind_mesh_draws(std::span<const RenderMeshBinding> draws) override {
+        return invoke<RenderDrawStats>([&] { return implementation_->bind_mesh_draws(draws); });
+    }
+
+    [[nodiscard]] core::Status release_resource(RenderResourceHandle handle) override {
+        return invoke_status([&] { return implementation_->release_resource(handle); });
+    }
+
+  private:
+    [[nodiscard]] core::Status require_owner_thread() const {
+        if (std::this_thread::get_id() != owner_thread_) {
+            return core::Status::failure(
+                "renderer.render_device_wrong_thread",
+                "render device mutations must run on the thread that created the device");
+        }
+        return core::Status::ok();
+    }
+
+    template <typename Callback>
+    [[nodiscard]] core::Status invoke_status(Callback&& callback) {
+        auto status = require_owner_thread();
+        if (!status) {
+            return status;
+        }
+        return std::forward<Callback>(callback)();
+    }
+
+    template <typename Value, typename Callback>
+    [[nodiscard]] core::Result<Value> invoke(Callback&& callback) {
+        auto status = require_owner_thread();
+        if (!status) {
+            return core::Result<Value>::failure(status.error().code, status.error().message);
+        }
+        return std::forward<Callback>(callback)();
+    }
+
+    std::unique_ptr<IRenderDevice> implementation_;
+    std::thread::id owner_thread_;
+};
+
 } // namespace
 
 bool RenderExtent::is_valid() const noexcept {
@@ -828,9 +988,17 @@ core::Result<std::unique_ptr<IRenderDevice>> create_render_device(RenderDeviceDe
     switch (desc.backend) {
     case RenderBackend::headless:
         return core::Result<std::unique_ptr<IRenderDevice>>::success(
-            std::make_unique<HeadlessRenderDevice>(std::move(desc)));
-    case RenderBackend::vulkan:
-        return heartstead::renderer::vulkan::create_device(std::move(desc));
+            std::make_unique<OwnerThreadRenderDevice>(
+                std::make_unique<HeadlessRenderDevice>(std::move(desc))));
+    case RenderBackend::vulkan: {
+        auto implementation = heartstead::renderer::vulkan::create_device(std::move(desc));
+        if (!implementation) {
+            return core::Result<std::unique_ptr<IRenderDevice>>::failure(
+                implementation.error().code, implementation.error().message);
+        }
+        return core::Result<std::unique_ptr<IRenderDevice>>::success(
+            std::make_unique<OwnerThreadRenderDevice>(std::move(implementation).value()));
+    }
     }
 
     return core::Result<std::unique_ptr<IRenderDevice>>::failure("renderer.unknown_backend",
