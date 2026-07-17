@@ -26,8 +26,9 @@ Implemented foundation:
 
 `WorldState` owns one `RegionGraph`, but region descriptors are not terrain voxels and are
 not stored in chunk cells. Chunks remain the streamed editable mass layer. Regions describe
-worldgen/ecology/danger context that future generation, scenarios, navigation, and outpost
-systems can query.
+worldgen/ecology/danger context. `DeterministicTerrainGenerator` already resolves the configured
+region and its resource rules for terrain cells and external generated features; scenarios,
+navigation, and outpost systems can consume the same graph as they are implemented.
 
 The current graph is runtime data only. Save snapshots still persist chunk edits and
 authored object state; generated region data should remain reproducible from seed and mod

@@ -26,6 +26,9 @@ Implemented foundation:
   - dirty flag for rebuild scheduling
   - dirty-region marking for localized graph rebuild queues
   - reachability queries that ignore blocked edges
+  - `route_effects` breadth-first route summaries for reachable logistics nodes, including edge
+    count, bottleneck capacity, cart speed, animal stamina cost, pathfinding reliability, travel
+    safety, corpse recovery, and weather resistance derived from edge quality/capacity
   - node, edge, blocked-edge, and port counts for inspection/tooling
 
 - `SpatialNetworkDeriver`

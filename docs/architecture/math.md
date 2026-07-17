@@ -32,9 +32,18 @@ Implemented foundation:
   - `Bounds3f`
   - `Bounds3d`
 
-Build pieces now use the shared double-precision transform type through their existing
-`build::Vec3` and `build::Transform` names. Physics now uses the shared float vector
-type through `physics::Vec3`.
+- `Mat4f` and `Vec4f`
+  - column-major storage and column-vector multiplication matching the default GLSL layout
+  - matrix/matrix and matrix/vector multiplication
+  - translation, scale, Euler rotation, transform, bounds-transform, Vulkan-depth perspective,
+    view, and camera-direction helpers
+  - finite checks for data passed to rendering
+
+Build pieces and entities retain the shared `Vec3d` alias, but their authoritative `Transform`
+aliases `world::WorldTransform`: an exact signed-64-bit block anchor plus a normalized local offset,
+with double-precision rotation and scale. This prevents large-world positions from collapsing into a
+single imprecise global floating-point coordinate. Physics uses the shared float vector type through
+`physics::Vec3`.
 
 This layer should remain small and dependency-light. Renderer, physics, world, save,
 debug, and gameplay code should depend on these stable primitives instead of inventing

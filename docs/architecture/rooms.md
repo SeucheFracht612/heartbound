@@ -61,5 +61,5 @@ room extraction work instead of treating every mutation as a full graph rebuild.
 Future work:
 
 - portal-aware room extraction
-- smoke, heat, light, ventilation, ward, road, and storage graph inputs
+- live smoke/heat sources and graph-backed light, ventilation, ward, road, and storage updates
 - room overlays and extraction sandboxing from terrain/build-piece data
