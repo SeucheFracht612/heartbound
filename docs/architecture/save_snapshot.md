@@ -35,7 +35,8 @@ The validator checks:
   invariants
 - duplicate workpiece ids
 - duplicate process ids
-- duplicate fire ids and fire state/time invariants
+- duplicate fire owner/component ids within the fire section and fire state/time invariants; a
+  fire id is not a second globally unique world object id
 - duplicate mod state keys
 - missing-prototype placeholder shape and per-kind/stable-id uniqueness
 - prototype references through `PrototypeRegistry`

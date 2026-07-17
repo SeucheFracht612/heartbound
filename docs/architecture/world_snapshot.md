@@ -29,9 +29,11 @@ Implemented foundation:
     remains runtime-owned rather than part of serialization
   - restored entities must have valid saved identity, prototype ids, known entity kinds, and
     finite non-zero-scale transforms
-  - the save id allocator resumes past build, entity, cargo, workpiece, assembly, fire, and
-    non-process placeholder ids; the process allocator independently resumes past process and
-    missing-process ids
+  - the save id allocator resumes past globally identified objects, workpieces, and non-process
+    placeholder ids; the process allocator independently resumes past process and missing-process
+    ids
+  - a fire id is an owner/component key unique inside the fire store, not an independent globally
+    allocated object id
   - allocator exhaustion at `u64` maximum is rejected
   - inventory and process owners must reference saved world objects
   - inventory stacks must have valid prototype ids and counts within their saved max count
