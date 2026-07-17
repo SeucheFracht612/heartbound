@@ -29,6 +29,18 @@ cmake --build --preset default-debug-werror
 ctest --preset default-debug-werror
 ```
 
+Pin the strict build to each supported Linux compiler when checking portability-sensitive changes:
+
+```bash
+cmake --preset linux-clang-debug-werror
+cmake --build --preset linux-clang-debug-werror
+ctest --preset linux-clang-debug-werror
+
+cmake --preset linux-gcc-debug-werror
+cmake --build --preset linux-gcc-debug-werror
+ctest --preset linux-gcc-debug-werror
+```
+
 AddressSanitizer plus UndefinedBehaviorSanitizer build:
 
 ```bash
@@ -45,8 +57,8 @@ cmake --build --preset linux-clang-tsan
 ctest --preset linux-clang-tsan
 ```
 
-The sanitizer presets use Clang and disable Vulkan so the checks focus on Heartstead-owned
-foundation code instead of graphics driver behavior. Use `linux-clang-asan` for memory and
+The sanitizer presets use Clang, enable warnings-as-errors, and disable Vulkan so the checks focus
+on Heartstead-owned foundation code instead of graphics driver behavior. Use `linux-clang-asan` for memory and
 undefined-behavior checks. Use `linux-clang-tsan` separately for data-race checks; it cannot be
 combined with AddressSanitizer. The ASan CTest preset disables LeakSanitizer detection because
 managed/debugger-style environments can run tests under `ptrace`, where LeakSanitizer aborts at

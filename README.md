@@ -223,11 +223,15 @@ Additional guardrail presets:
 
 ```bash
 ctest --preset default-debug-werror
+ctest --preset linux-clang-debug-werror
+ctest --preset linux-gcc-debug-werror
 ctest --preset linux-clang-asan
 ctest --preset linux-clang-tsan
 ```
 
-The sanitizer presets use Clang and keep Vulkan disabled so they focus on engine foundation code.
+The compiler-specific warning presets make the GCC/Clang matrix reproducible instead of depending
+on the host default compiler. The sanitizer presets use Clang, treat warnings as errors, and keep
+Vulkan disabled so they focus on engine foundation code.
 The ASan CTest preset disables LeakSanitizer startup checks for managed/debugger-style test
 environments.
 

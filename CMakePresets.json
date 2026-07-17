@@ -44,6 +44,15 @@
       }
     },
     {
+      "name": "linux-clang-debug-werror",
+      "displayName": "Linux Clang Debug Warnings As Errors",
+      "inherits": "linux-clang-debug",
+      "binaryDir": "${sourceDir}/build/linux-clang-debug-werror",
+      "cacheVariables": {
+        "HEARTSTEAD_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
       "name": "linux-gcc-debug",
       "displayName": "Linux GCC Debug",
       "inherits": "default-debug",
@@ -53,9 +62,18 @@
       }
     },
     {
+      "name": "linux-gcc-debug-werror",
+      "displayName": "Linux GCC Debug Warnings As Errors",
+      "inherits": "linux-gcc-debug",
+      "binaryDir": "${sourceDir}/build/linux-gcc-debug-werror",
+      "cacheVariables": {
+        "HEARTSTEAD_WARNINGS_AS_ERRORS": "ON"
+      }
+    },
+    {
       "name": "linux-clang-asan",
       "displayName": "Linux Clang Address/Undefined Sanitizers",
-      "inherits": "linux-clang-debug",
+      "inherits": "linux-clang-debug-werror",
       "binaryDir": "${sourceDir}/build/linux-clang-asan",
       "cacheVariables": {
         "HEARTSTEAD_ENABLE_VULKAN": "OFF",
@@ -65,7 +83,7 @@
     {
       "name": "linux-clang-tsan",
       "displayName": "Linux Clang Thread Sanitizer",
-      "inherits": "linux-clang-debug",
+      "inherits": "linux-clang-debug-werror",
       "binaryDir": "${sourceDir}/build/linux-clang-tsan",
       "cacheVariables": {
         "HEARTSTEAD_ENABLE_VULKAN": "OFF",
@@ -91,8 +109,16 @@
       "configurePreset": "linux-clang-debug"
     },
     {
+      "name": "linux-clang-debug-werror",
+      "configurePreset": "linux-clang-debug-werror"
+    },
+    {
       "name": "linux-gcc-debug",
       "configurePreset": "linux-gcc-debug"
+    },
+    {
+      "name": "linux-gcc-debug-werror",
+      "configurePreset": "linux-gcc-debug-werror"
     },
     {
       "name": "linux-clang-asan",
@@ -133,8 +159,22 @@
       }
     },
     {
+      "name": "linux-clang-debug-werror",
+      "configurePreset": "linux-clang-debug-werror",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
       "name": "linux-gcc-debug",
       "configurePreset": "linux-gcc-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-gcc-debug-werror",
+      "configurePreset": "linux-gcc-debug-werror",
       "output": {
         "outputOnFailure": true
       }
