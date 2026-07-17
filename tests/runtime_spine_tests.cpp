@@ -306,7 +306,7 @@ void test_local_runtime_advances_authority_through_loopback() {
     assert(frame.value().server_ticks.front().commands.command_reports.size() == 1);
     assert(frame.value().server_ticks.front().commands.command_reports.front().success);
     assert(frame.value().client.command_result_count == 1);
-    assert(frame.value().authoritative_world_tick == 1);
+    assert(frame.value().authoritative_world_tick == 0);
     assert(runtime.session()->server()->events().is_sealed());
 
     auto voxel = runtime.session()->server()->world().chunks().get({0, 0, 0}, {1, 2, 3});
@@ -386,7 +386,7 @@ void test_dedicated_headless_runtime_uses_same_scheduler() {
     assert(frame);
     assert(frame.value().fixed_step.step_count == 3);
     assert(frame.value().server_ticks.size() == 3);
-    assert(frame.value().authoritative_world_tick == 3);
+    assert(frame.value().authoritative_world_tick == 1);
     const auto names = runtime.session()->server()->scheduler().ordered_system_names();
     assert(names.front() == "runtime.command_gateway");
     assert(names.back() == "runtime.replication");
@@ -819,6 +819,10 @@ void test_runtime_configuration_rejects_invalid_compositions() {
     headless_renderer.create_renderer = true;
     headless_renderer.headless = true;
     assert(!headless_renderer.validate());
+
+    game::RuntimeConfiguration invalid_world_time;
+    invalid_world_time.world_time.ticks_per_second = 0;
+    assert(!invalid_world_time.validate());
 }
 
 } // namespace

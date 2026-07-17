@@ -8,6 +8,7 @@
 #include "engine/save/save_database.hpp"
 #include "engine/save/save_snapshot.hpp"
 #include "engine/simulation/fixed_step.hpp"
+#include "engine/simulation/world_time.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "game/features/interaction/voxel_commands.hpp"
 #include "game/framework/gameplay_module.hpp"
@@ -31,6 +32,7 @@ struct RuntimeConfiguration {
     bool use_in_memory_transport = true;
     bool headless = true;
     simulation::FixedStepConfig fixed_step{};
+    simulation::WorldTimeConfig world_time{};
     physics::PhysicsBackend physics_backend = physics::PhysicsBackend::headless;
     std::vector<std::shared_ptr<IGameplayModule>> gameplay_modules;
 

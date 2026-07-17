@@ -222,6 +222,10 @@ debug::InspectionData GameInspector::inspect(const RuntimeSession& session) {
     add_field(data, "has_client", session.client() != nullptr ? "true" : "false");
     add_field(data, "in_memory_transport", config.use_in_memory_transport ? "true" : "false");
     add_field(data, "ticks_per_second", std::to_string(config.fixed_step.ticks_per_second));
+    add_field(data, "fixed_step_ticks_per_second",
+              std::to_string(config.fixed_step.ticks_per_second));
+    add_field(data, "world_ticks_per_second",
+              std::to_string(config.world_time.ticks_per_second));
     add_field(data, "persistence_mode", "explicit_snapshot");
     add_field(data, "pending_save_count", "0");
     add_field(data, "faulted", fault.has_value() ? "true" : "false");

@@ -9,6 +9,7 @@
 #include "engine/save/save_snapshot.hpp"
 #include "engine/scenarios/scenario.hpp"
 #include "engine/simulation/simulation_scheduler.hpp"
+#include "engine/simulation/world_time.hpp"
 #include "engine/world/replication_delta.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "engine/world/world_state.hpp"
@@ -25,6 +26,8 @@ struct ServerRuntimeDesc {
     world::WorldStateDesc world;
     net::HostSessionConfig host;
     physics::PhysicsWorldDesc physics;
+    std::uint32_t simulation_ticks_per_second = 60;
+    simulation::WorldTimeConfig world_time;
     const modding::PrototypeRegistry* prototypes = nullptr;
     const world::VoxelPalette* voxel_palette = nullptr;
     scenarios::ScenarioDefinition scenario;
@@ -137,6 +140,7 @@ class ServerRuntime final {
     std::uint32_t current_movement_snapshot_count_ = 0;
     std::uint32_t current_player_tombstone_count_ = 0;
     std::int64_t current_time_ms_ = 0;
+    std::uint64_t pending_world_time_numerator_ = 0;
     bool spawn_area_initialized_ = false;
     std::uint64_t next_custom_replication_sequence_ = 1;
 };

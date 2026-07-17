@@ -32,6 +32,16 @@ core::Result<std::unique_ptr<ServerRuntime>> ServerRuntime::create(ServerRuntime
         return core::Result<std::unique_ptr<ServerRuntime>>::failure(
             scenario_status.error().code, scenario_status.error().message);
     }
+    if (desc.simulation_ticks_per_second == 0 || desc.simulation_ticks_per_second > 1000) {
+        return core::Result<std::unique_ptr<ServerRuntime>>::failure(
+            "server_runtime.invalid_simulation_rate",
+            "authoritative simulation rate must be between 1 and 1000 Hz");
+    }
+    auto world_time_status = desc.world_time.validate();
+    if (!world_time_status) {
+        return core::Result<std::unique_ptr<ServerRuntime>>::failure(
+            world_time_status.error().code, world_time_status.error().message);
+    }
     auto runtime = std::unique_ptr<ServerRuntime>(new ServerRuntime(std::move(desc)));
     auto status = runtime->initialize();
     if (!status) {
@@ -181,7 +191,13 @@ core::Status ServerRuntime::initialize() {
         "runtime.world_clock",
         simulation::SimulationPhase::environment,
         {"runtime.physics"},
-        [this](simulation::SimulationContext&) { return world_.advance_world_time(1); },
+        [this](simulation::SimulationContext&) {
+            pending_world_time_numerator_ += desc_.world_time.ticks_per_second;
+            const auto elapsed_world_ticks =
+                pending_world_time_numerator_ / desc_.simulation_ticks_per_second;
+            pending_world_time_numerator_ %= desc_.simulation_ticks_per_second;
+            return world_.advance_world_time(elapsed_world_ticks);
+        },
     });
     if (!status) {
         return status;
