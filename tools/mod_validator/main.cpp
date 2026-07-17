@@ -251,10 +251,13 @@ int main(int argc, char** argv) {
         log_kind_count(report, modding::PrototypeKinds::cargo);
         log_kind_count(report, modding::PrototypeKinds::entity);
         log_kind_count(report, modding::PrototypeKinds::voxel);
+        log_kind_count(report, modding::PrototypeKinds::block_model);
         log_kind_count(report, modding::PrototypeKinds::build_piece);
         log_kind_count(report, modding::PrototypeKinds::assembly);
         log_kind_count(report, modding::PrototypeKinds::workpiece);
+        log_kind_count(report, modding::PrototypeKinds::pattern);
         log_kind_count(report, modding::PrototypeKinds::process);
+        log_kind_count(report, modding::PrototypeKinds::fire);
         log_kind_count(report, modding::PrototypeKinds::room_descriptor);
         log_kind_count(report, modding::PrototypeKinds::material);
         log_kind_count(report, modding::PrototypeKinds::scenario);

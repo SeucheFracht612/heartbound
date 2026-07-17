@@ -130,6 +130,7 @@ int main(int argc, char** argv) {
         log_kind_summary(report, modding::PrototypeKinds::pattern);
         log_kind_summary(report, modding::PrototypeKinds::process);
         log_kind_summary(report, modding::PrototypeKinds::fire);
+        log_kind_summary(report, modding::PrototypeKinds::room_descriptor);
         log_kind_summary(report, modding::PrototypeKinds::material);
         log_kind_summary(report, modding::PrototypeKinds::scenario);
 
