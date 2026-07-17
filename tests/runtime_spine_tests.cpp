@@ -110,6 +110,57 @@ void test_dedicated_headless_runtime_uses_same_scheduler() {
     assert(runtime.shutdown());
 }
 
+void test_authoritative_player_input_moves_and_replicates() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    game::RuntimeConfiguration config;
+    config.fixed_step = {60, 4, 250'000};
+    assert(runtime.start_session(config, make_session_request(report)));
+
+    auto* session = runtime.session();
+    assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
+    const auto client_id = session->client()->client_id();
+    const auto* player_before = session->server()->player_for_client(client_id);
+    assert(player_before != nullptr);
+    const auto player_net_id = player_before->net_id;
+    const auto start = player_before->state.position;
+
+    movement::PlayerInputFrame input;
+    input.tick = 1;
+    input.sequence = 1;
+    input.move_z = 32'767;
+    assert(session->submit_player_input(input, 10));
+    auto frame = runtime.run_frame({16'667, 17});
+    assert(frame);
+    assert(frame.value().server_ticks.size() == 1);
+    const auto& tick = frame.value().server_ticks.front();
+    assert(tick.commands.command_reports.size() == 1);
+    assert(tick.commands.command_reports.front().success);
+    assert(!tick.commands.command_reports.front().committed_world_mutation);
+    assert(tick.moved_player_count == 1);
+    assert(tick.movement_snapshot_count == 1);
+    assert(session->server()->events().character_moved.size() == 1);
+
+    const auto* player_after = session->server()->player_for_client(client_id);
+    assert(player_after != nullptr);
+    assert(player_after->state.position.relative_to(start.anchor).z > start.local_offset.z);
+    const auto* snapshot = session->client()->player_snapshot(player_net_id);
+    assert(snapshot != nullptr);
+    assert(snapshot->state.position == player_after->state.position);
+    assert(snapshot->last_processed_input_sequence == 1);
+
+    auto repeated = runtime.run_frame({16'667, 34});
+    assert(repeated && repeated.value().server_ticks.size() == 1);
+    assert(repeated.value().server_ticks.front().repeated_input_count == 1);
+    assert(repeated.value().server_ticks.front().movement_snapshot_count == 1);
+    const auto* repeated_player = session->server()->player_for_client(client_id);
+    assert(repeated_player != nullptr);
+    assert(repeated_player->state.last_input_sequence == 1);
+    assert(repeated_player->state.simulation_tick == 2);
+    assert(runtime.shutdown());
+}
+
 void test_runtime_configuration_rejects_invalid_compositions() {
     game::RuntimeConfiguration empty;
     empty.create_server = false;
@@ -133,6 +184,7 @@ void test_runtime_configuration_rejects_invalid_compositions() {
 int main() {
     test_local_runtime_advances_authority_through_loopback();
     test_dedicated_headless_runtime_uses_same_scheduler();
+    test_authoritative_player_input_moves_and_replicates();
     test_runtime_configuration_rejects_invalid_compositions();
     return 0;
 }

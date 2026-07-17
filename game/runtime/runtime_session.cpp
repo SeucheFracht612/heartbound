@@ -174,6 +174,15 @@ core::Status RuntimeSession::submit_command(std::string type, std::string payloa
     return server_->submit_command(client_->client_id(), std::move(command).value());
 }
 
+core::Status RuntimeSession::submit_player_input(const movement::PlayerInputFrame& input,
+                                                 std::int64_t now_ms) {
+    auto status = input.validate();
+    if (!status) {
+        return status;
+    }
+    return submit_command("player.input", movement::PlayerInputTextCodec::encode(input), now_ms);
+}
+
 core::Status RuntimeSession::pump_client_messages() {
     if (server_ == nullptr || client_ == nullptr) {
         return core::Status::ok();

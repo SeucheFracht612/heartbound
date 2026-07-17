@@ -2,6 +2,8 @@
 
 #include "engine/entities/entity_world.hpp"
 #include "engine/modding/prototype_registry.hpp"
+#include "engine/movement/movement_prediction.hpp"
+#include "engine/movement/player_controller_store.hpp"
 #include "engine/net/host_session.hpp"
 #include "engine/physics/physics_world.hpp"
 #include "engine/simulation/simulation_scheduler.hpp"
@@ -11,6 +13,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <unordered_map>
 
 namespace heartstead::game {
 
@@ -27,6 +31,10 @@ struct ServerRuntimeTickStats {
     net::HostSessionTickResult commands;
     world::WorldReplicationDeltaDeliveryReport replication;
     physics::PhysicsStepStats physics;
+    std::uint32_t moved_player_count = 0;
+    std::uint32_t repeated_input_count = 0;
+    std::uint32_t movement_event_count = 0;
+    std::uint32_t movement_snapshot_count = 0;
 };
 
 class ServerRuntime final {
@@ -56,10 +64,28 @@ class ServerRuntime final {
     [[nodiscard]] net::HostSession& host() noexcept;
     [[nodiscard]] const simulation::SimulationScheduler& scheduler() const noexcept;
     [[nodiscard]] const simulation::TickEvents& events() const noexcept;
+    [[nodiscard]] movement::PlayerControllerStore& players() noexcept;
+    [[nodiscard]] const movement::PlayerControllerStore& players() const noexcept;
+    [[nodiscard]] movement::PlayerControllerRecord*
+    player_for_client(core::NetId client_id) noexcept;
+    [[nodiscard]] const movement::PlayerControllerRecord*
+    player_for_client(core::NetId client_id) const noexcept;
 
   private:
+    struct PlayerConnection {
+        core::RuntimeHandle runtime_handle;
+        entities::EntityId entity_id;
+        movement::ServerMovementInputQueue pending_inputs;
+        std::optional<movement::PlayerInputFrame> last_input;
+    };
+
     explicit ServerRuntime(ServerRuntimeDesc desc);
     [[nodiscard]] core::Status initialize();
+    [[nodiscard]] core::Status ensure_spawn_area();
+    [[nodiscard]] core::Status spawn_player(core::NetId client_id);
+    [[nodiscard]] core::Status simulate_players(simulation::SimulationContext& context);
+    [[nodiscard]] core::Status replicate_players();
+    [[nodiscard]] std::uint64_t collision_world_revision() const noexcept;
 
     ServerRuntimeDesc desc_;
     world::WorldState world_;
@@ -69,10 +95,18 @@ class ServerRuntime final {
     net::ServerCommandDispatcher commands_;
     simulation::SimulationScheduler scheduler_;
     simulation::TickEvents events_;
+    movement::PlayerController player_controller_;
+    movement::PlayerControllerStore players_;
+    std::unordered_map<std::uint64_t, PlayerConnection> player_connections_;
     net::HostSessionTickResult current_commands_;
     world::WorldReplicationDeltaDeliveryReport current_replication_;
     physics::PhysicsStepStats current_physics_;
+    std::uint32_t current_moved_player_count_ = 0;
+    std::uint32_t current_repeated_input_count_ = 0;
+    std::uint32_t current_movement_event_count_ = 0;
+    std::uint32_t current_movement_snapshot_count_ = 0;
     std::int64_t current_time_ms_ = 0;
+    bool spawn_area_initialized_ = false;
 };
 
 } // namespace heartstead::game

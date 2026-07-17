@@ -1,8 +1,12 @@
 #include "game/runtime/server_runtime.hpp"
 
+#include "engine/entities/entity_prototype.hpp"
 #include "engine/world/world_commands.hpp"
 
+#include <algorithm>
+#include <limits>
 #include <utility>
+#include <vector>
 
 namespace heartstead::game {
 
@@ -35,6 +39,25 @@ core::Status ServerRuntime::initialize() {
     if (!status) {
         return status;
     }
+    status = commands_.register_command(net::CommandDescriptor{
+        "player.input", false, true,
+        [this](const net::CommandEnvelope& command, const net::CommandExecutionContext&,
+               world::WorldOperation&) {
+            const auto found = player_connections_.find(command.sender.value());
+            if (found == player_connections_.end()) {
+                return core::Status::failure("server_runtime.player_not_connected",
+                                             "movement input sender has no active player");
+            }
+            auto input = movement::PlayerInputTextCodec::decode(command.payload);
+            if (!input) {
+                return core::Status::failure(input.error().code, input.error().message);
+            }
+            return found->second.pending_inputs.push(std::move(input).value());
+        },
+    });
+    if (!status) {
+        return status;
+    }
     status = scheduler_.register_system({
         "runtime.command_gateway", simulation::SimulationPhase::commands, {},
         [this](simulation::SimulationContext&) {
@@ -57,8 +80,16 @@ core::Status ServerRuntime::initialize() {
         return status;
     }
     status = scheduler_.register_system({
-        "runtime.physics", simulation::SimulationPhase::physics,
+        "runtime.character_movement", simulation::SimulationPhase::movement,
         {"runtime.command_gateway"},
+        [this](simulation::SimulationContext& context) { return simulate_players(context); },
+    });
+    if (!status) {
+        return status;
+    }
+    status = scheduler_.register_system({
+        "runtime.physics", simulation::SimulationPhase::physics,
+        {"runtime.character_movement"},
         [this](simulation::SimulationContext& context) {
             auto result = physics_->step(
                 physics::PhysicsStepDesc{static_cast<float>(context.fixed_delta_seconds)});
@@ -104,7 +135,7 @@ core::Status ServerRuntime::initialize() {
                 return core::Status::failure(delivery.error().code, delivery.error().message);
             }
             current_replication_ = std::move(delivery).value();
-            return core::Status::ok();
+            return replicate_players();
         },
     });
     if (!status) {
@@ -135,22 +166,62 @@ ServerRuntime::run_tick(std::uint64_t tick, double fixed_delta_seconds, std::int
     current_commands_ = {};
     current_replication_ = {};
     current_physics_ = {};
+    current_moved_player_count_ = 0;
+    current_repeated_input_count_ = 0;
+    current_movement_event_count_ = 0;
+    current_movement_snapshot_count_ = 0;
     auto simulation = scheduler_.run_tick(
         {tick, fixed_delta_seconds, &world_, physics_.get(), &events_});
     if (!simulation) {
         return core::Result<ServerRuntimeTickStats>::failure(simulation.error().code,
                                                              simulation.error().message);
     }
-    return core::Result<ServerRuntimeTickStats>::success(
-        {simulation.value(), current_commands_, current_replication_, current_physics_});
+    ServerRuntimeTickStats stats;
+    stats.simulation = simulation.value();
+    stats.commands = current_commands_;
+    stats.replication = current_replication_;
+    stats.physics = current_physics_;
+    stats.moved_player_count = current_moved_player_count_;
+    stats.repeated_input_count = current_repeated_input_count_;
+    stats.movement_event_count = current_movement_event_count_;
+    stats.movement_snapshot_count = current_movement_snapshot_count_;
+    return core::Result<ServerRuntimeTickStats>::success(std::move(stats));
 }
 
 core::Result<core::NetId> ServerRuntime::connect_client() {
-    return host_.connect_client();
+    auto connected = host_.connect_client();
+    if (!connected) {
+        return connected;
+    }
+    auto status = spawn_player(connected.value());
+    if (!status) {
+        (void)host_.disconnect_client(connected.value());
+        return core::Result<core::NetId>::failure(status.error().code, status.error().message);
+    }
+    return connected;
 }
 
 core::Status ServerRuntime::disconnect_client(core::NetId client_id) {
-    return host_.disconnect_client(client_id);
+    auto status = host_.disconnect_client(client_id);
+    if (!status) {
+        return status;
+    }
+    const auto found = player_connections_.find(client_id.value());
+    if (found == player_connections_.end()) {
+        return core::Status::ok();
+    }
+    const auto runtime_handle = found->second.runtime_handle;
+    const auto entity_id = found->second.entity_id;
+    player_connections_.erase(found);
+    (void)players_.erase(runtime_handle);
+    (void)world_.entities().erase(runtime_handle);
+    if (entities_.is_alive(entity_id)) {
+        status = entities_.destroy_entity(entity_id);
+        if (!status) {
+            return status;
+        }
+    }
+    return core::Status::ok();
 }
 
 core::Status ServerRuntime::submit_command(core::NetId client_id, net::CommandEnvelope command) {
@@ -192,6 +263,267 @@ const simulation::SimulationScheduler& ServerRuntime::scheduler() const noexcept
 
 const simulation::TickEvents& ServerRuntime::events() const noexcept {
     return events_;
+}
+
+movement::PlayerControllerStore& ServerRuntime::players() noexcept {
+    return players_;
+}
+
+const movement::PlayerControllerStore& ServerRuntime::players() const noexcept {
+    return players_;
+}
+
+movement::PlayerControllerRecord* ServerRuntime::player_for_client(core::NetId client_id) noexcept {
+    const auto found = player_connections_.find(client_id.value());
+    return found == player_connections_.end() ? nullptr : players_.find(found->second.runtime_handle);
+}
+
+const movement::PlayerControllerRecord*
+ServerRuntime::player_for_client(core::NetId client_id) const noexcept {
+    const auto found = player_connections_.find(client_id.value());
+    return found == player_connections_.end() ? nullptr : players_.find(found->second.runtime_handle);
+}
+
+core::Status ServerRuntime::ensure_spawn_area() {
+    if (spawn_area_initialized_) {
+        return core::Status::ok();
+    }
+    const auto clay_id = core::PrototypeId::parse("base:voxels/clay");
+    if (!clay_id.has_value()) {
+        return core::Status::failure("server_runtime.invalid_spawn_voxel",
+                                     "default spawn voxel prototype id is invalid");
+    }
+    auto clay = desc_.voxel_palette->cell_for(*clay_id);
+    if (!clay) {
+        return core::Status::failure(clay.error().code, clay.error().message);
+    }
+    auto& chunk = world_.chunks().get_or_create({0, 0, 0});
+    for (std::uint16_t x = 0; x < world::VoxelChunk::edge_length; ++x) {
+        for (std::uint16_t z = 0; z < world::VoxelChunk::edge_length; ++z) {
+            auto status = chunk.set({x, 0, z}, clay.value());
+            if (!status) {
+                return status;
+            }
+        }
+    }
+    spawn_area_initialized_ = true;
+    return core::Status::ok();
+}
+
+core::Status ServerRuntime::spawn_player(core::NetId client_id) {
+    if (!client_id.is_valid() || player_connections_.contains(client_id.value())) {
+        return core::Status::failure("server_runtime.invalid_player_connection",
+                                     "player connection is invalid or already exists");
+    }
+    auto status = ensure_spawn_area();
+    if (!status) {
+        return status;
+    }
+    const auto player_id = core::PrototypeId::parse("base:entities/player");
+    const auto* prototype = player_id.has_value() ? desc_.prototypes->find(*player_id) : nullptr;
+    if (prototype == nullptr) {
+        return core::Status::failure("server_runtime.player_prototype_missing",
+                                     "base player prototype is not registered");
+    }
+    auto definition = entities::entity_definition_from_prototype(*prototype);
+    if (!definition) {
+        return core::Status::failure(definition.error().code, definition.error().message);
+    }
+    auto runtime_handle = world_.runtime_handles().reserve();
+    auto net_id = world_.entity_net_ids().reserve();
+    auto save_id = world_.save_ids().reserve();
+    if (!runtime_handle || !net_id || !save_id) {
+        const auto& error = !runtime_handle ? runtime_handle.error()
+                            : !net_id       ? net_id.error()
+                                            : save_id.error();
+        return core::Status::failure(error.code, error.message);
+    }
+
+    world::WorldTransform transform;
+    transform.position = world::WorldPosition{8.5, 1.0, 8.5};
+    auto legacy_record = definition.value().create_record(
+        runtime_handle.value(), net_id.value(), save_id.value(), transform);
+    if (!legacy_record) {
+        return core::Status::failure(legacy_record.error().code, legacy_record.error().message);
+    }
+    status = world_.entities().insert(std::move(legacy_record).value());
+    if (!status) {
+        return status;
+    }
+
+    auto entity_id = entities_.create_entity(*player_id);
+    if (!entity_id) {
+        (void)world_.entities().erase(runtime_handle.value());
+        return core::Status::failure(entity_id.error().code, entity_id.error().message);
+    }
+    const auto cleanup_entity = [&]() {
+        (void)entities_.destroy_entity(entity_id.value());
+        (void)entities_.finalize_destruction(0, nullptr);
+        (void)world_.entities().erase(runtime_handle.value());
+    };
+    auto transform_component =
+        entities_.emplace<entities::TransformComponent>(entity_id.value(),
+                                                        entities::TransformComponent{transform,
+                                                                                     transform});
+    if (!transform_component) {
+        cleanup_entity();
+        return core::Status::failure(transform_component.error().code,
+                                     transform_component.error().message);
+    }
+    auto character = entities_.emplace<entities::CharacterComponent>(
+        entity_id.value(), entities::CharacterComponent{client_id, 4.5F});
+    if (!character) {
+        cleanup_entity();
+        return core::Status::failure(character.error().code, character.error().message);
+    }
+    status = entities_.activate_entity(entity_id.value());
+    if (!status) {
+        cleanup_entity();
+        return status;
+    }
+
+    movement::PlayerControllerState controller_state;
+    controller_state.position = transform.position;
+    controller_state.fall_origin = transform.position;
+    controller_state.scripted_start = transform.position;
+    controller_state.scripted_target = transform.position;
+    controller_state.mode = movement::PlayerControllerMode::grounded;
+    controller_state.grounded = true;
+    movement::PlayerControllerRecord controller_record;
+    controller_record.runtime_handle = runtime_handle.value();
+    controller_record.net_id = net_id.value();
+    controller_record.save_id = save_id.value();
+    controller_record.state = controller_state;
+    controller_record.persistent = definition.value().persistent;
+    status = players_.insert(std::move(controller_record), player_controller_.config());
+    if (!status) {
+        cleanup_entity();
+        return status;
+    }
+    player_connections_.emplace(
+        client_id.value(),
+        PlayerConnection{runtime_handle.value(), entity_id.value(),
+                         movement::ServerMovementInputQueue{}, std::nullopt});
+    return core::Status::ok();
+}
+
+core::Status ServerRuntime::simulate_players(simulation::SimulationContext& context) {
+    movement::VoxelCharacterCollisionWorld collision(world_.chunks(), *desc_.voxel_palette);
+    std::vector<std::uint64_t> client_ids;
+    client_ids.reserve(player_connections_.size());
+    for (const auto& [client_id, _] : player_connections_) {
+        client_ids.push_back(client_id);
+    }
+    std::ranges::sort(client_ids);
+
+    for (const auto client_id : client_ids) {
+        auto& connection = player_connections_.at(client_id);
+        auto* player = players_.find(connection.runtime_handle);
+        if (player == nullptr) {
+            return core::Status::failure("server_runtime.player_record_missing",
+                                         "connected player has no controller record");
+        }
+        auto pending = connection.pending_inputs.drain(1);
+        movement::PlayerInputFrame input;
+        if (!pending.empty()) {
+            input = pending.front();
+        } else if (connection.last_input.has_value()) {
+            input = *connection.last_input;
+            input.pressed_buttons = 0;
+            ++current_repeated_input_count_;
+        } else {
+            continue;
+        }
+        input.tick = context.tick;
+        const auto previous_position = player->state.position;
+        auto ticked = player_controller_.tick(player->state, input, player->modifiers, collision);
+        if (!ticked) {
+            return core::Status::failure(ticked.error().code, ticked.error().message);
+        }
+        connection.last_input = input;
+        current_movement_event_count_ +=
+            static_cast<std::uint32_t>(ticked.value().events.size());
+        player->state = std::move(ticked).value().state;
+
+        if (auto* legacy = world_.entities().find(connection.runtime_handle); legacy != nullptr) {
+            legacy->transform.position = player->state.position;
+            legacy->transform.rotation_degrees =
+                {static_cast<double>(player->state.pitch_centidegrees) * 0.01,
+                 static_cast<double>(player->state.yaw_centidegrees) * 0.01, 0.0};
+        }
+        auto* transform =
+            entities_.find_component<entities::TransformComponent>(connection.entity_id);
+        if (transform == nullptr) {
+            return core::Status::failure("server_runtime.player_transform_missing",
+                                         "connected player has no transform component");
+        }
+        transform->previous = transform->current;
+        transform->current.position = player->state.position;
+        transform->current.rotation_degrees =
+            {static_cast<double>(player->state.pitch_centidegrees) * 0.01,
+             static_cast<double>(player->state.yaw_centidegrees) * 0.01, 0.0};
+        if (player->state.position != previous_position) {
+            ++current_moved_player_count_;
+            if (context.events != nullptr) {
+                auto event_status = context.events->character_moved.append(
+                    {connection.entity_id, previous_position, player->state.position});
+                if (!event_status) {
+                    return event_status;
+                }
+            }
+        }
+    }
+    return core::Status::ok();
+}
+
+core::Status ServerRuntime::replicate_players() {
+    std::vector<std::uint64_t> client_ids;
+    client_ids.reserve(player_connections_.size());
+    for (const auto& [client_id, _] : player_connections_) {
+        client_ids.push_back(client_id);
+    }
+    std::ranges::sort(client_ids);
+    const auto collision_revision = collision_world_revision();
+    for (const auto recipient : client_ids) {
+        for (const auto source : client_ids) {
+            const auto& connection = player_connections_.at(source);
+            const auto* player = players_.find(connection.runtime_handle);
+            if (player == nullptr || player->state.simulation_tick == 0) {
+                continue;
+            }
+            movement::PlayerControllerSnapshot snapshot;
+            snapshot.player_net_id = player->net_id;
+            snapshot.state = player->state;
+            snapshot.last_processed_input_sequence = player->state.last_input_sequence;
+            snapshot.collision_world_revision = collision_revision;
+            auto status = host_.send_replication_message(
+                core::NetId::from_value(recipient),
+                movement::make_movement_snapshot_message(snapshot, current_time_ms_));
+            if (!status) {
+                return status;
+            }
+            ++current_movement_snapshot_count_;
+        }
+    }
+    return core::Status::ok();
+}
+
+std::uint64_t ServerRuntime::collision_world_revision() const noexcept {
+    std::uint64_t revision = 1'469'598'103'934'665'603ULL;
+    const auto mix = [&revision](std::uint64_t value) {
+        revision ^= value;
+        revision *= 1'099'511'628'211ULL;
+    };
+    for (const auto& identity : world_.chunks().identities()) {
+        mix(static_cast<std::uint64_t>(identity.coordinate.x));
+        mix(static_cast<std::uint64_t>(identity.coordinate.y));
+        mix(static_cast<std::uint64_t>(identity.coordinate.z));
+        mix(identity.load_generation);
+        if (const auto* chunk = world_.chunks().find(identity.coordinate); chunk != nullptr) {
+            mix(chunk->content_revision());
+        }
+    }
+    return revision;
 }
 
 } // namespace heartstead::game

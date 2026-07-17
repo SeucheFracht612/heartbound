@@ -2,6 +2,7 @@
 
 #include "engine/core/result.hpp"
 #include "engine/modding/prototype_registry.hpp"
+#include "engine/movement/player_input.hpp"
 #include "engine/physics/physics_world.hpp"
 #include "engine/save/save_metadata.hpp"
 #include "engine/simulation/fixed_step.hpp"
@@ -59,6 +60,8 @@ class RuntimeSession final {
     [[nodiscard]] core::Result<RuntimeFrameStats> run_frame(RuntimeFrameInput input);
     [[nodiscard]] core::Status submit_command(std::string type, std::string payload,
                                               std::int64_t now_ms = 0);
+    [[nodiscard]] core::Status submit_player_input(const movement::PlayerInputFrame& input,
+                                                   std::int64_t now_ms = 0);
     [[nodiscard]] core::Status shutdown();
 
     [[nodiscard]] bool is_running() const noexcept;

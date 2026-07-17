@@ -11,8 +11,10 @@ namespace {
 } // namespace
 
 core::Status DebugOverlayPrimitive::validate() const {
+    const auto negative_extent = extent.x < 0.0 || extent.y < 0.0 || extent.z < 0.0;
     if (!position.is_valid() || !std::isfinite(extent.x) || !std::isfinite(extent.y) ||
-        !std::isfinite(extent.z) || extent.x < 0.0 || extent.y < 0.0 || extent.z < 0.0) {
+        !std::isfinite(extent.z) ||
+        (primitive != DebugOverlayPrimitiveKind::line && negative_extent)) {
         return core::Status::failure("debug_overlay.invalid_primitive",
                                      "debug overlay primitive has invalid world bounds");
     }
@@ -27,7 +29,7 @@ core::Status DebugOverlayPrimitive::validate() const {
 
 DebugOverlayRegistry::DebugOverlayRegistry() {
     for (std::uint8_t value = key(DebugOverlayKind::chunk_boundaries);
-         value <= key(DebugOverlayKind::server_logs_tail); ++value) {
+         value <= key(DebugOverlayKind::movement_prediction); ++value) {
         enabled_.emplace(value, false);
     }
 }
@@ -102,6 +104,12 @@ std::string_view debug_overlay_kind_name(DebugOverlayKind kind) noexcept {
         return "save_ids";
     case DebugOverlayKind::server_logs_tail:
         return "server_logs_tail";
+    case DebugOverlayKind::player_controller_collision:
+        return "player_controller_collision";
+    case DebugOverlayKind::player_controller_probes:
+        return "player_controller_probes";
+    case DebugOverlayKind::movement_prediction:
+        return "movement_prediction";
     }
     return "unknown";
 }

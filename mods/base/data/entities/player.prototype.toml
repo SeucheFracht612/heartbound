@@ -1,0 +1,6 @@
+kind = "entity"
+id = "base:entities/player"
+display_name = "Player"
+persistent = "true"
+entity_kind = "player"
+carry_capacity_grams = "50000"

@@ -102,6 +102,7 @@ class BuildObjectDatabase {
 class EntityDatabase {
   public:
     [[nodiscard]] core::Status insert(entities::EntityRecord record);
+    [[nodiscard]] bool erase(core::RuntimeHandle handle) noexcept;
     [[nodiscard]] entities::EntityRecord* find(core::RuntimeHandle handle) noexcept;
     [[nodiscard]] const entities::EntityRecord* find(core::RuntimeHandle handle) const noexcept;
     [[nodiscard]] entities::EntityRecord* find_by_save_id(core::SaveId id) noexcept;

@@ -101,6 +101,14 @@ enum class KeyCode {
     a,
     s,
     d,
+    q,
+    e,
+    r,
+    left_shift,
+    left_control,
+    left_alt,
+    f3,
+    f5,
 };
 
 enum class MouseButton {
@@ -117,6 +125,8 @@ enum class PlatformEventKind {
     window_created,
     window_closed,
     window_resized,
+    window_focus_gained,
+    window_focus_lost,
     key_down,
     key_up,
     text_input,
@@ -138,6 +148,8 @@ struct PlatformEvent {
     std::int32_t mouse_y = 0;
     std::int32_t wheel_delta_x = 0;
     std::int32_t wheel_delta_y = 0;
+    std::int32_t mouse_delta_x = 0;
+    std::int32_t mouse_delta_y = 0;
 };
 
 struct KeyInputState {
@@ -167,9 +179,12 @@ struct WindowInputSnapshot {
     std::vector<MouseButton> pressed_mouse_buttons;
     std::vector<MouseButton> released_mouse_buttons;
     MousePosition mouse;
+    std::int32_t mouse_delta_x = 0;
+    std::int32_t mouse_delta_y = 0;
     std::int32_t wheel_delta_x = 0;
     std::int32_t wheel_delta_y = 0;
     std::vector<std::string> text;
+    bool cursor_captured = false;
 };
 
 struct AppRunConfig {
@@ -215,6 +230,8 @@ class IPlatform {
     mouse_button_state(WindowId window_id, MouseButton button) const noexcept = 0;
     [[nodiscard]] virtual std::optional<WindowInputSnapshot>
     input_snapshot(WindowId window_id) const noexcept = 0;
+    [[nodiscard]] virtual core::Status set_cursor_capture(WindowId window_id, bool captured) = 0;
+    [[nodiscard]] virtual bool cursor_captured(WindowId window_id) const noexcept = 0;
     [[nodiscard]] virtual bool is_key_down(WindowId window_id, KeyCode key) const noexcept = 0;
     [[nodiscard]] virtual bool was_key_pressed(WindowId window_id, KeyCode key) const noexcept = 0;
     [[nodiscard]] virtual bool was_key_released(WindowId window_id, KeyCode key) const noexcept = 0;
@@ -257,6 +274,8 @@ class HeadlessPlatform final : public IPlatform {
     mouse_button_state(WindowId window_id, MouseButton button) const noexcept override;
     [[nodiscard]] std::optional<WindowInputSnapshot>
     input_snapshot(WindowId window_id) const noexcept override;
+    [[nodiscard]] core::Status set_cursor_capture(WindowId window_id, bool captured) override;
+    [[nodiscard]] bool cursor_captured(WindowId window_id) const noexcept override;
     [[nodiscard]] bool is_key_down(WindowId window_id, KeyCode key) const noexcept override;
     [[nodiscard]] bool was_key_pressed(WindowId window_id, KeyCode key) const noexcept override;
     [[nodiscard]] bool was_key_released(WindowId window_id, KeyCode key) const noexcept override;
@@ -287,8 +306,10 @@ class HeadlessPlatform final : public IPlatform {
     std::unordered_map<std::uint64_t, std::unordered_map<std::uint32_t, MouseButtonState>>
         mouse_buttons_;
     std::unordered_map<std::uint64_t, MousePosition> mouse_positions_;
+    std::unordered_map<std::uint64_t, std::pair<std::int32_t, std::int32_t>> mouse_delta_;
     std::unordered_map<std::uint64_t, std::pair<std::int32_t, std::int32_t>> mouse_wheel_;
     std::unordered_map<std::uint64_t, std::vector<std::string>> text_input_;
+    std::unordered_map<std::uint64_t, bool> cursor_captured_;
     std::queue<PlatformEvent> events_;
 };
 

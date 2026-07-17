@@ -255,6 +255,8 @@ void add_error(PrototypeSemanticValidationResult& result, const GenericPrototype
 
 void validate_item(PrototypeSemanticValidationResult& result, const GenericPrototype& prototype) {
     (void)parse_positive_u64(result, prototype, "stack_limit");
+    (void)validate_optional_u64_range(result, prototype, "mass_grams", 0,
+                                      std::numeric_limits<std::uint64_t>::max());
     (void)validate_token_list(result, prototype, "tags", false);
 }
 
@@ -270,6 +272,8 @@ void validate_entity(PrototypeSemanticValidationResult& result, const GenericPro
                               {"player", "creature", "animal", "cart", "boat", "dropped_item",
                                "projectile", "temporary_physics"});
     (void)validate_bool_field(result, prototype, "persistent", false);
+    (void)validate_optional_u64_range(result, prototype, "carry_capacity_grams", 1,
+                                      std::numeric_limits<std::uint64_t>::max());
 }
 
 void validate_voxel(PrototypeSemanticValidationResult& result, const GenericPrototype& prototype,

@@ -1,0 +1,210 @@
+#include "engine/movement/player_input.hpp"
+
+#include <algorithm>
+#include <array>
+#include <charconv>
+#include <cmath>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace heartstead::movement {
+
+namespace {
+
+constexpr std::uint32_t known_buttons =
+    input_button_bit(PlayerInputButton::jump) | input_button_bit(PlayerInputButton::sprint) |
+    input_button_bit(PlayerInputButton::crouch) | input_button_bit(PlayerInputButton::dash) |
+    input_button_bit(PlayerInputButton::roll) | input_button_bit(PlayerInputButton::interact);
+
+[[nodiscard]] bool contains(const std::vector<platform::KeyCode>& values,
+                            platform::KeyCode key) noexcept {
+    return std::ranges::find(values, key) != values.end();
+}
+
+template <typename T>
+[[nodiscard]] core::Result<T> parse_integer(std::string_view text, std::string_view field) {
+    T value{};
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), value);
+    if (error != std::errc{} || end != text.data() + text.size()) {
+        return core::Result<T>::failure("player_input.invalid_number",
+                                        "player input field is invalid: " + std::string(field));
+    }
+    return core::Result<T>::success(value);
+}
+
+[[nodiscard]] std::vector<std::string_view> split(std::string_view text) {
+    std::vector<std::string_view> parts;
+    std::size_t first = 0;
+    while (first <= text.size()) {
+        const auto last = text.find('|', first);
+        parts.push_back(text.substr(first, last == std::string_view::npos
+                                              ? text.size() - first
+                                              : last - first));
+        if (last == std::string_view::npos) {
+            break;
+        }
+        first = last + 1;
+    }
+    return parts;
+}
+
+[[nodiscard]] std::int16_t clamp_angle(double value, double minimum, double maximum) noexcept {
+    return static_cast<std::int16_t>(std::lround(std::clamp(value, minimum, maximum)));
+}
+
+} // namespace
+
+core::Status PlayerInputFrame::validate() const {
+    if (version != player_input_version) {
+        return core::Status::failure("player_input.unsupported_version",
+                                     "player input version is not supported");
+    }
+    if (tick == 0 || sequence == 0) {
+        return core::Status::failure("player_input.invalid_identity",
+                                     "player input tick and sequence must be non-zero");
+    }
+    if (move_x == std::numeric_limits<std::int16_t>::min() ||
+        move_z == std::numeric_limits<std::int16_t>::min()) {
+        return core::Status::failure("player_input.invalid_axis",
+                                     "player input axes must be normalized signed values");
+    }
+    if (pitch_centidegrees < -8'900 || pitch_centidegrees > 8'900) {
+        return core::Status::failure("player_input.invalid_pitch",
+                                     "player input pitch must be between -89 and 89 degrees");
+    }
+    if (((held_buttons | pressed_buttons) & ~known_buttons) != 0) {
+        return core::Status::failure("player_input.unknown_button",
+                                     "player input contains unknown button bits");
+    }
+    if ((pressed_buttons & ~held_buttons) != 0) {
+        return core::Status::failure("player_input.invalid_pressed_button",
+                                     "pressed player input buttons must also be held");
+    }
+    return core::Status::ok();
+}
+
+bool PlayerInputFrame::held(PlayerInputButton button) const noexcept {
+    return (held_buttons & input_button_bit(button)) != 0;
+}
+
+bool PlayerInputFrame::pressed(PlayerInputButton button) const noexcept {
+    return (pressed_buttons & input_button_bit(button)) != 0;
+}
+
+std::string PlayerInputTextCodec::encode(const PlayerInputFrame& input) {
+    return std::to_string(input.version) + '|' + std::to_string(input.tick) + '|' +
+           std::to_string(input.sequence) + '|' + std::to_string(input.move_x) + '|' +
+           std::to_string(input.move_z) + '|' + std::to_string(input.yaw_centidegrees) + '|' +
+           std::to_string(input.pitch_centidegrees) + '|' +
+           std::to_string(input.held_buttons) + '|' + std::to_string(input.pressed_buttons);
+}
+
+core::Result<PlayerInputFrame> PlayerInputTextCodec::decode(std::string_view payload) {
+    if (payload.empty() || payload.size() > 256) {
+        return core::Result<PlayerInputFrame>::failure("player_input.invalid_payload_size",
+                                                       "player input payload size is invalid");
+    }
+    const auto parts = split(payload);
+    if (parts.size() != 9) {
+        return core::Result<PlayerInputFrame>::failure("player_input.invalid_payload",
+                                                       "player input payload must have 9 fields");
+    }
+    auto version = parse_integer<std::uint16_t>(parts[0], "version");
+    auto tick = parse_integer<std::uint64_t>(parts[1], "tick");
+    auto sequence = parse_integer<std::uint64_t>(parts[2], "sequence");
+    auto move_x = parse_integer<std::int16_t>(parts[3], "move_x");
+    auto move_z = parse_integer<std::int16_t>(parts[4], "move_z");
+    auto yaw = parse_integer<std::int16_t>(parts[5], "yaw");
+    auto pitch = parse_integer<std::int16_t>(parts[6], "pitch");
+    auto held = parse_integer<std::uint32_t>(parts[7], "held_buttons");
+    auto pressed = parse_integer<std::uint32_t>(parts[8], "pressed_buttons");
+    if (!version || !tick || !sequence || !move_x || !move_z || !yaw || !pitch || !held ||
+        !pressed) {
+        const auto* error = !version   ? &version.error()
+                            : !tick    ? &tick.error()
+                            : !sequence ? &sequence.error()
+                            : !move_x  ? &move_x.error()
+                            : !move_z  ? &move_z.error()
+                            : !yaw     ? &yaw.error()
+                            : !pitch   ? &pitch.error()
+                            : !held    ? &held.error()
+                                       : &pressed.error();
+        return core::Result<PlayerInputFrame>::failure(error->code, error->message);
+    }
+
+    PlayerInputFrame result{version.value(), tick.value(), sequence.value(), move_x.value(),
+                            move_z.value(), yaw.value(), pitch.value(), held.value(),
+                            pressed.value()};
+    auto status = result.validate();
+    if (!status) {
+        return core::Result<PlayerInputFrame>::failure(status.error().code,
+                                                       status.error().message);
+    }
+    return core::Result<PlayerInputFrame>::success(result);
+}
+
+PlayerInputSampler::PlayerInputSampler(PlayerInputBindings bindings) : bindings_(bindings) {}
+
+PlayerInputFrame PlayerInputSampler::sample(const platform::WindowInputSnapshot& snapshot,
+                                            std::uint64_t tick, bool include_pressed) {
+    const auto axis = [&snapshot](platform::KeyCode positive, platform::KeyCode negative) {
+        return static_cast<std::int32_t>(contains(snapshot.down_keys, positive)) -
+               static_cast<std::int32_t>(contains(snapshot.down_keys, negative));
+    };
+    auto x = axis(bindings_.right, bindings_.left);
+    auto z = axis(bindings_.forward, bindings_.back);
+    if (x != 0 && z != 0) {
+        constexpr auto diagonal = 23'170;
+        x *= diagonal;
+        z *= diagonal;
+    } else {
+        x *= 32'767;
+        z *= 32'767;
+    }
+
+    yaw_centidegrees_ += static_cast<double>(snapshot.mouse_delta_x) * look_sensitivity_;
+    pitch_centidegrees_ -= static_cast<double>(snapshot.mouse_delta_y) * look_sensitivity_;
+    while (yaw_centidegrees_ > 18'000.0) {
+        yaw_centidegrees_ -= 36'000.0;
+    }
+    while (yaw_centidegrees_ < -18'000.0) {
+        yaw_centidegrees_ += 36'000.0;
+    }
+    pitch_centidegrees_ = std::clamp(pitch_centidegrees_, -8'900.0, 8'900.0);
+
+    PlayerInputFrame frame;
+    frame.tick = tick;
+    frame.sequence = next_sequence_++;
+    frame.move_x = static_cast<std::int16_t>(x);
+    frame.move_z = static_cast<std::int16_t>(z);
+    frame.yaw_centidegrees = clamp_angle(yaw_centidegrees_, -18'000.0, 18'000.0);
+    frame.pitch_centidegrees = clamp_angle(pitch_centidegrees_, -8'900.0, 8'900.0);
+
+    const std::array pairs{
+        std::pair{bindings_.jump, PlayerInputButton::jump},
+        std::pair{bindings_.sprint, PlayerInputButton::sprint},
+        std::pair{bindings_.crouch, PlayerInputButton::crouch},
+        std::pair{bindings_.dash, PlayerInputButton::dash},
+        std::pair{bindings_.roll, PlayerInputButton::roll},
+        std::pair{bindings_.interact, PlayerInputButton::interact},
+    };
+    for (const auto& [key, button] : pairs) {
+        if (contains(snapshot.down_keys, key)) {
+            frame.held_buttons |= input_button_bit(button);
+        }
+        if (include_pressed && contains(snapshot.pressed_keys, key)) {
+            frame.held_buttons |= input_button_bit(button);
+            frame.pressed_buttons |= input_button_bit(button);
+        }
+    }
+    return frame;
+}
+
+void PlayerInputSampler::set_look_sensitivity(double centidegrees_per_pixel) noexcept {
+    if (std::isfinite(centidegrees_per_pixel) && centidegrees_per_pixel > 0.0) {
+        look_sensitivity_ = centidegrees_per_pixel;
+    }
+}
+
+} // namespace heartstead::movement

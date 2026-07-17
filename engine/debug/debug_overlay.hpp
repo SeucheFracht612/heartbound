@@ -29,6 +29,9 @@ enum class DebugOverlayKind : std::uint8_t {
     network_interest,
     save_ids,
     server_logs_tail,
+    player_controller_collision,
+    player_controller_probes,
+    movement_prediction,
 };
 
 enum class DebugOverlayPrimitiveKind : std::uint8_t { wire_box, line, sphere, text, cell_grid };

@@ -35,6 +35,20 @@ namespace {
     return core::Result<std::uint32_t>::success(static_cast<std::uint32_t>(parsed));
 }
 
+[[nodiscard]] core::Result<std::uint64_t> parse_non_negative_u64(std::string_view value,
+                                                                 std::string_view field_name) {
+    std::uint64_t parsed = 0;
+    const auto* begin = value.data();
+    const auto* end = value.data() + value.size();
+    const auto [ptr, error] = std::from_chars(begin, end, parsed);
+    if (error != std::errc{} || ptr != end) {
+        return core::Result<std::uint64_t>::failure("item_prototype.invalid_number",
+                                                    std::string(field_name) +
+                                                        " must be a non-negative integer");
+    }
+    return core::Result<std::uint64_t>::success(parsed);
+}
+
 [[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter) {
     std::vector<std::string_view> result;
     std::size_t start = 0;
@@ -102,6 +116,14 @@ item_definition_from_prototype(const modding::GenericPrototype& prototype) {
     definition.prototype_id = prototype.id;
     definition.stack_limit = stack_limit.value();
     definition.tags = std::move(tags).value();
+    if (const auto* mass = field(prototype, "mass_grams"); mass != nullptr) {
+        auto parsed_mass = parse_non_negative_u64(*mass, "mass_grams");
+        if (!parsed_mass) {
+            return core::Result<ItemDefinition>::failure(parsed_mass.error().code,
+                                                         parsed_mass.error().message);
+        }
+        definition.mass_grams = parsed_mass.value();
+    }
 
     auto status = definition.validate();
     if (!status) {

@@ -15,6 +15,7 @@ struct ItemDefinition {
     core::PrototypeId prototype_id;
     std::uint32_t stack_limit = 1;
     std::vector<std::string> tags;
+    std::uint64_t mass_grams = 0;
 
     [[nodiscard]] core::Status validate() const;
     [[nodiscard]] core::Result<ItemStack> create_stack(std::uint32_t count,

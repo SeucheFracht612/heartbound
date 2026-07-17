@@ -234,6 +234,19 @@ core::Status EntityDatabase::insert(entities::EntityRecord record) {
     return core::Status::ok();
 }
 
+bool EntityDatabase::erase(core::RuntimeHandle handle) noexcept {
+    const auto found = records_by_runtime_.find(key(handle));
+    if (found == records_by_runtime_.end()) {
+        return false;
+    }
+    runtime_by_net_id_.erase(key(found->second.net_id));
+    if (found->second.save_id.is_valid()) {
+        runtime_by_save_id_.erase(key(found->second.save_id));
+    }
+    records_by_runtime_.erase(found);
+    return true;
+}
+
 entities::EntityRecord* EntityDatabase::find(core::RuntimeHandle handle) noexcept {
     const auto found = records_by_runtime_.find(key(handle));
     return found == records_by_runtime_.end() ? nullptr : &found->second;

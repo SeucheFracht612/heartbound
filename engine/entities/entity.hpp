@@ -41,6 +41,7 @@ struct EntityDefinition {
     core::PrototypeId prototype_id;
     EntityKind kind = EntityKind::temporary_physics;
     bool persistent = false;
+    std::uint64_t carry_capacity_grams = 0;
 
     [[nodiscard]] core::Status validate() const;
     [[nodiscard]] core::Result<EntityRecord> create_record(core::RuntimeHandle runtime_handle,

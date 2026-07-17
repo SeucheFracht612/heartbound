@@ -41,6 +41,16 @@ target_sources(
     modding/prototype_semantic_validation.cpp
     modding/mod_validation.cpp
     modding/prototype_registry.cpp
+    movement/character_collision.cpp
+    movement/controller_debug.cpp
+    movement/carried_load.cpp
+    movement/movement_prediction.cpp
+    movement/movement_playground.cpp
+    movement/player_camera.cpp
+    movement/player_controller.cpp
+    movement/player_controller_store.cpp
+    movement/player_input.cpp
+    movement/remote_player_interpolation.cpp
     net/client_session.cpp
     net/command_payload.cpp
     net/host_session.cpp
@@ -197,6 +207,16 @@ target_sources(
       modding/prototype_semantic_validation.hpp
       modding/mod_validation.hpp
       modding/prototype_registry.hpp
+      movement/character_collision.hpp
+      movement/controller_debug.hpp
+      movement/carried_load.hpp
+      movement/movement_prediction.hpp
+      movement/movement_playground.hpp
+      movement/player_camera.hpp
+      movement/player_controller.hpp
+      movement/player_controller_store.hpp
+      movement/player_input.hpp
+      movement/remote_player_interpolation.hpp
       net/client_session.hpp
       net/command_payload.hpp
       net/host_session.hpp

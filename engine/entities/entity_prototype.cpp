@@ -2,6 +2,7 @@
 
 #include "engine/modding/prototype_registry.hpp"
 
+#include <charconv>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -62,10 +63,26 @@ entity_definition_from_prototype(const modding::GenericPrototype& prototype) {
         persistent = parsed.value();
     }
 
+    std::uint64_t carry_capacity_grams = 0;
+    if (const auto* capacity_value = field(prototype, "carry_capacity_grams");
+        capacity_value != nullptr && !capacity_value->empty()) {
+        const auto [end, error] =
+            std::from_chars(capacity_value->data(),
+                            capacity_value->data() + capacity_value->size(),
+                            carry_capacity_grams);
+        if (error != std::errc{} || end != capacity_value->data() + capacity_value->size() ||
+            carry_capacity_grams == 0) {
+            return core::Result<EntityDefinition>::failure(
+                "entity_prototype.invalid_capacity",
+                "carry_capacity_grams must be a positive integer");
+        }
+    }
+
     EntityDefinition definition;
     definition.prototype_id = prototype.id;
     definition.kind = kind.value();
     definition.persistent = persistent;
+    definition.carry_capacity_grams = carry_capacity_grams;
 
     auto status = definition.validate();
     if (!status) {

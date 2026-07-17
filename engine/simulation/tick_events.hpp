@@ -4,6 +4,7 @@
 #include "engine/core/result.hpp"
 #include "engine/entities/entity_id.hpp"
 #include "engine/world/coords/world_coords.hpp"
+#include "engine/world/coords/world_position.hpp"
 #include "engine/world/voxels/voxel_chunk.hpp"
 
 #include <cstdint>
@@ -72,6 +73,12 @@ struct InventoryChanged {
     std::uint64_t revision = 0;
 };
 
+struct CharacterMoved {
+    entities::EntityId entity;
+    world::WorldPosition previous;
+    world::WorldPosition current;
+};
+
 class TickEvents {
   public:
     [[nodiscard]] core::Status begin_tick(std::uint64_t tick) {
@@ -86,6 +93,7 @@ class TickEvents {
         entity_destroyed.begin_tick();
         voxel_changed.begin_tick();
         inventory_changed.begin_tick();
+        character_moved.begin_tick();
         return core::Status::ok();
     }
 
@@ -98,6 +106,7 @@ class TickEvents {
         entity_destroyed.seal();
         voxel_changed.seal();
         inventory_changed.seal();
+        character_moved.seal();
         sealed_ = true;
         return core::Status::ok();
     }
@@ -107,10 +116,12 @@ class TickEvents {
         entity_destroyed.events_.clear();
         voxel_changed.events_.clear();
         inventory_changed.events_.clear();
+        character_moved.events_.clear();
         entity_spawned.seal();
         entity_destroyed.seal();
         voxel_changed.seal();
         inventory_changed.seal();
+        character_moved.seal();
         active_ = false;
         sealed_ = false;
     }
@@ -129,13 +140,14 @@ class TickEvents {
 
     [[nodiscard]] std::size_t event_count() const noexcept {
         return entity_spawned.size() + entity_destroyed.size() + voxel_changed.size() +
-               inventory_changed.size();
+               inventory_changed.size() + character_moved.size();
     }
 
     EventStream<EntitySpawned> entity_spawned;
     EventStream<EntityDestroyed> entity_destroyed;
     EventStream<VoxelChanged> voxel_changed;
     EventStream<InventoryChanged> inventory_changed;
+    EventStream<CharacterMoved> character_moved;
 
   private:
     std::uint64_t tick_ = 0;

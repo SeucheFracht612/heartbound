@@ -14,6 +14,10 @@ core::Status EntityDefinition::validate() const {
         return core::Status::failure("entity_definition.invalid_kind",
                                      "entity definition kind is unknown");
     }
+    if (kind == EntityKind::player && carry_capacity_grams == 0) {
+        return core::Status::failure("entity_definition.missing_carry_capacity",
+                                     "player definitions need a positive carry capacity");
+    }
     return core::Status::ok();
 }
 

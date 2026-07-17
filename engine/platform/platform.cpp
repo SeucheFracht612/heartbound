@@ -107,6 +107,25 @@ struct X11OutgoingIncrementalClipboardTransfer {
     case XK_d:
     case XK_D:
         return KeyCode::d;
+    case XK_q:
+    case XK_Q:
+        return KeyCode::q;
+    case XK_e:
+    case XK_E:
+        return KeyCode::e;
+    case XK_r:
+    case XK_R:
+        return KeyCode::r;
+    case XK_Shift_L:
+        return KeyCode::left_shift;
+    case XK_Control_L:
+        return KeyCode::left_control;
+    case XK_Alt_L:
+        return KeyCode::left_alt;
+    case XK_F3:
+        return KeyCode::f3;
+    case XK_F5:
+        return KeyCode::f5;
     default:
         return KeyCode::unknown;
     }
@@ -347,6 +366,8 @@ core::Status HeadlessPlatform::close_window(WindowId id) {
     input_.erase(id.value());
     mouse_buttons_.erase(id.value());
     mouse_positions_.erase(id.value());
+    mouse_delta_.erase(id.value());
+    cursor_captured_.erase(id.value());
     mouse_wheel_.erase(id.value());
     text_input_.erase(id.value());
     emit_event(PlatformEvent{PlatformEventKind::window_closed, id, KeyCode::unknown, 0, 0, {}});
@@ -386,6 +407,7 @@ void HeadlessPlatform::begin_frame() {
         }
     }
     mouse_wheel_.clear();
+    mouse_delta_.clear();
     for (auto& [_, text] : text_input_) {
         text.clear();
     }
@@ -408,6 +430,8 @@ core::Status HeadlessPlatform::queue_event(PlatformEvent event) {
         input_.erase(event.window_id.value());
         mouse_buttons_.erase(event.window_id.value());
         mouse_positions_.erase(event.window_id.value());
+        mouse_delta_.erase(event.window_id.value());
+        cursor_captured_.erase(event.window_id.value());
         mouse_wheel_.erase(event.window_id.value());
         text_input_.erase(event.window_id.value());
     }
@@ -513,6 +537,12 @@ HeadlessPlatform::input_snapshot(WindowId window_id) const noexcept {
         snapshot.mouse = mouse_position->second;
     }
 
+    const auto mouse_delta = mouse_delta_.find(window_id.value());
+    if (mouse_delta != mouse_delta_.end()) {
+        snapshot.mouse_delta_x = mouse_delta->second.first;
+        snapshot.mouse_delta_y = mouse_delta->second.second;
+    }
+
     const auto mouse_wheel = mouse_wheel_.find(window_id.value());
     if (mouse_wheel != mouse_wheel_.end()) {
         snapshot.wheel_delta_x = mouse_wheel->second.first;
@@ -523,7 +553,22 @@ HeadlessPlatform::input_snapshot(WindowId window_id) const noexcept {
     if (text != text_input_.end()) {
         snapshot.text = text->second;
     }
+    snapshot.cursor_captured = cursor_captured(window_id);
     return snapshot;
+}
+
+core::Status HeadlessPlatform::set_cursor_capture(WindowId window_id, bool captured) {
+    if (!is_window_open(windows_, window_id)) {
+        return core::Status::failure("platform.window_not_open", "window is not open");
+    }
+    cursor_captured_[window_id.value()] = captured;
+    mouse_delta_.erase(window_id.value());
+    return core::Status::ok();
+}
+
+bool HeadlessPlatform::cursor_captured(WindowId window_id) const noexcept {
+    const auto found = cursor_captured_.find(window_id.value());
+    return found != cursor_captured_.end() && found->second;
 }
 
 bool HeadlessPlatform::is_key_down(WindowId window_id, KeyCode key) const noexcept {
@@ -609,6 +654,12 @@ core::Status HeadlessPlatform::validate_queued_event(const PlatformEvent& event)
                                          "window dimensions must both be zero or both be non-zero");
         }
         return core::Status::ok();
+    case PlatformEventKind::window_focus_gained:
+    case PlatformEventKind::window_focus_lost:
+        if (!is_window_open(windows_, event.window_id)) {
+            return core::Status::failure("platform.window_not_open", "window is not open");
+        }
+        return core::Status::ok();
     case PlatformEventKind::key_down:
     case PlatformEventKind::key_up:
         if (!is_window_open(windows_, event.window_id)) {
@@ -656,6 +707,18 @@ core::Status HeadlessPlatform::validate_queued_event(const PlatformEvent& event)
 }
 
 void HeadlessPlatform::apply_input_event(const PlatformEvent& event) {
+    if (event.kind == PlatformEventKind::window_focus_lost) {
+        for (auto& [_, state] : input_[event.window_id.value()]) {
+            state.released = state.down;
+            state.down = false;
+        }
+        for (auto& [_, state] : mouse_buttons_[event.window_id.value()]) {
+            state.released = state.down;
+            state.down = false;
+        }
+        cursor_captured_[event.window_id.value()] = false;
+        return;
+    }
     if (event.kind == PlatformEventKind::text_input && !event.text.empty()) {
         text_input_[event.window_id.value()].push_back(event.text);
         return;
@@ -679,8 +742,18 @@ void HeadlessPlatform::apply_input_event(const PlatformEvent& event) {
         event.kind == PlatformEventKind::mouse_button_down ||
         event.kind == PlatformEventKind::mouse_button_up ||
         event.kind == PlatformEventKind::mouse_wheel) {
-        mouse_positions_[event.window_id.value()] =
-            MousePosition{event.mouse_x, event.mouse_y, true};
+        auto& position = mouse_positions_[event.window_id.value()];
+        if (event.kind == PlatformEventKind::mouse_moved &&
+            (event.mouse_delta_x != 0 || event.mouse_delta_y != 0)) {
+            auto& delta = mouse_delta_[event.window_id.value()];
+            delta.first += event.mouse_delta_x;
+            delta.second += event.mouse_delta_y;
+        } else if (event.kind == PlatformEventKind::mouse_moved && position.inside) {
+            auto& delta = mouse_delta_[event.window_id.value()];
+            delta.first += event.mouse_x - position.x;
+            delta.second += event.mouse_y - position.y;
+        }
+        position = MousePosition{event.mouse_x, event.mouse_y, true};
     }
 
     if (event.kind == PlatformEventKind::mouse_button_down) {
@@ -728,9 +801,26 @@ class X11NativePlatform final : public IPlatform {
         if (clipboard_owner_window_ != 0) {
             XSelectInput(display_, clipboard_owner_window_, PropertyChangeMask);
         }
+        static const char invisible_cursor_bits[] = {0};
+        const auto cursor_bitmap =
+            XCreateBitmapFromData(display_, RootWindow(display_, screen_), invisible_cursor_bits,
+                                  1, 1);
+        if (cursor_bitmap != None) {
+            XColor transparent{};
+            invisible_cursor_ = XCreatePixmapCursor(display_, cursor_bitmap, cursor_bitmap,
+                                                    &transparent, &transparent, 0, 0);
+            XFreePixmap(display_, cursor_bitmap);
+        }
     }
 
     ~X11NativePlatform() override {
+        XUngrabPointer(display_, CurrentTime);
+        for (const auto& [_, native_window] : native_windows_) {
+            XUndefineCursor(display_, native_window);
+        }
+        if (invisible_cursor_ != None) {
+            XFreeCursor(display_, invisible_cursor_);
+        }
         if (clipboard_owner_window_ != 0) {
             if (XGetSelectionOwner(display_, clipboard_atom_) == clipboard_owner_window_) {
                 XSetSelectionOwner(display_, clipboard_atom_, None, CurrentTime);
@@ -841,7 +931,7 @@ class X11NativePlatform final : public IPlatform {
         XStoreName(display_, native_window, desc.title.c_str());
         XSelectInput(display_, native_window,
                      StructureNotifyMask | KeyPressMask | KeyReleaseMask | ButtonPressMask |
-                         ButtonReleaseMask | PointerMotionMask | ExposureMask);
+                         ButtonReleaseMask | PointerMotionMask | ExposureMask | FocusChangeMask);
         XSetWMProtocols(display_, native_window, &wm_delete_window_, 1);
 
         if (!desc.resizable) {
@@ -864,6 +954,10 @@ class X11NativePlatform final : public IPlatform {
     [[nodiscard]] core::Status close_window(WindowId id) override {
         const auto found = native_windows_.find(id.value());
         if (found != native_windows_.end()) {
+            if (logical_.cursor_captured(id)) {
+                XUngrabPointer(display_, CurrentTime);
+            }
+            XUndefineCursor(display_, found->second);
             window_ids_by_native_.erase(found->second);
             XDestroyWindow(display_, found->second);
             XFlush(display_);
@@ -929,6 +1023,42 @@ class X11NativePlatform final : public IPlatform {
     [[nodiscard]] std::optional<WindowInputSnapshot>
     input_snapshot(WindowId window_id) const noexcept override {
         return logical_.input_snapshot(window_id);
+    }
+
+    [[nodiscard]] core::Status set_cursor_capture(WindowId window_id, bool captured) override {
+        const auto found = native_windows_.find(window_id.value());
+        if (found == native_windows_.end()) {
+            return core::Status::failure("platform.window_not_open", "window is not open");
+        }
+        if (captured) {
+            const auto result = XGrabPointer(display_, found->second, True,
+                                             PointerMotionMask | ButtonPressMask |
+                                                 ButtonReleaseMask,
+                                             GrabModeAsync, GrabModeAsync, found->second,
+                                             invisible_cursor_, CurrentTime);
+            if (result != GrabSuccess) {
+                return core::Status::failure("platform.cursor_capture_failed",
+                                             "X11 pointer grab failed");
+            }
+            if (invisible_cursor_ != None) {
+                XDefineCursor(display_, found->second, invisible_cursor_);
+            }
+            const auto* state = logical_.find_window(window_id);
+            if (state != nullptr) {
+                XWarpPointer(display_, None, found->second, 0, 0, 0, 0,
+                             static_cast<int>(state->width / 2),
+                             static_cast<int>(state->height / 2));
+            }
+        } else {
+            XUngrabPointer(display_, CurrentTime);
+            XUndefineCursor(display_, found->second);
+        }
+        XFlush(display_);
+        return logical_.set_cursor_capture(window_id, captured);
+    }
+
+    [[nodiscard]] bool cursor_captured(WindowId window_id) const noexcept override {
+        return logical_.cursor_captured(window_id);
     }
 
     [[nodiscard]] bool is_key_down(WindowId window_id, KeyCode key) const noexcept override {
@@ -997,6 +1127,12 @@ class X11NativePlatform final : public IPlatform {
                 break;
             case UnmapNotify:
                 handle_unmap(event.xunmap);
+                break;
+            case FocusIn:
+                handle_focus(event.xfocus, true);
+                break;
+            case FocusOut:
+                handle_focus(event.xfocus, false);
                 break;
             case KeyPress:
                 handle_key_press(event.xkey);
@@ -1076,6 +1212,22 @@ class X11NativePlatform final : public IPlatform {
         }
     }
 
+    void handle_focus(const XFocusChangeEvent& event, bool focused) {
+        auto id = window_id_for(event.window);
+        if (!id) {
+            return;
+        }
+        (void)logical_.queue_event(PlatformEvent{
+            focused ? PlatformEventKind::window_focus_gained
+                    : PlatformEventKind::window_focus_lost,
+            id.value(), KeyCode::unknown, 0, 0, {}});
+        if (!focused) {
+            XUngrabPointer(display_, CurrentTime);
+            XUndefineCursor(display_, event.window);
+            XFlush(display_);
+        }
+    }
+
     void handle_key_press(XKeyEvent& event) {
         auto id = window_id_for(event.window);
         if (!id) {
@@ -1118,6 +1270,25 @@ class X11NativePlatform final : public IPlatform {
     void handle_motion(const XMotionEvent& event) {
         auto id = window_id_for(event.window);
         if (!id) {
+            return;
+        }
+        const auto* state = logical_.find_window(id.value());
+        if (logical_.cursor_captured(id.value()) && state != nullptr) {
+            const auto center_x = static_cast<std::int32_t>(state->width / 2);
+            const auto center_y = static_cast<std::int32_t>(state->height / 2);
+            if (event.x == center_x && event.y == center_y) {
+                return;
+            }
+            PlatformEvent relative;
+            relative.kind = PlatformEventKind::mouse_moved;
+            relative.window_id = id.value();
+            relative.mouse_x = center_x;
+            relative.mouse_y = center_y;
+            relative.mouse_delta_x = static_cast<std::int32_t>(event.x) - center_x;
+            relative.mouse_delta_y = static_cast<std::int32_t>(event.y) - center_y;
+            (void)logical_.queue_event(std::move(relative));
+            XWarpPointer(display_, None, event.window, 0, 0, 0, 0, center_x, center_y);
+            XFlush(display_);
             return;
         }
         (void)logical_.queue_event(PlatformEvent{
@@ -1680,6 +1851,7 @@ class X11NativePlatform final : public IPlatform {
     Atom clipboard_incr_atom_ = 0;
     Atom clipboard_transfer_property_atom_ = 0;
     ::Window clipboard_owner_window_ = 0;
+    Cursor invisible_cursor_ = None;
     bool owns_clipboard_selection_ = false;
     std::string clipboard_text_;
     std::vector<X11OutgoingIncrementalClipboardTransfer> pending_clipboard_transfers_;
@@ -1903,6 +2075,10 @@ std::string_view platform_event_kind_name(PlatformEventKind kind) noexcept {
         return "window_closed";
     case PlatformEventKind::window_resized:
         return "window_resized";
+    case PlatformEventKind::window_focus_gained:
+        return "window_focus_gained";
+    case PlatformEventKind::window_focus_lost:
+        return "window_focus_lost";
     case PlatformEventKind::key_down:
         return "key_down";
     case PlatformEventKind::key_up:
@@ -1939,6 +2115,22 @@ std::string_view key_code_name(KeyCode key) noexcept {
         return "s";
     case KeyCode::d:
         return "d";
+    case KeyCode::q:
+        return "q";
+    case KeyCode::e:
+        return "e";
+    case KeyCode::r:
+        return "r";
+    case KeyCode::left_shift:
+        return "left_shift";
+    case KeyCode::left_control:
+        return "left_control";
+    case KeyCode::left_alt:
+        return "left_alt";
+    case KeyCode::f3:
+        return "f3";
+    case KeyCode::f5:
+        return "f5";
     }
     return "unknown";
 }
