@@ -11,7 +11,8 @@ namespace heartstead::save {
 
 class SaveBinaryCodec {
   public:
-    [[nodiscard]] static std::vector<std::uint8_t> encode_snapshot(const SaveSnapshot& snapshot);
+    [[nodiscard]] static core::Result<std::vector<std::uint8_t>>
+    encode_snapshot(const SaveSnapshot& snapshot);
     [[nodiscard]] static core::Result<SaveSnapshot>
     decode_snapshot(std::span<const std::uint8_t> bytes);
 };

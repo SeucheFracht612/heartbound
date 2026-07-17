@@ -125,9 +125,8 @@ void test_far_transform_derivation() {
 
     auto negative = positive;
     negative.object_id = heartstead::core::SaveId::from_value(2);
-    negative.transform.position = heartstead::world::WorldPosition::from_anchor(
-                                      {-far - 1, 0, 0}, {0.75, 0.0, 0.0})
-                                      .value();
+    negative.transform.position =
+        heartstead::world::WorldPosition::from_anchor({-far - 1, 0, 0}, {0.75, 0.0, 0.0}).value();
 
     heartstead::networks::SpatialNetworkDerivationInput input;
     input.build_pieces = {&positive, &negative};
@@ -156,8 +155,8 @@ void test_far_transform_derivation() {
 
 void test_floating_origin_and_physics_island_adapters() {
     constexpr std::int64_t far = std::int64_t{1} << 60;
-    auto position = heartstead::world::WorldPosition::from_anchor(
-        {far + 10, -far + 3, 99}, {0.25, 0.5, 0.75});
+    auto position =
+        heartstead::world::WorldPosition::from_anchor({far + 10, -far + 3, 99}, {0.25, 0.5, 0.75});
     assert(position);
 
     auto render_local = heartstead::world::to_camera_relative(
@@ -212,7 +211,8 @@ void test_far_world_positions_round_trip_saves() {
     assert(decoded_text.value().voxel_palette.entries == snapshot.voxel_palette.entries);
 
     const auto binary = heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot);
-    auto decoded_binary = heartstead::save::SaveBinaryCodec::decode_snapshot(binary);
+    assert(binary);
+    auto decoded_binary = heartstead::save::SaveBinaryCodec::decode_snapshot(binary.value());
     assert(decoded_binary);
     assert(decoded_binary.value().build_pieces.front().transform.position ==
            build.transform.position);

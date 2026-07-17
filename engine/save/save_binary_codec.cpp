@@ -2,8 +2,10 @@
 
 #include "engine/math/vector.hpp"
 
+#include <bit>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,15 +23,22 @@ constexpr std::uint32_t max_binary_collection_entries = 1'000'000U;
 
 class BinaryWriter {
   public:
-    [[nodiscard]] const std::vector<std::uint8_t>& bytes() const noexcept {
-        return bytes_;
-    }
-
-    [[nodiscard]] std::vector<std::uint8_t> take() && noexcept {
-        return std::move(bytes_);
+    [[nodiscard]] core::Result<std::vector<std::uint8_t>> take() && {
+        if (error_.has_value()) {
+            return core::Result<std::vector<std::uint8_t>>::failure(error_->code, error_->message);
+        }
+        return core::Result<std::vector<std::uint8_t>>::success(std::move(bytes_));
     }
 
     void write_u8(std::uint8_t value) {
+        if (error_.has_value()) {
+            return;
+        }
+        if (bytes_.size() == max_binary_save_bytes) {
+            fail("save_binary.file_too_large",
+                 "encoded binary save exceeds the configured safety limit");
+            return;
+        }
         bytes_.push_back(value);
     }
 
@@ -55,11 +64,11 @@ class BinaryWriter {
     }
 
     void write_i32(std::int32_t value) {
-        write_u32(static_cast<std::uint32_t>(value));
+        write_u32(std::bit_cast<std::uint32_t>(value));
     }
 
     void write_i64(std::int64_t value) {
-        write_u64(static_cast<std::uint64_t>(value));
+        write_u64(std::bit_cast<std::uint64_t>(value));
     }
 
     void write_double(double value) {
@@ -70,22 +79,48 @@ class BinaryWriter {
     }
 
     void write_string(std::string_view value) {
-        write_count(value.size(), "string");
-        for (const auto byte : value) {
-            write_u8(static_cast<std::uint8_t>(byte));
+        if (error_.has_value()) {
+            return;
         }
+        if (value.size() > max_binary_string_bytes) {
+            fail("save_binary.string_too_large",
+                 "binary save string exceeds the configured safety limit");
+            return;
+        }
+        constexpr auto encoded_size_bytes = sizeof(std::uint32_t);
+        if (value.size() > max_binary_save_bytes - encoded_size_bytes ||
+            bytes_.size() > max_binary_save_bytes - encoded_size_bytes - value.size()) {
+            fail("save_binary.file_too_large",
+                 "encoded binary save exceeds the configured safety limit");
+            return;
+        }
+        write_u32(static_cast<std::uint32_t>(value.size()));
+        bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
 
-    void write_count(std::size_t value, std::string_view label) {
-        (void)label;
-        if (value > std::numeric_limits<std::uint32_t>::max()) {
-            value = std::numeric_limits<std::uint32_t>::max();
+    [[nodiscard]] bool write_count(std::size_t value, std::string_view label) {
+        if (error_.has_value()) {
+            return false;
+        }
+        if (value > max_binary_collection_entries) {
+            fail("save_binary.collection_too_large",
+                 "binary save collection exceeds the configured safety limit: " +
+                     std::string(label));
+            return false;
         }
         write_u32(static_cast<std::uint32_t>(value));
+        return !error_.has_value();
     }
 
   private:
+    void fail(std::string code, std::string message) {
+        if (!error_.has_value()) {
+            error_ = core::Error{std::move(code), std::move(message)};
+        }
+    }
+
     std::vector<std::uint8_t> bytes_;
+    std::optional<core::Error> error_;
 };
 
 class BinaryReader {
@@ -97,6 +132,18 @@ class BinaryReader {
     }
     [[nodiscard]] std::size_t remaining_bytes() const noexcept {
         return remaining();
+    }
+
+    [[nodiscard]] core::Status reserve_allocation(std::size_t count, std::size_t element_size,
+                                                  std::string_view label) {
+        if (element_size != 0 && count > allocation_budget_remaining_ / element_size) {
+            return core::Status::failure(
+                "save_binary.allocation_budget_exceeded",
+                "binary save decoded allocations exceed the configured safety limit: " +
+                    std::string(label));
+        }
+        allocation_budget_remaining_ -= count * element_size;
+        return core::Status::ok();
     }
 
     [[nodiscard]] core::Result<std::uint8_t> read_u8(std::string_view label) {
@@ -164,7 +211,7 @@ class BinaryReader {
         if (!value) {
             return core::Result<std::int32_t>::failure(value.error().code, value.error().message);
         }
-        return core::Result<std::int32_t>::success(static_cast<std::int32_t>(value.value()));
+        return core::Result<std::int32_t>::success(std::bit_cast<std::int32_t>(value.value()));
     }
 
     [[nodiscard]] core::Result<std::int64_t> read_i64(std::string_view label) {
@@ -172,7 +219,7 @@ class BinaryReader {
         if (!value) {
             return core::Result<std::int64_t>::failure(value.error().code, value.error().message);
         }
-        return core::Result<std::int64_t>::success(static_cast<std::int64_t>(value.value()));
+        return core::Result<std::int64_t>::success(std::bit_cast<std::int64_t>(value.value()));
     }
 
     [[nodiscard]] core::Result<double> read_double(std::string_view label) {
@@ -199,6 +246,11 @@ class BinaryReader {
         }
         if (remaining() < size.value()) {
             return failure<std::string>(label);
+        }
+        auto allocation = reserve_allocation(size.value(), sizeof(char), label);
+        if (!allocation) {
+            return core::Result<std::string>::failure(allocation.error().code,
+                                                      allocation.error().message);
         }
 
         std::string result(reinterpret_cast<const char*>(bytes_.data() + offset_), size.value());
@@ -237,7 +289,23 @@ class BinaryReader {
 
     std::span<const std::uint8_t> bytes_;
     std::size_t offset_ = 0;
+    std::size_t allocation_budget_remaining_ = max_binary_save_bytes;
 };
+
+template <typename T>
+[[nodiscard]] core::Result<std::uint32_t> read_allocated_count(BinaryReader& reader,
+                                                               std::string_view label) {
+    auto count = reader.read_count(label);
+    if (!count) {
+        return count;
+    }
+    auto allocation = reader.reserve_allocation(count.value(), sizeof(T), label);
+    if (!allocation) {
+        return core::Result<std::uint32_t>::failure(allocation.error().code,
+                                                    allocation.error().message);
+    }
+    return count;
+}
 
 [[nodiscard]] std::uint8_t construction_state_id(build::ConstructionState state) noexcept {
     return static_cast<std::uint8_t>(state);
@@ -366,7 +434,9 @@ void write_prototype_id(BinaryWriter& writer, const core::PrototypeId& id) {
 }
 
 void write_string_list(BinaryWriter& writer, const std::vector<std::string>& values) {
-    writer.write_count(values.size(), "string_list");
+    if (!writer.write_count(values.size(), "string_list")) {
+        return;
+    }
     for (const auto& value : values) {
         writer.write_string(value);
     }
@@ -374,7 +444,7 @@ void write_string_list(BinaryWriter& writer, const std::vector<std::string>& val
 
 [[nodiscard]] core::Result<std::vector<std::string>> read_string_list(BinaryReader& reader,
                                                                       std::string_view label) {
-    auto count = reader.read_count(label);
+    auto count = read_allocated_count<std::string>(reader, label);
     if (!count) {
         return core::Result<std::vector<std::string>>::failure(count.error().code,
                                                                count.error().message);
@@ -468,7 +538,9 @@ read_legacy_world_position(BinaryReader& reader, std::string_view label) {
 }
 
 void write_build_sockets(BinaryWriter& writer, const std::vector<build::BuildSocket>& sockets) {
-    writer.write_count(sockets.size(), "build_sockets");
+    if (!writer.write_count(sockets.size(), "build_sockets")) {
+        return;
+    }
     for (const auto& socket : sockets) {
         writer.write_string(socket.name);
         writer.write_double(socket.local_position.x);
@@ -480,7 +552,7 @@ void write_build_sockets(BinaryWriter& writer, const std::vector<build::BuildSoc
 
 [[nodiscard]] core::Result<std::vector<build::BuildSocket>>
 read_build_sockets(BinaryReader& reader) {
-    auto count = reader.read_count("build_sockets");
+    auto count = read_allocated_count<build::BuildSocket>(reader, "build_sockets");
     if (!count) {
         return core::Result<std::vector<build::BuildSocket>>::failure(count.error().code,
                                                                       count.error().message);
@@ -504,7 +576,9 @@ read_build_sockets(BinaryReader& reader) {
 }
 
 void write_build_ports(BinaryWriter& writer, const std::vector<build::BuildNetworkPort>& ports) {
-    writer.write_count(ports.size(), "build_ports");
+    if (!writer.write_count(ports.size(), "build_ports")) {
+        return;
+    }
     for (const auto& port : ports) {
         writer.write_string(port.name);
         writer.write_u8(network_kind_id(port.kind));
@@ -514,7 +588,7 @@ void write_build_ports(BinaryWriter& writer, const std::vector<build::BuildNetwo
 
 [[nodiscard]] core::Result<std::vector<build::BuildNetworkPort>>
 read_build_ports(BinaryReader& reader) {
-    auto count = reader.read_count("build_ports");
+    auto count = read_allocated_count<build::BuildNetworkPort>(reader, "build_ports");
     if (!count) {
         return core::Result<std::vector<build::BuildNetworkPort>>::failure(count.error().code,
                                                                            count.error().message);
@@ -536,7 +610,9 @@ read_build_ports(BinaryReader& reader) {
 }
 
 void write_item_stacks(BinaryWriter& writer, const std::vector<items::ItemStack>& stacks) {
-    writer.write_count(stacks.size(), "item_stacks");
+    if (!writer.write_count(stacks.size(), "item_stacks")) {
+        return;
+    }
     for (const auto& stack : stacks) {
         write_prototype_id(writer, stack.prototype_id);
         writer.write_u32(stack.count);
@@ -546,7 +622,7 @@ void write_item_stacks(BinaryWriter& writer, const std::vector<items::ItemStack>
 }
 
 [[nodiscard]] core::Result<std::vector<items::ItemStack>> read_item_stacks(BinaryReader& reader) {
-    auto count = reader.read_count("item_stacks");
+    auto count = read_allocated_count<items::ItemStack>(reader, "item_stacks");
     if (!count) {
         return core::Result<std::vector<items::ItemStack>>::failure(count.error().code,
                                                                     count.error().message);
@@ -569,7 +645,9 @@ void write_item_stacks(BinaryWriter& writer, const std::vector<items::ItemStack>
 }
 
 void write_process_slots(BinaryWriter& writer, const std::vector<processes::ProcessSlot>& slots) {
-    writer.write_count(slots.size(), "process_slots");
+    if (!writer.write_count(slots.size(), "process_slots")) {
+        return;
+    }
     for (const auto& slot : slots) {
         write_prototype_id(writer, slot.prototype_id);
         writer.write_u32(slot.count);
@@ -578,7 +656,7 @@ void write_process_slots(BinaryWriter& writer, const std::vector<processes::Proc
 
 [[nodiscard]] core::Result<std::vector<processes::ProcessSlot>>
 read_process_slots(BinaryReader& reader) {
-    auto count = reader.read_count("process_slots");
+    auto count = read_allocated_count<processes::ProcessSlot>(reader, "process_slots");
     if (!count) {
         return core::Result<std::vector<processes::ProcessSlot>>::failure(count.error().code,
                                                                           count.error().message);
@@ -599,7 +677,9 @@ read_process_slots(BinaryReader& reader) {
 
 void write_assembly_parts(BinaryWriter& writer,
                           const std::vector<assemblies::AssemblyPart>& parts) {
-    writer.write_count(parts.size(), "assembly_parts");
+    if (!writer.write_count(parts.size(), "assembly_parts")) {
+        return;
+    }
     for (const auto& part : parts) {
         writer.write_string(part.name);
         writer.write_u64(part.build_piece_id.value());
@@ -612,7 +692,7 @@ void write_assembly_parts(BinaryWriter& writer,
 
 [[nodiscard]] core::Result<std::vector<assemblies::AssemblyPart>>
 read_assembly_parts(BinaryReader& reader, bool has_spatial_layout) {
-    auto count = reader.read_count("assembly_parts");
+    auto count = read_allocated_count<assemblies::AssemblyPart>(reader, "assembly_parts");
     if (!count) {
         return core::Result<std::vector<assemblies::AssemblyPart>>::failure(count.error().code,
                                                                             count.error().message);
@@ -644,7 +724,9 @@ read_assembly_parts(BinaryReader& reader, bool has_spatial_layout) {
 
 void write_assembly_ports(BinaryWriter& writer,
                           const std::vector<assemblies::AssemblyPort>& ports) {
-    writer.write_count(ports.size(), "assembly_ports");
+    if (!writer.write_count(ports.size(), "assembly_ports")) {
+        return;
+    }
     for (const auto& port : ports) {
         writer.write_string(port.name);
         writer.write_u8(network_kind_id(port.kind));
@@ -658,7 +740,7 @@ void write_assembly_ports(BinaryWriter& writer,
 
 [[nodiscard]] core::Result<std::vector<assemblies::AssemblyPort>>
 read_assembly_ports(BinaryReader& reader, bool has_spatial_layout) {
-    auto count = reader.read_count("assembly_ports");
+    auto count = read_allocated_count<assemblies::AssemblyPort>(reader, "assembly_ports");
     if (!count) {
         return core::Result<std::vector<assemblies::AssemblyPort>>::failure(count.error().code,
                                                                             count.error().message);
@@ -691,13 +773,15 @@ read_assembly_ports(BinaryReader& reader, bool has_spatial_layout) {
 }
 
 void write_process_ids(BinaryWriter& writer, const std::vector<core::ProcessId>& values) {
-    writer.write_count(values.size(), "assembly_process_slots");
+    if (!writer.write_count(values.size(), "assembly_process_slots")) {
+        return;
+    }
     for (const auto value : values)
         writer.write_u64(value.value());
 }
 
 [[nodiscard]] core::Result<std::vector<core::ProcessId>> read_process_ids(BinaryReader& reader) {
-    auto count = reader.read_count("assembly_process_slots");
+    auto count = read_allocated_count<core::ProcessId>(reader, "assembly_process_slots");
     if (!count) {
         return core::Result<std::vector<core::ProcessId>>::failure(count.error().code,
                                                                    count.error().message);
@@ -721,7 +805,9 @@ void write_metadata(BinaryWriter& writer, const SaveMetadata& metadata) {
     writer.write_string(metadata.game_version);
     writer.write_u64(metadata.world_seed);
     writer.write_u64(metadata.world_time);
-    writer.write_count(metadata.enabled_mods.size(), "enabled_mods");
+    if (!writer.write_count(metadata.enabled_mods.size(), "enabled_mods")) {
+        return;
+    }
     for (const auto& mod : metadata.enabled_mods) {
         writer.write_string(mod.id);
         writer.write_string(mod.version);
@@ -751,7 +837,7 @@ void write_metadata(BinaryWriter& writer, const SaveMetadata& metadata) {
         }
         metadata.world_time = world_time.value();
     }
-    auto mod_count = reader.read_count("enabled_mods");
+    auto mod_count = read_allocated_count<SavedModRecord>(reader, "enabled_mods");
     if (!mod_count) {
         return core::Result<SaveMetadata>::failure("save_binary.invalid_metadata",
                                                    "binary save has invalid metadata fields");
@@ -782,7 +868,9 @@ void write_metadata(BinaryWriter& writer, const SaveMetadata& metadata) {
 }
 
 void write_voxel_palette(BinaryWriter& writer, const world::VoxelPaletteManifest& manifest) {
-    writer.write_count(manifest.entries.size(), "voxel_palette");
+    if (!writer.write_count(manifest.entries.size(), "voxel_palette")) {
+        return;
+    }
     for (const auto& entry : manifest.entries) {
         writer.write_u16(entry.type);
         write_prototype_id(writer, entry.prototype_id);
@@ -790,7 +878,8 @@ void write_voxel_palette(BinaryWriter& writer, const world::VoxelPaletteManifest
 }
 
 [[nodiscard]] core::Result<world::VoxelPaletteManifest> read_voxel_palette(BinaryReader& reader) {
-    auto count = reader.read_count("voxel_palette_count");
+    auto count =
+        read_allocated_count<world::VoxelPaletteManifestEntry>(reader, "voxel_palette_count");
     if (!count) {
         return core::Result<world::VoxelPaletteManifest>::failure(count.error().code,
                                                                   count.error().message);
@@ -853,7 +942,7 @@ read_process_tick(BinaryReader& reader, std::uint32_t file_version, std::string_
 
 template <typename T>
 [[nodiscard]] core::Result<std::uint32_t> read_count(BinaryReader& reader, std::string_view label) {
-    auto count = reader.read_count(label);
+    auto count = read_allocated_count<T>(reader, label);
     if (count && count.value() > reader.remaining_bytes())
         return core::Result<std::uint32_t>::failure(
             "save_binary.impossible_collection_count",
@@ -863,7 +952,8 @@ template <typename T>
 
 } // namespace
 
-std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& snapshot) {
+core::Result<std::vector<std::uint8_t>>
+SaveBinaryCodec::encode_snapshot(const SaveSnapshot& snapshot) {
     BinaryWriter writer;
     for (const auto byte : magic) {
         writer.write_u8(static_cast<std::uint8_t>(byte));
@@ -872,7 +962,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
     write_metadata(writer, snapshot.metadata);
     write_voxel_palette(writer, snapshot.voxel_palette);
 
-    writer.write_count(snapshot.chunk_edits.size(), "chunk_edits");
+    if (!writer.write_count(snapshot.chunk_edits.size(), "chunk_edits")) {
+        return std::move(writer).take();
+    }
     for (const auto& chunk : snapshot.chunk_edits) {
         writer.write_i64(chunk.coord.x);
         writer.write_i64(chunk.coord.y);
@@ -880,7 +972,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_string(chunk.encoded_edit_delta);
     }
 
-    writer.write_count(snapshot.build_pieces.size(), "build_pieces");
+    if (!writer.write_count(snapshot.build_pieces.size(), "build_pieces")) {
+        return std::move(writer).take();
+    }
     for (const auto& build_piece : snapshot.build_pieces) {
         writer.write_u64(build_piece.object_id.value());
         write_prototype_id(writer, build_piece.prototype_id);
@@ -892,7 +986,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         write_string_list(writer, build_piece.room_contribution_tags);
     }
 
-    writer.write_count(snapshot.entities.size(), "entities");
+    if (!writer.write_count(snapshot.entities.size(), "entities")) {
+        return std::move(writer).take();
+    }
     for (const auto& entity : snapshot.entities) {
         writer.write_u64(entity.save_id.value());
         write_prototype_id(writer, entity.prototype_id);
@@ -902,13 +998,17 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_string(entity.encoded_state);
     }
 
-    writer.write_count(snapshot.inventories.size(), "inventories");
+    if (!writer.write_count(snapshot.inventories.size(), "inventories")) {
+        return std::move(writer).take();
+    }
     for (const auto& inventory : snapshot.inventories) {
         writer.write_u64(inventory.owner_id.value());
         write_item_stacks(writer, inventory.stacks);
     }
 
-    writer.write_count(snapshot.cargo_records.size(), "cargo_records");
+    if (!writer.write_count(snapshot.cargo_records.size(), "cargo_records")) {
+        return std::move(writer).take();
+    }
     for (const auto& cargo_record : snapshot.cargo_records) {
         writer.write_u64(cargo_record.cargo_id.value());
         write_prototype_id(writer, cargo_record.prototype_id);
@@ -920,7 +1020,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         write_string_list(writer, cargo_record.hazard_tags);
     }
 
-    writer.write_count(snapshot.workpieces.size(), "workpieces");
+    if (!writer.write_count(snapshot.workpieces.size(), "workpieces")) {
+        return std::move(writer).take();
+    }
     for (const auto& workpiece : snapshot.workpieces) {
         writer.write_u64(workpiece.workpiece_id.value());
         write_prototype_id(writer, workpiece.prototype_id);
@@ -935,7 +1037,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_bool(workpiece.committed);
     }
 
-    writer.write_count(snapshot.assemblies.size(), "assemblies");
+    if (!writer.write_count(snapshot.assemblies.size(), "assemblies")) {
+        return std::move(writer).take();
+    }
     for (const auto& assembly : snapshot.assemblies) {
         writer.write_u64(assembly.assembly_id.value());
         writer.write_u64(assembly.root_build_piece_id.value());
@@ -956,7 +1060,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_i64(assembly.root_coord.z);
     }
 
-    writer.write_count(snapshot.processes.size(), "processes");
+    if (!writer.write_count(snapshot.processes.size(), "processes")) {
+        return std::move(writer).take();
+    }
     for (const auto& process : snapshot.processes) {
         writer.write_u64(process.process_id.value());
         writer.write_u64(process.owner_id.value());
@@ -974,7 +1080,9 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_u8(static_cast<std::uint8_t>(process.interruption_policy));
     }
 
-    writer.write_count(snapshot.fires.size(), "fires");
+    if (!writer.write_count(snapshot.fires.size(), "fires")) {
+        return std::move(writer).take();
+    }
     for (const auto& fire : snapshot.fires) {
         writer.write_u64(fire.fire_id.value());
         write_prototype_id(writer, fire.prototype_id);
@@ -985,14 +1093,18 @@ std::vector<std::uint8_t> SaveBinaryCodec::encode_snapshot(const SaveSnapshot& s
         writer.write_bool(fire.weather_exposed);
     }
 
-    writer.write_count(snapshot.mod_states.size(), "mod_states");
+    if (!writer.write_count(snapshot.mod_states.size(), "mod_states")) {
+        return std::move(writer).take();
+    }
     for (const auto& mod_state : snapshot.mod_states) {
         writer.write_string(mod_state.mod_id);
         writer.write_string(mod_state.state_key);
         writer.write_string(mod_state.encoded_state);
     }
 
-    writer.write_count(snapshot.missing_prototypes.size(), "missing_prototypes");
+    if (!writer.write_count(snapshot.missing_prototypes.size(), "missing_prototypes")) {
+        return std::move(writer).take();
+    }
     for (const auto& missing : snapshot.missing_prototypes) {
         writer.write_u8(static_cast<std::uint8_t>(missing.kind));
         writer.write_u64(missing.stable_id);

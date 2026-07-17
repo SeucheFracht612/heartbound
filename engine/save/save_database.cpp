@@ -1038,12 +1038,16 @@ core::Status FileSaveDatabase::write_snapshot(const SaveSnapshot& snapshot) cons
     }
 
     const auto encoded = SaveBinaryCodec::encode_snapshot(snapshot);
-    if (encoded.size() > max_snapshot_file_bytes) {
+    if (!encoded) {
+        (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
+        return core::Status::failure(encoded.error().code, encoded.error().message);
+    }
+    if (encoded.value().size() > max_snapshot_file_bytes) {
         (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
         return core::Status::failure("save_database.snapshot_too_large",
                                      "binary save snapshot exceeds the configured safety limit");
     }
-    status = write_bytes_atomic(snapshot_path(staged_root), encoded);
+    status = write_bytes_atomic(snapshot_path(staged_root), encoded.value());
     if (!status) {
         (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
         return status;

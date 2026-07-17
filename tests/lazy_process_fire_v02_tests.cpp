@@ -122,7 +122,8 @@ void test_lazy_process_and_fire_save_round_trip() {
     assert(text_decoded.value().fires.front().fuel_buffer_ticks == 50);
 
     const auto binary = save::SaveBinaryCodec::encode_snapshot(snapshot);
-    auto binary_decoded = save::SaveBinaryCodec::decode_snapshot(binary);
+    assert(binary);
+    auto binary_decoded = save::SaveBinaryCodec::decode_snapshot(binary.value());
     assert(binary_decoded);
     assert(binary_decoded.value().processes.front().required_work_ticks == 100);
     assert(binary_decoded.value().fires.front().state == simulation::FireState::lit);

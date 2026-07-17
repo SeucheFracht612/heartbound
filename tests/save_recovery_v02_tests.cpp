@@ -75,7 +75,8 @@ void test_placeholders_round_trip_and_load_without_mod() {
            source.missing_prototypes.front().saved_blob);
 
     const auto binary = heartstead::save::SaveBinaryCodec::encode_snapshot(source);
-    auto binary_round_trip = heartstead::save::SaveBinaryCodec::decode_snapshot(binary);
+    assert(binary);
+    auto binary_round_trip = heartstead::save::SaveBinaryCodec::decode_snapshot(binary.value());
     assert(binary_round_trip);
     assert(binary_round_trip.value().missing_prototypes.size() == 2);
 

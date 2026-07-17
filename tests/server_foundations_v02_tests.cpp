@@ -51,7 +51,8 @@ void test_authoritative_world_time_and_save_round_trip() {
     save::SaveSnapshot snapshot;
     snapshot.metadata = metadata;
     const auto binary = save::SaveBinaryCodec::encode_snapshot(snapshot);
-    auto decoded_binary = save::SaveBinaryCodec::decode_snapshot(binary);
+    assert(binary);
+    auto decoded_binary = save::SaveBinaryCodec::decode_snapshot(binary.value());
     assert(decoded_binary);
     assert(decoded_binary.value().metadata.world_time == clock.now());
 

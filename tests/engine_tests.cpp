@@ -5814,8 +5814,9 @@ void test_save_snapshot_validation() {
     assert(decoded_snapshot.value().mod_states.front().encoded_state == "opaque mod state");
 
     const auto binary_snapshot = heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot);
-    assert(!binary_snapshot.empty());
-    auto decoded_binary = heartstead::save::SaveBinaryCodec::decode_snapshot(binary_snapshot);
+    assert(binary_snapshot && !binary_snapshot.value().empty());
+    auto decoded_binary =
+        heartstead::save::SaveBinaryCodec::decode_snapshot(binary_snapshot.value());
     assert(decoded_binary);
     validation =
         heartstead::save::SaveSnapshotValidator::validate(decoded_binary.value(), registry);
@@ -5844,6 +5845,15 @@ void test_save_snapshot_validation() {
     assert(decoded_binary.value().assemblies.front().ports.front().capacity == 2);
     assert(decoded_binary.value().processes.front().input_slots.front().count == 4);
     assert(decoded_binary.value().mod_states.front().encoded_state == "opaque mod state");
+
+    heartstead::save::SaveSnapshot oversized_binary_snapshot;
+    oversized_binary_snapshot.metadata.game_version = "codec-limit-test";
+    oversized_binary_snapshot.mod_states.push_back(
+        {"base", "oversized", std::string(16U * 1024U * 1024U + 1U, 'x')});
+    const auto oversized_binary =
+        heartstead::save::SaveBinaryCodec::encode_snapshot(oversized_binary_snapshot);
+    assert(!oversized_binary);
+    assert(oversized_binary.error().code == "save_binary.string_too_large");
 
     const std::string legacy_entity_snapshot =
         "heartstead.save_snapshot_text.v1\n"
@@ -5893,8 +5903,11 @@ void test_save_snapshot_validation() {
         return issue.code == "cargo.invalid_transport_mode";
     }));
 
-    auto decoded_unknown_binary = heartstead::save::SaveBinaryCodec::decode_snapshot(
-        heartstead::save::SaveBinaryCodec::encode_snapshot(unknown_transport_snapshot));
+    auto encoded_unknown_binary =
+        heartstead::save::SaveBinaryCodec::encode_snapshot(unknown_transport_snapshot);
+    assert(encoded_unknown_binary);
+    auto decoded_unknown_binary =
+        heartstead::save::SaveBinaryCodec::decode_snapshot(encoded_unknown_binary.value());
     assert(decoded_unknown_binary);
     assert(decoded_unknown_binary.value().cargo_records.front().allowed_transport_modes.bits() ==
            unknown_transport_bits);
@@ -5905,7 +5918,7 @@ void test_save_snapshot_validation() {
         return issue.code == "cargo.invalid_transport_mode";
     }));
 
-    auto truncated_binary = binary_snapshot;
+    auto truncated_binary = binary_snapshot.value();
     truncated_binary.pop_back();
     auto invalid_binary = heartstead::save::SaveBinaryCodec::decode_snapshot(truncated_binary);
     assert(!invalid_binary);
@@ -6513,8 +6526,9 @@ void test_file_save_database_safety() {
     assert(recovered && recovered.value().encoded_edit_delta == "recovered");
 
     const auto legacy_root = make_temp_root() / "legacy_chunks";
-    write_bytes(legacy_root / "snapshot.hssb",
-                heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot));
+    auto legacy_snapshot_bytes = heartstead::save::SaveBinaryCodec::encode_snapshot(snapshot);
+    assert(legacy_snapshot_bytes);
+    write_bytes(legacy_root / "snapshot.hssb", legacy_snapshot_bytes.value());
     heartstead::save::FileSaveDatabase legacy_database(legacy_root);
     assert(legacy_database.write_chunk_delta({{3, 0, 0}, "third"}));
     const auto legacy_loaded = legacy_database.read_snapshot();

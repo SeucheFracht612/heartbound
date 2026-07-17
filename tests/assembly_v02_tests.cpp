@@ -79,8 +79,9 @@ void test_assembly_state_save_round_trip() {
         save::SaveTextCodec::decode_snapshot(save::SaveTextCodec::encode_snapshot(snapshot));
     assert(text && text.value().assemblies.front().state == assemblies::AssemblyState::drying);
     assert(text.value().assemblies.front().custom_state == "mortar=wet|batch=2");
-    auto binary =
-        save::SaveBinaryCodec::decode_snapshot(save::SaveBinaryCodec::encode_snapshot(snapshot));
+    auto encoded_binary = save::SaveBinaryCodec::encode_snapshot(snapshot);
+    assert(encoded_binary);
+    auto binary = save::SaveBinaryCodec::decode_snapshot(encoded_binary.value());
     assert(binary && binary.value().assemblies.front().revision == 9);
     assert(binary.value().assemblies.front().process_slots.front() ==
            core::ProcessId::from_value(31));
