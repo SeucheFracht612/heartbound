@@ -8,16 +8,19 @@
 #include <array>
 #include <cassert>
 #include <limits>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using namespace heartstead;
 
-[[nodiscard]] renderer::ShaderProgramDesc make_program(std::uint32_t bound) {
+[[nodiscard]] renderer::ShaderProgramDesc make_program(std::uint32_t bound,
+                                                       std::string id = "terrain") {
     const std::vector<std::uint32_t> spirv{0x07230203, 0x00010000, 0, bound, 0};
     renderer::ShaderProgramDesc program;
-    program.id = "terrain";
+    program.id = std::move(id);
     program.stages = {
         {renderer::rhi::RenderShaderStage::vertex, "main", spirv, "terrain.vert.spv"},
         {renderer::rhi::RenderShaderStage::fragment, "main", spirv, "terrain.frag.spv"},
@@ -135,6 +138,86 @@ void test_shader_interface_rejects_mismatch() {
         *shaders.find(program.value()), layout, pipeline.vertex_stride, pipeline.vertex_attributes);
     assert(!status);
     assert(status.error().code == "shader_manager.vertex_stride_mismatch");
+    assert(shaders.shutdown());
+}
+
+void test_shader_views_stay_valid_across_growth() {
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+
+    renderer::ShaderManager shaders(*device.value());
+    auto first_handle = shaders.create_program(make_program(1, "p0"));
+    assert(first_handle);
+    const auto* first_view = shaders.find(first_handle.value());
+    assert(first_view != nullptr);
+    assert(first_view->id == "p0");
+    assert(first_view->vertex_entry_point == "main");
+    assert(first_view->dependencies.size() == 2);
+
+    for (std::uint32_t index = 1; index <= 512; ++index) {
+        auto created = shaders.create_program(make_program(index + 1, "p" + std::to_string(index)));
+        assert(created);
+    }
+
+    const auto* reacquired = shaders.find(first_handle.value());
+    assert(reacquired == first_view);
+    assert(reacquired->id == "p0");
+    assert(reacquired->vertex_entry_point == "main");
+    assert(reacquired->fragment_entry_point == "main");
+    assert(reacquired->dependencies.front() == "terrain.common");
+    assert(shaders.shutdown());
+}
+
+void test_shader_slot_reuse_clears_superseded_modules() {
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+    const auto baseline = device.value()->live_resource_count();
+
+    renderer::ShaderManager shaders(*device.value(), true);
+    auto original = shaders.create_program(make_program(1, "original"));
+    assert(original);
+    assert(shaders.reload_program(original.value(), make_program(2, "original")));
+    assert(shaders.stats().superseded_module_count == 2);
+    assert(shaders.release_program(original.value()));
+    assert(shaders.stats().resident_program_count == 0);
+    assert(shaders.stats().superseded_module_count == 0);
+    assert(device.value()->live_resource_count() == baseline);
+
+    auto replacement = shaders.create_program(make_program(3, "replacement"));
+    assert(replacement);
+    assert(replacement.value().index == original.value().index);
+    assert(replacement.value().generation != original.value().generation);
+    assert(shaders.release_program(replacement.value()));
+    assert(shaders.shutdown());
+    assert(device.value()->live_resource_count() == baseline);
+}
+
+void test_push_constant_stage_coverage_requires_every_stage() {
+    renderer::rhi::RenderDeviceDesc device_desc;
+    auto device = renderer::rhi::create_render_device(device_desc);
+    assert(device);
+
+    auto desc = make_program(1);
+    desc.interface.push_constant_ranges.front().stages =
+        renderer::rhi::RenderShaderStageFlags::vertex |
+        renderer::rhi::RenderShaderStageFlags::fragment;
+    renderer::ShaderManager shaders(*device.value());
+    auto program = shaders.create_program(std::move(desc));
+    assert(program);
+
+    auto layout = make_layout();
+    auto pipeline = make_pipeline(layout);
+    auto status = renderer::validate_shader_interface(
+        *shaders.find(program.value()), layout, pipeline.vertex_stride, pipeline.vertex_attributes);
+    assert(!status);
+    assert(status.error().code == "shader_manager.push_constant_interface_mismatch");
+
+    layout.push_constant_ranges.front().stages = renderer::rhi::RenderShaderStageFlags::vertex |
+                                                 renderer::rhi::RenderShaderStageFlags::fragment;
+    assert(renderer::validate_shader_interface(*shaders.find(program.value()), layout,
+                                               pipeline.vertex_stride, pipeline.vertex_attributes));
     assert(shaders.shutdown());
 }
 
@@ -322,6 +405,9 @@ void test_material_table_updates_without_mesh_changes() {
 int main() {
     test_shader_hot_reload_and_pipeline_cache();
     test_shader_interface_rejects_mismatch();
+    test_shader_views_stay_valid_across_growth();
+    test_shader_slot_reuse_clears_superseded_modules();
+    test_push_constant_stage_coverage_requires_every_stage();
     test_texture_arrays_mips_fallbacks_and_sampler_cache();
     test_srgb_mip_generation();
     test_material_table_updates_without_mesh_changes();

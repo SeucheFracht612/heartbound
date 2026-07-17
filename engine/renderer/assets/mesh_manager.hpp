@@ -7,6 +7,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <span>
 #include <string>
@@ -104,7 +105,8 @@ class MeshManager {
     rhi::IRenderDevice* device_ = nullptr;
     std::unique_ptr<GpuBufferArena> vertex_arena_;
     std::unique_ptr<GpuBufferArena> index_arena_;
-    std::vector<Record> records_;
+    // RenderMeshView pointers and id views remain valid while their record is resident.
+    std::deque<Record> records_;
     RenderMeshHandle fallback_mesh_;
     MeshManagerStats stats_{};
 };

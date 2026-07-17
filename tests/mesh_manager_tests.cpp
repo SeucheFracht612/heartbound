@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cassert>
+#include <string>
 
 namespace {
 
@@ -33,9 +34,10 @@ void test_mesh_upload_cache_fallback_and_release() {
     assert(manager.stats().resident_mesh_count == 1);
     assert(device.value()->live_resource_count() == baseline + 2);
 
-    const renderer::StaticMeshUploadDesc upload{
-        "test_triangle", triangle_vertices, triangle_indices,
-        {{-1.0F, -1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}}};
+    const renderer::StaticMeshUploadDesc upload{"test_triangle",
+                                                triangle_vertices,
+                                                triangle_indices,
+                                                {{-1.0F, -1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}}};
     auto mesh = manager.create_mesh(upload);
     assert(mesh);
     const auto* view = manager.find_exact(mesh.value());
@@ -84,11 +86,49 @@ void test_invalid_mesh_rejected_without_allocating() {
     const auto resources = device.value()->live_resource_count();
 
     constexpr std::array<std::uint32_t, 3> invalid_indices{0, 1, 99};
-    auto invalid = manager.create_mesh({"invalid", triangle_vertices, invalid_indices,
+    auto invalid = manager.create_mesh({"invalid",
+                                        triangle_vertices,
+                                        invalid_indices,
                                         {{-1.0F, -1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}}});
     assert(!invalid);
     assert(invalid.error().code == "mesh_manager.index_out_of_bounds");
     assert(device.value()->live_resource_count() == resources);
+    assert(manager.shutdown());
+}
+
+void test_mesh_views_stay_valid_across_growth() {
+    renderer::rhi::RenderDeviceDesc desc;
+    auto device = renderer::rhi::create_render_device(desc);
+    assert(device);
+
+    renderer::MeshManager manager(*device.value());
+    renderer::MeshManagerConfig config;
+    config.vertex_initial_bytes = 128U * 1024U;
+    config.vertex_maximum_bytes = 1024U * 1024U;
+    config.index_initial_bytes = 128U * 1024U;
+    config.index_maximum_bytes = 1024U * 1024U;
+    assert(manager.initialize(config));
+
+    auto first = manager.create_mesh(
+        {"m0", triangle_vertices, triangle_indices, {{-1.0F, -1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}}});
+    assert(first);
+    const auto* first_view = manager.find_exact(first.value());
+    assert(first_view != nullptr);
+    assert(first_view->id == "m0");
+
+    for (std::uint32_t index = 1; index <= 512; ++index) {
+        auto created = manager.create_mesh({"m" + std::to_string(index),
+                                            triangle_vertices,
+                                            triangle_indices,
+                                            {{-1.0F, -1.0F, 0.0F}, {1.0F, 1.0F, 0.0F}}});
+        assert(created);
+    }
+
+    const auto* reacquired = manager.find_exact(first.value());
+    assert(reacquired == first_view);
+    assert(reacquired->id == "m0");
+    assert(reacquired->vertex_count == triangle_vertices.size());
+    assert(reacquired->index_count == triangle_indices.size());
     assert(manager.shutdown());
 }
 
@@ -97,5 +137,6 @@ void test_invalid_mesh_rejected_without_allocating() {
 int main() {
     test_mesh_upload_cache_fallback_and_release();
     test_invalid_mesh_rejected_without_allocating();
+    test_mesh_views_stay_valid_across_growth();
     return 0;
 }

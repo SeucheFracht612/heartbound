@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <span>
 #include <string>
 #include <string_view>
@@ -104,7 +105,8 @@ class ShaderManager {
 
     rhi::IRenderDevice& device_;
     bool hot_reload_enabled_ = false;
-    std::vector<ProgramRecord> programs_;
+    // Program views expose addresses and non-owning fields into records; growth must not move them.
+    std::deque<ProgramRecord> programs_;
     ShaderManagerStats stats_{};
 };
 

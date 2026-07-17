@@ -15,7 +15,7 @@ namespace {
 
 [[nodiscard]] bool range_contains(const rhi::RenderPushConstantRange& outer,
                                   const rhi::RenderPushConstantRange& inner) noexcept {
-    if (!rhi::any(outer.stages & inner.stages) || outer.byte_offset > inner.byte_offset) {
+    if ((outer.stages & inner.stages) != inner.stages || outer.byte_offset > inner.byte_offset) {
         return false;
     }
     const auto outer_end = static_cast<std::uint64_t>(outer.byte_offset) + outer.byte_size;
@@ -75,6 +75,7 @@ core::Result<ShaderProgramHandle> ShaderManager::create_program(ShaderProgramDes
         programs_.emplace_back();
     }
     auto& record = programs_[slot];
+    record.superseded_modules.clear();
     record.occupied = true;
     record.revision = 1;
     record.loaded = std::move(loaded).value();
@@ -136,6 +137,7 @@ core::Status ShaderManager::release_program(ShaderProgramHandle handle) {
             first_failure = status;
         }
     }
+    record->superseded_modules.clear();
     record->loaded = {};
     record->view = {};
     record->occupied = false;
@@ -292,7 +294,9 @@ void ShaderManager::update_stats() noexcept {
     }
     stats_.superseded_module_count = 0;
     for (const auto& record : programs_) {
-        stats_.superseded_module_count += record.superseded_modules.size();
+        if (record.occupied) {
+            stats_.superseded_module_count += record.superseded_modules.size();
+        }
     }
 }
 
