@@ -16,6 +16,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -78,8 +79,7 @@ TestYard make_yard() {
     return yard;
 }
 
-movement::PlayerControllerState initial_state(double x = 2.5, double y = 1.0,
-                                               double z = 2.5) {
+movement::PlayerControllerState initial_state(double x = 2.5, double y = 1.0, double z = 2.5) {
     movement::PlayerControllerState state;
     state.position = world::WorldPosition{x, y, z};
     state.fall_origin = state.position;
@@ -115,8 +115,8 @@ void test_fixed_step_and_input_codec() {
     auto source = input(7, jump, jump, 12'345, -23'456);
     source.yaw_centidegrees = 9'000;
     source.pitch_centidegrees = -1'250;
-    auto decoded = movement::PlayerInputTextCodec::decode(
-        movement::PlayerInputTextCodec::encode(source));
+    auto decoded =
+        movement::PlayerInputTextCodec::decode(movement::PlayerInputTextCodec::encode(source));
     assert(decoded);
     assert(decoded.value().tick == source.tick);
     assert(decoded.value().move_x == source.move_x);
@@ -151,6 +151,23 @@ void test_fixed_step_and_input_codec() {
     assert(platform.poll_event());
     auto snapshot = platform.input_snapshot(window.value());
     assert(snapshot && snapshot->mouse_delta_x == 12 && snapshot->mouse_delta_y == -9);
+
+    movement::PlayerInputSampler sampler;
+    sampler.set_look_sensitivity(std::numeric_limits<double>::max());
+    platform::WindowInputSnapshot small_motion;
+    small_motion.mouse_delta_x = 1;
+    auto bounded = sampler.sample(small_motion, 1);
+    assert(bounded.yaw_centidegrees == 12);
+    assert(bounded.validate());
+
+    sampler.set_look_sensitivity(movement::max_player_look_sensitivity_centidegrees_per_pixel);
+    platform::WindowInputSnapshot extreme_motion;
+    extreme_motion.mouse_delta_x = std::numeric_limits<std::int32_t>::max();
+    extreme_motion.mouse_delta_y = std::numeric_limits<std::int32_t>::min();
+    auto normalized = sampler.sample(extreme_motion, 2);
+    assert(normalized.yaw_centidegrees >= -18'000 && normalized.yaw_centidegrees <= 18'000);
+    assert(normalized.pitch_centidegrees == 8'900);
+    assert(normalized.validate());
 
     platform::PlatformEvent key_down;
     key_down.kind = platform::PlatformEventKind::key_down;
@@ -201,15 +218,15 @@ void test_walk_jump_dash_and_step() {
     const auto dash_start = dash_state.position.approximate_global().z;
     for (std::uint64_t tick = 1; tick <= 9; ++tick) {
         const auto buttons = tick == 1 ? dash : 0u;
-        auto result = controller.tick(dash_state,
-                                      input(tick, buttons, buttons, 0, 32'767), {}, collision);
+        auto result =
+            controller.tick(dash_state, input(tick, buttons, buttons, 0, 32'767), {}, collision);
         assert(result);
         dash_state = result.value().state;
     }
     assert(std::abs((dash_state.position.approximate_global().z - dash_start) - 4.0) < 0.01);
 
-    auto step_move = collision.move(world::WorldPosition{7.2, 1.0, 2.5}, {0.6, 1.8},
-                                    {1.2, 0.0, 0.0}, 0.6);
+    auto step_move =
+        collision.move(world::WorldPosition{7.2, 1.0, 2.5}, {0.6, 1.8}, {1.2, 0.0, 0.0}, 0.6);
     assert(step_move);
     assert(step_move.value().stepped);
     assert(step_move.value().position.approximate_global().y > 1.45);
@@ -230,8 +247,8 @@ void test_roll_stamina_and_encumbrance() {
     bool observed_iframe = false;
     for (std::uint64_t tick = 1; tick <= 33; ++tick) {
         const auto buttons = tick == 1 ? roll : 0u;
-        auto result = controller.tick(state, input(tick, buttons, buttons, 0, 32'767), {},
-                                      collision);
+        auto result =
+            controller.tick(state, input(tick, buttons, buttons, 0, 32'767), {}, collision);
         assert(result);
         state = result.value().state;
         observed_iframe |= state.invulnerable;
@@ -240,10 +257,8 @@ void test_roll_stamina_and_encumbrance() {
     assert(std::abs((state.position.approximate_global().z - start) - 3.5) < 0.02);
     assert(state.stamina_milli == 80'000);
 
-    assert(movement::PlayerController::encumbrance_tier(399) ==
-           movement::EncumbranceTier::light);
-    assert(movement::PlayerController::encumbrance_tier(400) ==
-           movement::EncumbranceTier::medium);
+    assert(movement::PlayerController::encumbrance_tier(399) == movement::EncumbranceTier::light);
+    assert(movement::PlayerController::encumbrance_tier(400) == movement::EncumbranceTier::medium);
     assert(movement::PlayerController::encumbrance_tier(1001) ==
            movement::EncumbranceTier::over_encumbered);
 }
@@ -272,8 +287,8 @@ void test_snapshot_prediction_camera_and_load() {
     assert(prediction.record(second_input));
     auto predicted = controller.tick(state, second_input, {}, collision);
     assert(predicted);
-    auto reconciled = prediction.reconcile(predicted.value().state, snapshot, controller, {},
-                                           collision);
+    auto reconciled =
+        prediction.reconcile(predicted.value().state, snapshot, controller, {}, collision);
     assert(reconciled);
     assert(reconciled.value().replayed_input_count == 1);
     assert(reconciled.value().state.position == predicted.value().state.position);
@@ -325,8 +340,7 @@ void test_environment_fall_and_verb_boundaries() {
 
     const auto interact = movement::input_button_bit(movement::PlayerInputButton::interact);
     auto ladder_state = initial_state(24.5, 1.0, 2.5);
-    auto climb = controller.tick(ladder_state,
-                                 input(1, interact, 0, 0, 32'767), {}, collision);
+    auto climb = controller.tick(ladder_state, input(1, interact, 0, 0, 32'767), {}, collision);
     assert(climb);
     assert(climb.value().state.mode == movement::PlayerControllerMode::climbing);
     assert(climb.value().state.velocity.y > 0.0);
@@ -408,8 +422,7 @@ void test_resource_tiers_and_air_dash() {
     auto medium_air = initial_state(4.5, 5.0, 4.5);
     medium_air.grounded = false;
     medium_air.mode = movement::PlayerControllerMode::airborne;
-    auto rejected = controller.tick(medium_air, input(1, dash, dash, 0, 32'767), medium,
-                                    collision);
+    auto rejected = controller.tick(medium_air, input(1, dash, dash, 0, 32'767), medium, collision);
     assert(rejected);
     assert(rejected.value().state.mode == movement::PlayerControllerMode::airborne);
     assert(rejected.value().state.stamina_milli == 100'000);
@@ -420,8 +433,7 @@ void test_resource_tiers_and_air_dash() {
     over_state.stamina_milli = 50'000;
     const auto start = over_state.position.approximate_global().z;
     for (std::uint64_t tick = 1; tick <= 60; ++tick) {
-        auto result = controller.tick(over_state, input(tick, 0, 0, 0, 32'767), over,
-                                      collision);
+        auto result = controller.tick(over_state, input(tick, 0, 0, 0, 32'767), over, collision);
         assert(result);
         over_state = result.value().state;
     }
@@ -481,8 +493,7 @@ void test_coyote_buffer_and_crouch_edge_guard() {
     assert(coast);
     coyote = coast.value().state;
     const auto jump = movement::input_button_bit(movement::PlayerInputButton::jump);
-    auto coyote_jump =
-        controller.tick(coyote, input(tick, jump, jump, 0, 32'767), {}, collision);
+    auto coyote_jump = controller.tick(coyote, input(tick, jump, jump, 0, 32'767), {}, collision);
     assert(coyote_jump);
     assert(coyote_jump.value().state.velocity.y > 0.0);
 
@@ -497,8 +508,8 @@ void test_coyote_buffer_and_crouch_edge_guard() {
         const auto height = buffered.position.approximate_global().y;
         const auto should_press = !buffered_press_sent && height < 1.35;
         const auto buttons = should_press ? jump : 0u;
-        auto result = controller.tick(buffered,
-                                      input(buffer_tick, buttons, buttons), {}, collision);
+        auto result =
+            controller.tick(buffered, input(buffer_tick, buttons, buttons), {}, collision);
         assert(result);
         buffered = result.value().state;
         buffered_press_sent |= should_press;
@@ -561,12 +572,12 @@ void test_determinism_far_world_store_and_load_normalization() {
     assert(!normalized.value().invulnerable);
     assert(normalized.value().mode == movement::PlayerControllerMode::grounded);
 
-    assert(movement::player_controller_transition_allowed(
-        movement::PlayerControllerMode::grounded, movement::PlayerControllerMode::airborne,
-        movement::PlayerTransitionCause::jump));
-    assert(!movement::player_controller_transition_allowed(
-        movement::PlayerControllerMode::grounded, movement::PlayerControllerMode::swimming,
-        movement::PlayerTransitionCause::roll));
+    assert(movement::player_controller_transition_allowed(movement::PlayerControllerMode::grounded,
+                                                          movement::PlayerControllerMode::airborne,
+                                                          movement::PlayerTransitionCause::jump));
+    assert(!movement::player_controller_transition_allowed(movement::PlayerControllerMode::grounded,
+                                                           movement::PlayerControllerMode::swimming,
+                                                           movement::PlayerTransitionCause::roll));
 
     world::ChunkDatabase far_chunks;
     constexpr std::int64_t far = 9'000'000'000'000'000;

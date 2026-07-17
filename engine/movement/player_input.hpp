@@ -10,6 +10,7 @@
 namespace heartstead::movement {
 
 inline constexpr std::uint16_t player_input_version = 1;
+inline constexpr double max_player_look_sensitivity_centidegrees_per_pixel = 36'000.0;
 
 enum class PlayerInputButton : std::uint32_t {
     jump = 1u << 0u,

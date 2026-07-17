@@ -38,9 +38,8 @@ template <typename T>
     std::size_t first = 0;
     while (first <= text.size()) {
         const auto last = text.find('|', first);
-        parts.push_back(text.substr(first, last == std::string_view::npos
-                                              ? text.size() - first
-                                              : last - first));
+        parts.push_back(text.substr(first, last == std::string_view::npos ? text.size() - first
+                                                                          : last - first));
         if (last == std::string_view::npos) {
             break;
         }
@@ -96,8 +95,8 @@ std::string PlayerInputTextCodec::encode(const PlayerInputFrame& input) {
     return std::to_string(input.version) + '|' + std::to_string(input.tick) + '|' +
            std::to_string(input.sequence) + '|' + std::to_string(input.move_x) + '|' +
            std::to_string(input.move_z) + '|' + std::to_string(input.yaw_centidegrees) + '|' +
-           std::to_string(input.pitch_centidegrees) + '|' +
-           std::to_string(input.held_buttons) + '|' + std::to_string(input.pressed_buttons);
+           std::to_string(input.pitch_centidegrees) + '|' + std::to_string(input.held_buttons) +
+           '|' + std::to_string(input.pressed_buttons);
 }
 
 core::Result<PlayerInputFrame> PlayerInputTextCodec::decode(std::string_view payload) {
@@ -121,25 +120,24 @@ core::Result<PlayerInputFrame> PlayerInputTextCodec::decode(std::string_view pay
     auto pressed = parse_integer<std::uint32_t>(parts[8], "pressed_buttons");
     if (!version || !tick || !sequence || !move_x || !move_z || !yaw || !pitch || !held ||
         !pressed) {
-        const auto* error = !version   ? &version.error()
-                            : !tick    ? &tick.error()
+        const auto* error = !version    ? &version.error()
+                            : !tick     ? &tick.error()
                             : !sequence ? &sequence.error()
-                            : !move_x  ? &move_x.error()
-                            : !move_z  ? &move_z.error()
-                            : !yaw     ? &yaw.error()
-                            : !pitch   ? &pitch.error()
-                            : !held    ? &held.error()
-                                       : &pressed.error();
+                            : !move_x   ? &move_x.error()
+                            : !move_z   ? &move_z.error()
+                            : !yaw      ? &yaw.error()
+                            : !pitch    ? &pitch.error()
+                            : !held     ? &held.error()
+                                        : &pressed.error();
         return core::Result<PlayerInputFrame>::failure(error->code, error->message);
     }
 
-    PlayerInputFrame result{version.value(), tick.value(), sequence.value(), move_x.value(),
-                            move_z.value(), yaw.value(), pitch.value(), held.value(),
-                            pressed.value()};
+    PlayerInputFrame result{version.value(), tick.value(),   sequence.value(),
+                            move_x.value(),  move_z.value(), yaw.value(),
+                            pitch.value(),   held.value(),   pressed.value()};
     auto status = result.validate();
     if (!status) {
-        return core::Result<PlayerInputFrame>::failure(status.error().code,
-                                                       status.error().message);
+        return core::Result<PlayerInputFrame>::failure(status.error().code, status.error().message);
     }
     return core::Result<PlayerInputFrame>::success(result);
 }
@@ -163,15 +161,16 @@ PlayerInputFrame PlayerInputSampler::sample(const platform::WindowInputSnapshot&
         z *= 32'767;
     }
 
-    yaw_centidegrees_ += static_cast<double>(snapshot.mouse_delta_x) * look_sensitivity_;
-    pitch_centidegrees_ -= static_cast<double>(snapshot.mouse_delta_y) * look_sensitivity_;
-    while (yaw_centidegrees_ > 18'000.0) {
-        yaw_centidegrees_ -= 36'000.0;
+    const auto yaw_delta = static_cast<double>(snapshot.mouse_delta_x) * look_sensitivity_;
+    const auto pitch_delta = static_cast<double>(snapshot.mouse_delta_y) * look_sensitivity_;
+    const auto next_yaw = yaw_centidegrees_ + yaw_delta;
+    const auto next_pitch = pitch_centidegrees_ - pitch_delta;
+    if (std::isfinite(next_yaw)) {
+        yaw_centidegrees_ = std::remainder(next_yaw, 36'000.0);
     }
-    while (yaw_centidegrees_ < -18'000.0) {
-        yaw_centidegrees_ += 36'000.0;
+    if (std::isfinite(next_pitch)) {
+        pitch_centidegrees_ = std::clamp(next_pitch, -8'900.0, 8'900.0);
     }
-    pitch_centidegrees_ = std::clamp(pitch_centidegrees_, -8'900.0, 8'900.0);
 
     PlayerInputFrame frame;
     frame.tick = tick;
@@ -202,7 +201,8 @@ PlayerInputFrame PlayerInputSampler::sample(const platform::WindowInputSnapshot&
 }
 
 void PlayerInputSampler::set_look_sensitivity(double centidegrees_per_pixel) noexcept {
-    if (std::isfinite(centidegrees_per_pixel) && centidegrees_per_pixel > 0.0) {
+    if (std::isfinite(centidegrees_per_pixel) && centidegrees_per_pixel > 0.0 &&
+        centidegrees_per_pixel <= max_player_look_sensitivity_centidegrees_per_pixel) {
         look_sensitivity_ = centidegrees_per_pixel;
     }
 }
