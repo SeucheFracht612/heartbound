@@ -4,9 +4,11 @@
 #include "engine/save/save_binary_codec.hpp"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -272,18 +274,24 @@ readable_chunk_directory(const std::filesystem::path& root) {
     return core::Result<std::int64_t>::success(parsed);
 }
 
-[[nodiscard]] std::vector<std::string_view> split(std::string_view value, char delimiter) {
-    std::vector<std::string_view> result;
+template <std::size_t FieldCount>
+[[nodiscard]] std::optional<std::array<std::string_view, FieldCount>>
+split_exact(std::string_view value, char delimiter) {
+    static_assert(FieldCount > 0);
+    std::array<std::string_view, FieldCount> result;
     std::size_t start = 0;
-    while (start <= value.size()) {
+    for (std::size_t index = 0; index + 1 < FieldCount; ++index) {
         const auto end = value.find(delimiter, start);
         if (end == std::string_view::npos) {
-            result.push_back(value.substr(start));
-            break;
+            return std::nullopt;
         }
-        result.push_back(value.substr(start, end - start));
+        result[index] = value.substr(start, end - start);
         start = end + 1;
     }
+    if (value.find(delimiter, start) != std::string_view::npos) {
+        return std::nullopt;
+    }
+    result.back() = value.substr(start);
     return result;
 }
 
@@ -344,18 +352,18 @@ read_chunk_index(const std::filesystem::path& root) {
         } else if (line == "end") {
             saw_end = true;
         } else if (!line.empty()) {
-            const auto fields = split(line, '|');
-            if (fields.size() != 5 || fields.front() != "chunk") {
+            const auto fields = split_exact<5>(line, '|');
+            if (!fields || fields->front() != "chunk") {
                 return core::Result<std::vector<ChunkIndexEntry>>::failure(
                     "save_database.invalid_chunk_index",
                     "chunk index row must be chunk|x|y|z|filename");
             }
-            auto x = parse_i64(fields[1], "x");
-            auto y = parse_i64(fields[2], "y");
-            auto z = parse_i64(fields[3], "z");
-            if (!x || !y || !z || fields[4].empty() ||
-                fields[4].find('/') != std::string_view::npos ||
-                fields[4].find('\\') != std::string_view::npos) {
+            auto x = parse_i64((*fields)[1], "x");
+            auto y = parse_i64((*fields)[2], "y");
+            auto z = parse_i64((*fields)[3], "z");
+            if (!x || !y || !z || (*fields)[4].empty() ||
+                (*fields)[4].find('/') != std::string_view::npos ||
+                (*fields)[4].find('\\') != std::string_view::npos) {
                 return core::Result<std::vector<ChunkIndexEntry>>::failure(
                     "save_database.invalid_chunk_index", "chunk index row contains invalid fields");
             }
@@ -366,12 +374,12 @@ read_chunk_index(const std::filesystem::path& root) {
                     "save_database.duplicate_chunk_coordinate",
                     "chunk index contains a duplicate chunk coordinate");
             }
-            if (!seen_filenames.emplace(fields[4]).second) {
+            if (!seen_filenames.emplace((*fields)[4]).second) {
                 return core::Result<std::vector<ChunkIndexEntry>>::failure(
                     "save_database.duplicate_chunk_filename",
                     "chunk index contains a duplicate chunk filename");
             }
-            if (fields[4] != canonical_filename) {
+            if ((*fields)[4] != canonical_filename) {
                 return core::Result<std::vector<ChunkIndexEntry>>::failure(
                     "save_database.noncanonical_chunk_filename",
                     "chunk index filename does not match its chunk coordinate");
@@ -381,7 +389,7 @@ read_chunk_index(const std::filesystem::path& root) {
                     "save_database.too_many_chunk_deltas",
                     "chunk index exceeds the configured record limit");
             }
-            entries.push_back({coord, std::string(fields[4])});
+            entries.push_back({coord, std::string((*fields)[4])});
         }
 
         if (line_end == std::string_view::npos) {
@@ -394,6 +402,15 @@ read_chunk_index(const std::filesystem::path& root) {
         return core::Result<std::vector<ChunkIndexEntry>>::failure(
             "save_database.incomplete_chunk_index", "chunk index is incomplete");
     }
+    std::ranges::sort(entries, [](const ChunkIndexEntry& left, const ChunkIndexEntry& right) {
+        if (left.coord.x != right.coord.x) {
+            return left.coord.x < right.coord.x;
+        }
+        if (left.coord.y != right.coord.y) {
+            return left.coord.y < right.coord.y;
+        }
+        return left.coord.z < right.coord.z;
+    });
     return core::Result<std::vector<ChunkIndexEntry>>::success(std::move(entries));
 }
 
@@ -492,13 +509,13 @@ write_chunk_index_to_directory(const std::filesystem::path& directory,
         } else if (line == "end") {
             saw_end = true;
         } else if (!line.empty()) {
-            const auto fields = split(line, '|');
-            if (fields.size() != 2 || fields.front() != "active") {
+            const auto fields = split_exact<2>(line, '|');
+            if (!fields || fields->front() != "active") {
                 return core::Result<std::string>::failure(
                     "save_database.invalid_generation_manifest",
                     "save generation manifest must contain active|generation_number");
             }
-            auto generation_number = parse_generation_number(fields[1]);
+            auto generation_number = parse_generation_number((*fields)[1]);
             if (!generation_number) {
                 return core::Result<std::string>::failure(
                     "save_database.invalid_generation_manifest",
@@ -509,7 +526,7 @@ write_chunk_index_to_directory(const std::filesystem::path& directory,
                     "save_database.invalid_generation_manifest",
                     "save generation manifest declares more than one active generation");
             }
-            active_generation = std::string(fields[1]);
+            active_generation = std::string((*fields)[1]);
         }
 
         if (line_end == std::string_view::npos) {
@@ -757,6 +774,10 @@ read_chunk_delta_payload(const std::filesystem::path& path,
         return core::Result<std::string>::failure(
             "save_database.chunk_delta_too_large",
             "chunk delta payload exceeds the configured safety limit");
+    }
+    if (file_bytes == 0) {
+        return core::Result<std::string>::failure("save_database.empty_chunk_delta",
+                                                  "chunk delta payload must not be empty");
     }
     if (file_bytes > remaining_table_bytes) {
         return core::Result<std::string>::failure(
@@ -1010,6 +1031,12 @@ core::Status FileSaveDatabase::write_snapshot(const SaveSnapshot& snapshot) cons
         return status;
     }
 
+    status = write_chunk_deltas_to_root(staged_root, snapshot.chunk_edits);
+    if (!status) {
+        (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
+        return status;
+    }
+
     const auto encoded = SaveBinaryCodec::encode_snapshot(snapshot);
     if (encoded.size() > max_snapshot_file_bytes) {
         (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
@@ -1017,12 +1044,6 @@ core::Status FileSaveDatabase::write_snapshot(const SaveSnapshot& snapshot) cons
                                      "binary save snapshot exceeds the configured safety limit");
     }
     status = write_bytes_atomic(snapshot_path(staged_root), encoded);
-    if (!status) {
-        (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
-        return status;
-    }
-
-    status = write_chunk_deltas_to_root(staged_root, snapshot.chunk_edits);
     if (!status) {
         (void)remove_tree(staged_root, "save_database.remove_staged_generation_failed");
         return status;
@@ -1486,12 +1507,16 @@ core::Result<SaveDatabaseStats> FileSaveDatabase::stats() const {
                                                         chunks.error().message);
     }
     for (const auto& entry : entries.value()) {
-        result.chunk_delta_bytes +=
-            std::filesystem::file_size(chunks.value() / entry.filename, error);
+        const auto file_bytes = std::filesystem::file_size(chunks.value() / entry.filename, error);
         if (error) {
             return core::Result<SaveDatabaseStats>::failure("save_database.stats_failed",
                                                             error.message());
         }
+        if (file_bytes > std::numeric_limits<std::uintmax_t>::max() - result.chunk_delta_bytes) {
+            return core::Result<SaveDatabaseStats>::failure("save_database.stats_failed",
+                                                            "chunk delta byte count overflowed");
+        }
+        result.chunk_delta_bytes += file_bytes;
     }
 
     return core::Result<SaveDatabaseStats>::success(result);
