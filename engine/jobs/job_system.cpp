@@ -3,6 +3,7 @@
 #include "engine/jobs/thread_pool/thread_pool_backend.hpp"
 
 #include <exception>
+#include <limits>
 #include <utility>
 
 namespace heartstead::jobs {
@@ -21,7 +22,8 @@ template <typename T> [[nodiscard]] std::vector<T> drain_queue(std::queue<T>& qu
 
 class ImmediateJobSystem final : public IJobSystem {
   public:
-    explicit ImmediateJobSystem(JobSystemDesc desc) : desc_(desc) {}
+    explicit ImmediateJobSystem(JobSystemDesc desc)
+        : desc_(desc), next_job_id_(desc.first_job_id) {}
 
     [[nodiscard]] JobBackend backend() const noexcept override {
         return JobBackend::immediate;
@@ -53,17 +55,20 @@ class ImmediateJobSystem final : public IJobSystem {
                                                 "completed job result queue is full");
         }
 
-        const auto id = next_job_id();
+        auto id = next_job_id();
+        if (!id) {
+            return id;
+        }
         ++submitted_count_;
 
         JobResult result;
-        result.id = id;
+        result.id = id.value();
         result.name = desc.name;
         result.priority = desc.priority;
         result.state = JobState::running;
 
         try {
-            const JobContext context{id, desc.name, desc.priority, false};
+            const JobContext context{id.value(), desc.name, desc.priority, false};
             auto work_status = desc.work(context);
             if (work_status) {
                 result.state = JobState::succeeded;
@@ -85,7 +90,7 @@ class ImmediateJobSystem final : public IJobSystem {
 
         result.completion_order = ++completed_count_;
         completed_results_.push(std::move(result));
-        return core::Result<JobId>::success(id);
+        return id;
     }
 
     [[nodiscard]] std::vector<JobResult> drain_completed() override {
@@ -93,10 +98,16 @@ class ImmediateJobSystem final : public IJobSystem {
     }
 
   private:
-    [[nodiscard]] JobId next_job_id() {
+    [[nodiscard]] core::Result<JobId> next_job_id() {
+        if (next_job_id_ == 0) {
+            return core::Result<JobId>::failure("jobs.id_range_exhausted",
+                                                "job id range is exhausted");
+        }
         const auto id = JobId::from_value(next_job_id_);
-        ++next_job_id_;
-        return id;
+        next_job_id_ = next_job_id_ == std::numeric_limits<std::uint64_t>::max()
+                           ? 0
+                           : next_job_id_ + 1;
+        return core::Result<JobId>::success(id);
     }
 
     JobSystemDesc desc_;
@@ -135,6 +146,10 @@ core::Status validate_job_system_desc(const JobSystemDesc& desc) {
     if (desc.max_completed_results == 0) {
         return core::Status::failure("jobs.invalid_completed_limit",
                                      "job system completed result limit must be non-zero");
+    }
+    if (desc.first_job_id == 0) {
+        return core::Status::failure("jobs.invalid_first_id",
+                                     "job system first job id must be non-zero");
     }
     return core::Status::ok();
 }

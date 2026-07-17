@@ -3944,6 +3944,36 @@ void test_job_system() {
 
     assert(!create_job_system(JobSystemDesc{JobBackend::immediate, 0, 16}));
     assert(!create_job_system(JobSystemDesc{JobBackend::immediate, 1, 0}));
+    assert(!create_job_system(JobSystemDesc{JobBackend::immediate, 1, 16, 0}));
+
+    constexpr auto maximum_job_id = std::numeric_limits<std::uint64_t>::max();
+    auto exhausting_immediate =
+        create_job_system(JobSystemDesc{JobBackend::immediate, 1, 2, maximum_job_id});
+    assert(exhausting_immediate);
+    auto final_immediate_job = exhausting_immediate.value()->submit(JobDesc{
+        "id.final.immediate", JobPriority::normal,
+        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    assert(final_immediate_job && final_immediate_job.value().value() == maximum_job_id);
+    auto exhausted_immediate_job = exhausting_immediate.value()->submit(JobDesc{
+        "id.exhausted.immediate", JobPriority::normal,
+        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    assert(!exhausted_immediate_job);
+    assert(exhausted_immediate_job.error().code == "jobs.id_range_exhausted");
+
+    auto exhausting_pool =
+        create_job_system(JobSystemDesc{JobBackend::thread_pool, 1, 2, maximum_job_id});
+    assert(exhausting_pool);
+    auto final_threaded_job = exhausting_pool.value()->submit(JobDesc{
+        "id.final.threaded", JobPriority::normal,
+        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    assert(final_threaded_job && final_threaded_job.value().value() == maximum_job_id);
+    auto exhausted_threaded_job = exhausting_pool.value()->submit(JobDesc{
+        "id.exhausted.threaded", JobPriority::normal,
+        [](const JobContext&) { return heartstead::core::Status::ok(); }});
+    assert(!exhausted_threaded_job);
+    assert(exhausted_threaded_job.error().code == "jobs.id_range_exhausted");
+    assert(wait_for_completed_jobs(*exhausting_pool.value(), 1));
+    assert(exhausting_pool.value()->drain_completed().size() == 1);
 
     auto system = create_job_system(JobSystemDesc{JobBackend::immediate, 1, 2});
     assert(system);

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <exception>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -37,7 +38,8 @@ struct QueuedJob {
 
 class ThreadPoolJobSystem final : public IJobSystem {
   public:
-    explicit ThreadPoolJobSystem(JobSystemDesc desc) : desc_(desc) {
+    explicit ThreadPoolJobSystem(JobSystemDesc desc)
+        : desc_(desc), next_job_id_(desc.first_job_id) {
         workers_.reserve(desc_.worker_count);
         try {
             for (std::uint32_t index = 0; index < desc_.worker_count; ++index) {
@@ -104,9 +106,12 @@ class ThreadPoolJobSystem final : public IJobSystem {
             }
         }
 
-        const auto id = next_job_id();
+        auto id = next_job_id();
+        if (!id) {
+            return id;
+        }
         QueuedJob queued;
-        queued.id = id;
+        queued.id = id.value();
         queued.name = std::move(desc.name);
         queued.priority = desc.priority;
         queued.work = std::move(desc.work);
@@ -122,7 +127,7 @@ class ThreadPoolJobSystem final : public IJobSystem {
         }
 
         jobs_ready_.notify_one();
-        return core::Result<JobId>::success(id);
+        return id;
     }
 
     [[nodiscard]] std::vector<JobResult> drain_completed() override {
@@ -140,8 +145,19 @@ class ThreadPoolJobSystem final : public IJobSystem {
     }
 
   private:
-    [[nodiscard]] JobId next_job_id() noexcept {
-        return JobId::from_value(next_job_id_.fetch_add(1));
+    [[nodiscard]] core::Result<JobId> next_job_id() noexcept {
+        auto candidate = next_job_id_.load(std::memory_order_relaxed);
+        while (candidate != 0) {
+            const auto successor = candidate == std::numeric_limits<std::uint64_t>::max()
+                                       ? 0
+                                       : candidate + 1;
+            if (next_job_id_.compare_exchange_weak(candidate, successor,
+                                                   std::memory_order_relaxed)) {
+                return core::Result<JobId>::success(JobId::from_value(candidate));
+            }
+        }
+        return core::Result<JobId>::failure("jobs.id_range_exhausted",
+                                            "job id range is exhausted");
     }
 
     [[nodiscard]] QueuedJob take_next_job() {
@@ -217,7 +233,7 @@ class ThreadPoolJobSystem final : public IJobSystem {
     }
 
     JobSystemDesc desc_;
-    std::atomic<std::uint64_t> next_job_id_ = 1;
+    std::atomic<std::uint64_t> next_job_id_;
     std::atomic<std::uint64_t> submitted_count_ = 0;
     std::atomic<std::uint64_t> completed_count_ = 0;
     std::atomic<std::uint64_t> pending_count_ = 0;

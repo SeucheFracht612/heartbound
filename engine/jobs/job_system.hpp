@@ -71,6 +71,7 @@ struct JobSystemDesc {
     JobBackend backend = JobBackend::immediate;
     std::uint32_t worker_count = 1;
     std::uint32_t max_completed_results = 1024;
+    std::uint64_t first_job_id = 1;
 };
 
 class IJobSystem {
