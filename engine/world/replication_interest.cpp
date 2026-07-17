@@ -4,6 +4,7 @@
 #include "engine/world/world_state.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace heartstead::world {
@@ -95,9 +96,19 @@ derive_replication_interest_report(const WorldState& state,
         return core::Result<WorldReplicationInterestReport>::failure(subjects.error().code,
                                                                      subjects.error().message);
     }
+    const auto workpieces = state.workpieces().records();
+    constexpr auto max_report_count = std::numeric_limits<std::uint32_t>::max();
+    if (subjects.value().size() > max_report_count || workpieces.size() > max_report_count ||
+        workpieces.size() > max_report_count - subjects.value().size() ||
+        options.viewers.size() > max_report_count) {
+        return core::Result<WorldReplicationInterestReport>::failure(
+            "replication_interest.report_too_large",
+            "replication interest inputs exceed the report count range");
+    }
 
     WorldReplicationInterestReport report;
-    report.subject_count = static_cast<std::uint32_t>(subjects.value().size());
+    report.subject_count =
+        static_cast<std::uint32_t>(subjects.value().size() + workpieces.size());
     report.viewer_count = static_cast<std::uint32_t>(options.viewers.size());
     report.broadcast_by_default = options.broadcast_by_default;
     report.receives_global_events = options.receives_global_events;
@@ -116,6 +127,7 @@ derive_replication_interest_report(const WorldState& state,
             ++report.non_saved_subject_count;
         }
     }
+    report.saved_subject_count += static_cast<std::uint32_t>(workpieces.size());
 
     for (const auto& viewer : options.viewers) {
         net::ReplicationInterestRule rule;
@@ -142,6 +154,23 @@ derive_replication_interest_report(const WorldState& state,
                 if (!contains_id(viewer_report.visible_subjects, subject.save_id)) {
                     viewer_report.visible_subjects.push_back(subject.save_id);
                 }
+            } else {
+                ++viewer_report.excluded_lod_subject_count;
+            }
+        }
+
+        // Active workpieces have no world-space anchor yet, so spatial LOD cannot classify them.
+        // Keep their replication private and deterministic by exposing them only to the owning
+        // live session. Unbound workpieces remain hidden until stable player identity rebinds them.
+        for (const auto* workpiece : workpieces) {
+            const auto owner_visible = workpiece->owner_session.is_valid() &&
+                                       workpiece->owner_session == viewer.viewer_id;
+            const auto lod = owner_visible ? simulation::SimulationLod::full
+                                           : simulation::SimulationLod::unloaded;
+            count_lod(viewer_report, lod);
+            if (owner_visible && include_lod(lod, options)) {
+                viewer_report.visible_subjects.push_back(
+                    core::SaveId::from_value(workpiece->workpiece_id.value()));
             } else {
                 ++viewer_report.excluded_lod_subject_count;
             }

@@ -7954,11 +7954,14 @@ void test_world_simulation_subject_derivation() {
     const auto entity_prototype = heartstead::core::PrototypeId::parse("base:entities/cart");
     const auto cargo_prototype = heartstead::core::PrototypeId::parse("base:cargo/heavy_log");
     const auto assembly_prototype = heartstead::core::PrototypeId::parse("base:assemblies/kiln");
+    const auto workpiece_prototype =
+        heartstead::core::PrototypeId::parse("base:workpieces/clay");
     const auto process_prototype = heartstead::core::PrototypeId::parse("base:processes/drying");
     assert(build_prototype);
     assert(entity_prototype);
     assert(cargo_prototype);
     assert(assembly_prototype);
+    assert(workpiece_prototype);
     assert(process_prototype);
 
     heartstead::build::BuildPieceRecord build_piece;
@@ -7998,6 +8001,14 @@ void test_world_simulation_subject_derivation() {
     assembly.operating = true;
     assembly.state = heartstead::assemblies::AssemblyState::operating;
     assert(state.assemblies().insert(assembly));
+
+    auto workpiece_grid = heartstead::workpieces::WorkpieceGrid::create({1, 1, 1});
+    assert(workpiece_grid);
+    heartstead::world::WorkpieceRecord workpiece{
+        heartstead::core::WorkpieceId::from_value(104), workpiece_prototype.value(),
+        std::move(workpiece_grid).value()};
+    workpiece.owner_session = heartstead::core::NetId::from_value(7);
+    assert(state.workpieces().insert(std::move(workpiece)));
 
     auto& storage_network =
         state.networks().get_or_create(heartstead::networks::NetworkKind::storage_access);
@@ -8130,11 +8141,13 @@ void test_world_simulation_subject_derivation() {
     assert(interest_policy.value().client_rules.size() == 2);
     assert(interest_policy.value().client_rules[0].client_id ==
            heartstead::core::NetId::from_value(7));
-    assert(interest_policy.value().client_rules[0].visible_subjects.size() == 4);
+    assert(interest_policy.value().client_rules[0].visible_subjects.size() == 5);
     assert(interest_policy.value().client_rules[0].visible_subjects[0] == build_piece.object_id);
     assert(interest_policy.value().client_rules[0].visible_subjects[1] == entity.save_id);
     assert(interest_policy.value().client_rules[0].visible_subjects[2] == cargo.cargo_id);
     assert(interest_policy.value().client_rules[0].visible_subjects[3] == assembly.assembly_id);
+    assert(interest_policy.value().client_rules[0].visible_subjects[4] ==
+           heartstead::core::SaveId::from_value(104));
     assert(interest_policy.value().client_rules[1].client_id ==
            heartstead::core::NetId::from_value(8));
     assert(interest_policy.value().client_rules[1].visible_subjects.empty());
@@ -8142,8 +8155,8 @@ void test_world_simulation_subject_derivation() {
     auto world_interest_report =
         heartstead::world::derive_replication_interest_report(state, interest_options);
     assert(world_interest_report);
-    assert(world_interest_report.value().subject_count == 8);
-    assert(world_interest_report.value().saved_subject_count == 6);
+    assert(world_interest_report.value().subject_count == 9);
+    assert(world_interest_report.value().saved_subject_count == 7);
     assert(world_interest_report.value().non_saved_subject_count == 2);
     assert(world_interest_report.value().viewer_count == 2);
     assert(world_interest_report.value().policy.client_rules.size() == 2);
@@ -8152,22 +8165,22 @@ void test_world_simulation_subject_derivation() {
     assert(world_interest_report.value().viewer_reports.size() == 2);
     assert(world_interest_report.value().viewer_reports[0].viewer_id ==
            heartstead::core::NetId::from_value(7));
-    assert(world_interest_report.value().viewer_reports[0].visible_subject_count == 4);
+    assert(world_interest_report.value().viewer_reports[0].visible_subject_count == 5);
     assert(world_interest_report.value().viewer_reports[0].skipped_non_saved_subject_count == 2);
     assert(world_interest_report.value().viewer_reports[1].viewer_id ==
            heartstead::core::NetId::from_value(8));
     assert(world_interest_report.value().viewer_reports[1].visible_subject_count == 0);
-    assert(world_interest_report.value().viewer_reports[1].excluded_lod_subject_count == 6);
+    assert(world_interest_report.value().viewer_reports[1].excluded_lod_subject_count == 7);
     auto world_interest_inspection =
         heartstead::debug::Inspector::inspect(world_interest_report.value());
     assert(world_interest_inspection.object_type == "world_replication_interest_report");
     assert(world_interest_inspection.state == "active");
-    assert(world_interest_inspection.find_field("subject_count")->value == "8");
-    assert(world_interest_inspection.find_field("saved_subject_count")->value == "6");
+    assert(world_interest_inspection.find_field("subject_count")->value == "9");
+    assert(world_interest_inspection.find_field("saved_subject_count")->value == "7");
     assert(world_interest_inspection.find_field("non_saved_subject_count")->value == "2");
     assert(world_interest_inspection.find_field("viewer_count")->value == "2");
-    assert(world_interest_inspection.find_field("visible_subject_total")->value == "4");
-    assert(world_interest_inspection.find_field("excluded_lod_subject_total")->value == "6");
+    assert(world_interest_inspection.find_field("visible_subject_total")->value == "5");
+    assert(world_interest_inspection.find_field("excluded_lod_subject_total")->value == "7");
     assert(world_interest_inspection.find_field("skipped_non_saved_subject_total")->value == "4");
     assert(world_interest_inspection.find_field("first_viewer_id")->value == "7");
     assert(world_interest_inspection.find_field("first_visible_subject_id")->value == "100");
@@ -8186,11 +8199,23 @@ void test_world_simulation_subject_derivation() {
     assert(interest_report.decisions[0].reason == "matched_subject");
     assert(interest_report.decisions[1].reason == "filtered_subject");
 
+    heartstead::net::ReplicationBatch workpiece_event_batch;
+    workpiece_event_batch.command_sequence = 12;
+    workpiece_event_batch.command_type = "workpiece.edit_cell";
+    workpiece_event_batch.events.push_back(
+        {"workpiece.edited", heartstead::core::SaveId::from_value(104), "edited"});
+    auto workpiece_interest = heartstead::net::ReplicationRelevance::evaluate(
+        interest_policy.value(), workpiece_event_batch,
+        {heartstead::core::NetId::from_value(7), heartstead::core::NetId::from_value(8)});
+    assert(workpiece_interest.relevant_client_count == 1);
+    assert(workpiece_interest.decisions[0].reason == "matched_subject");
+    assert(workpiece_interest.decisions[1].reason == "filtered_subject");
+
     interest_options.include_sleeping = false;
     auto awake_interest_policy =
         heartstead::world::derive_replication_relevance_policy(state, interest_options);
     assert(awake_interest_policy);
-    assert(awake_interest_policy.value().client_rules[0].visible_subjects.size() == 3);
+    assert(awake_interest_policy.value().client_rules[0].visible_subjects.size() == 4);
     assert(std::ranges::find(awake_interest_policy.value().client_rules[0].visible_subjects,
                              entity.save_id) ==
            awake_interest_policy.value().client_rules[0].visible_subjects.end());
