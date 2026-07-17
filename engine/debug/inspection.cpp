@@ -2052,12 +2052,16 @@ InspectionData Inspector::inspect(const net::HostSessionTickResult& result) {
 
     if (result.transport_dropped_reliable_message_count > 0) {
         data.state = "dropped_reliable";
+    } else if (result.outbound_delivery.pending_message_count > 0) {
+        data.state = "delivery_deferred";
     } else if (result.replication_message_count > 0) {
         data.state = "replicated";
     } else if (!result.command_reports.empty()) {
         data.state = "commands";
     } else if (result.transport_retransmission_count > 0) {
         data.state = "maintenance";
+    } else if (result.outbound_delivery.delivered_message_count > 0) {
+        data.state = "outbound_delivery";
     } else {
         data.state = "idle";
     }
@@ -2070,6 +2074,18 @@ InspectionData Inspector::inspect(const net::HostSessionTickResult& result) {
     add_field(data, "command_message_count", std::to_string(result.command_message_count));
     add_field(data, "response_message_count", std::to_string(result.response_message_count));
     add_field(data, "replication_message_count", std::to_string(result.replication_message_count));
+    add_field(data, "outbound_delivery_attempted_message_count",
+              std::to_string(result.outbound_delivery.attempted_message_count));
+    add_field(data, "outbound_delivery_delivered_message_count",
+              std::to_string(result.outbound_delivery.delivered_message_count));
+    add_field(data, "outbound_delivery_retry_attempt_count",
+              std::to_string(result.outbound_delivery.retry_attempt_count));
+    add_field(data, "outbound_delivery_failed_attempt_count",
+              std::to_string(result.outbound_delivery.failed_attempt_count));
+    add_field(data, "outbound_delivery_pending_message_count",
+              std::to_string(result.outbound_delivery.pending_message_count));
+    add_field(data, "outbound_delivery_blocked_client_count",
+              std::to_string(result.outbound_delivery.blocked_client_count));
     add_field(data, "command_report_count", std::to_string(result.command_reports.size()));
     add_field(data, "replication_relevance_report_count",
               std::to_string(result.replication_relevance_reports.size()));
@@ -2100,6 +2116,16 @@ InspectionData Inspector::inspect(const net::HostSessionTickResult& result) {
         add_field(data, "first_relevance_command_type",
                   result.replication_relevance_reports.front().command_type);
     }
+    if (!result.outbound_delivery.failures.empty()) {
+        const auto& failure = result.outbound_delivery.failures.front();
+        add_field(data, "first_delivery_failure_client_id", net_id_text(failure.client_id));
+        add_field(data, "first_delivery_failure_message_kind",
+                  std::string(net::transport_message_kind_name(failure.message_kind)));
+        add_field(data, "first_delivery_failure_sequence", std::to_string(failure.sequence));
+        add_field(data, "first_delivery_failure_attempt_count",
+                  std::to_string(failure.attempt_count));
+        add_field(data, "first_delivery_failure_error_code", failure.error_code);
+    }
 
     if (result.response_message_count != result.command_reports.size()) {
         add_issue(data, InspectionSeverity::error, "host_tick.response_count_mismatch",
@@ -2112,6 +2138,29 @@ InspectionData Inspector::inspect(const net::HostSessionTickResult& result) {
     if (result.replication_message_count != relevant_client_count) {
         add_issue(data, InspectionSeverity::error, "host_tick.replication_count_mismatch",
                   "host session tick replication message count must match relevance recipients");
+    }
+    if (result.outbound_delivery.attempted_message_count !=
+        result.outbound_delivery.delivered_message_count +
+            result.outbound_delivery.failed_attempt_count) {
+        add_issue(data, InspectionSeverity::error, "host_tick.delivery_attempt_count_mismatch",
+                  "outbound delivery attempts must equal delivered and failed attempts");
+    }
+    if (result.outbound_delivery.retry_attempt_count >
+        result.outbound_delivery.attempted_message_count) {
+        add_issue(data, InspectionSeverity::error, "host_tick.delivery_retry_count_invalid",
+                  "outbound retry attempts cannot exceed all delivery attempts");
+    }
+    if (result.outbound_delivery.failed_attempt_count != result.outbound_delivery.failures.size()) {
+        add_issue(data, InspectionSeverity::error, "host_tick.delivery_failure_count_mismatch",
+                  "outbound failed-attempt count must match failure diagnostics");
+    }
+    if (result.outbound_delivery.blocked_client_count != result.outbound_delivery.failures.size()) {
+        add_issue(data, InspectionSeverity::error, "host_tick.blocked_client_count_mismatch",
+                  "each blocked outbound client must have one failure diagnostic");
+    }
+    if (result.outbound_delivery.pending_message_count > 0) {
+        add_issue(data, InspectionSeverity::warning, "host_tick.outbound_delivery_deferred",
+                  "outbound messages remain queued for retry after a delivery failure");
     }
     if (result.transport_dropped_reliable_message_count > 0) {
         add_issue(data, InspectionSeverity::warning, "host_tick.reliable_messages_dropped",

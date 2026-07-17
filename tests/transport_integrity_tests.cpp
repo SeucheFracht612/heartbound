@@ -1,3 +1,4 @@
+#include "engine/debug/inspection.hpp"
 #include "engine/net/host_session.hpp"
 #include "engine/net/transport.hpp"
 #include "engine/net/transport_packet.hpp"
@@ -336,6 +337,17 @@ void test_host_retries_responses_without_redispatching_drained_commands() {
     assert(first_tick.value().outbound_delivery.failures.size() == 1);
     assert(first_tick.value().outbound_delivery.failures.front().error_code ==
            "test.injected_send_failure");
+    const auto deferred_inspection = debug::Inspector::inspect(first_tick.value());
+    assert(deferred_inspection.state == "delivery_deferred");
+    assert(deferred_inspection.find_field("outbound_delivery_pending_message_count")->value == "6");
+    assert(deferred_inspection.find_field("first_delivery_failure_client_id")->value == "2");
+    bool reported_deferred_delivery = false;
+    for (const auto& issue : deferred_inspection.issues) {
+        reported_deferred_delivery =
+            reported_deferred_delivery || issue.code == "host_tick.outbound_delivery_deferred";
+    }
+    assert(reported_deferred_delivery);
+    assert(!deferred_inspection.has_errors());
     assert(session.pending_outbound_message_count() == 6);
     auto before_retry = session.drain_client_messages(client.value());
     assert(before_retry && before_retry.value().empty());
@@ -349,6 +361,7 @@ void test_host_retries_responses_without_redispatching_drained_commands() {
     assert(retry_tick.value().outbound_delivery.retry_attempt_count == 1);
     assert(retry_tick.value().outbound_delivery.failed_attempt_count == 0);
     assert(retry_tick.value().outbound_delivery.pending_message_count == 0);
+    assert(debug::Inspector::inspect(retry_tick.value()).state == "outbound_delivery");
     assert(session.pending_outbound_message_count() == 0);
 
     auto delivered = session.drain_client_messages(client.value());
