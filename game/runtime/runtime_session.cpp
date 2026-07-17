@@ -187,6 +187,9 @@ core::Result<RuntimeFrameStats> RuntimeSession::run_frame(RuntimeFrameInput inpu
 
     RuntimeFrameStats stats;
     stats.fixed_step = frame.value();
+    if (server_ != nullptr) {
+        stats.authoritative_world_tick = server_->world().world_time();
+    }
     stats.server_ticks.reserve(frame.value().step_count);
     for (std::uint32_t step = 0; step < frame.value().step_count; ++step) {
         if (server_ != nullptr) {

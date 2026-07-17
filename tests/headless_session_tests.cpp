@@ -20,7 +20,7 @@ void test_local_headless_session_advances_shared_runtime() {
     assert(report);
     assert(report.value().requested_tick_count == 5);
     assert(report.value().completed_tick_count == 5);
-    assert(report.value().last_frame.authoritative_world_tick == 5);
+    assert(report.value().last_frame.authoritative_world_tick == 1);
     assert(harness.value()->runtime().session()->client() != nullptr);
     auto snapshot = harness.value()->runtime().capture_render_snapshot();
     assert(snapshot && snapshot.value().objects.size() == 1);

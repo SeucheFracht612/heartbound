@@ -392,6 +392,10 @@ void test_dedicated_headless_runtime_uses_same_scheduler() {
     assert(frame.value().fixed_step.step_count == 3);
     assert(frame.value().server_ticks.size() == 3);
     assert(frame.value().authoritative_world_tick == 1);
+    const auto no_tick = runtime.run_frame({0, 50});
+    assert(no_tick);
+    assert(no_tick.value().fixed_step.step_count == 0);
+    assert(no_tick.value().authoritative_world_tick == 1);
     const auto names = runtime.session()->server()->scheduler().ordered_system_names();
     assert(names.front() == "runtime.command_gateway");
     assert(names.back() == "runtime.replication");
