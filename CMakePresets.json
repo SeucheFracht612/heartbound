@@ -191,6 +191,15 @@
       }
     },
     {
+      "name": "linux-clang-asan-leaks",
+      "displayName": "Linux Clang Address/Undefined Sanitizers with Leak Detection",
+      "inherits": "linux-clang-asan",
+      "environment": {
+        "ASAN_OPTIONS": "detect_leaks=1",
+        "LSAN_OPTIONS": "detect_leaks=1"
+      }
+    },
+    {
       "name": "linux-clang-tsan",
       "configurePreset": "linux-clang-tsan",
       "output": {

@@ -47,6 +47,7 @@ AddressSanitizer plus UndefinedBehaviorSanitizer build:
 cmake --preset linux-clang-asan
 cmake --build --preset linux-clang-asan
 ctest --preset linux-clang-asan
+ctest --preset linux-clang-asan-leaks
 ```
 
 ThreadSanitizer build:
@@ -60,10 +61,10 @@ ctest --preset linux-clang-tsan
 The sanitizer presets use Clang, enable warnings-as-errors, and disable Vulkan so the checks focus
 on Heartstead-owned foundation code instead of graphics driver behavior. Use `linux-clang-asan` for memory and
 undefined-behavior checks. Use `linux-clang-tsan` separately for data-race checks; it cannot be
-combined with AddressSanitizer. The ASan CTest preset disables LeakSanitizer detection because
-managed/debugger-style environments can run tests under `ptrace`, where LeakSanitizer aborts at
-startup. Run individual ASan binaries outside that environment with leak detection enabled when
-leak-specific investigation is needed.
+combined with AddressSanitizer. The default ASan CTest preset disables LeakSanitizer detection
+because managed/debugger-style environments can run tests under `ptrace`, where LeakSanitizer
+aborts at startup. Run the `linux-clang-asan-leaks` preset outside such an environment to execute
+the same complete suite with leak detection enabled.
 
 Run the development asset cooker:
 
