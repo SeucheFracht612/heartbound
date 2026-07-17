@@ -15,6 +15,7 @@ namespace heartstead::save {
 namespace {
 
 constexpr std::string_view slot_metadata_magic = "heartstead.save_slot.v1";
+constexpr std::uintmax_t max_slot_metadata_bytes = 64U * 1024U;
 
 [[nodiscard]] std::filesystem::path slot_path(const std::filesystem::path& root,
                                               std::string_view slot_id) {
@@ -28,6 +29,49 @@ constexpr std::string_view slot_metadata_magic = "heartstead.save_slot.v1";
 
 [[nodiscard]] core::Status filesystem_failure(std::string code, const std::error_code& error) {
     return core::Status::failure(std::move(code), error.message());
+}
+
+[[nodiscard]] core::Status reject_symbolic_link(const std::filesystem::path& path,
+                                                std::string_view label) {
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory) {
+        return core::Status::ok();
+    }
+    if (error) {
+        return filesystem_failure("save_slot.path_check_failed", error);
+    }
+    if (std::filesystem::is_symlink(status)) {
+        return core::Status::failure("save_slot.unsafe_symlink",
+                                     std::string(label) + " must not be a symbolic link");
+    }
+    return core::Status::ok();
+}
+
+[[nodiscard]] core::Status require_slot_directory(const std::filesystem::path& root,
+                                                  std::string_view slot_id) {
+    auto status = reject_symbolic_link(root, "save slot catalog root");
+    if (!status) {
+        return status;
+    }
+    const auto path = slot_path(root, slot_id);
+    status = reject_symbolic_link(path, "save slot directory");
+    if (!status) {
+        return status;
+    }
+    std::error_code error;
+    const auto path_status = std::filesystem::symlink_status(path, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        path_status.type() == std::filesystem::file_type::not_found) {
+        return core::Status::failure("save_slot.not_found", "save slot directory does not exist");
+    }
+    if (error) {
+        return filesystem_failure("save_slot.path_check_failed", error);
+    }
+    if (!std::filesystem::is_directory(path_status)) {
+        return core::Status::failure("save_slot.invalid_path", "save slot path is not a directory");
+    }
+    return core::Status::ok();
 }
 
 [[nodiscard]] core::Status validate_slot_id(std::string_view slot_id) {
@@ -64,12 +108,20 @@ constexpr std::string_view slot_metadata_magic = "heartstead.save_slot.v1";
 
 [[nodiscard]] core::Status write_text_atomic(const std::filesystem::path& path,
                                              std::string_view text) {
-    auto status = ensure_parent_directory(path);
+    auto status = reject_symbolic_link(path, "save slot metadata file");
+    if (!status) {
+        return status;
+    }
+    status = ensure_parent_directory(path);
     if (!status) {
         return status;
     }
 
     const auto temporary = path.string() + ".tmp";
+    status = reject_symbolic_link(temporary, "temporary save slot metadata file");
+    if (!status) {
+        return status;
+    }
     {
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         if (!output) {
@@ -93,19 +145,37 @@ constexpr std::string_view slot_metadata_magic = "heartstead.save_slot.v1";
 }
 
 [[nodiscard]] core::Result<std::string> read_text(const std::filesystem::path& path) {
+    auto status = reject_symbolic_link(path, "save slot metadata file");
+    if (!status) {
+        return core::Result<std::string>::failure(status.error().code, status.error().message);
+    }
+    std::error_code error;
+    const auto file_bytes = std::filesystem::file_size(path, error);
+    if (error) {
+        return core::Result<std::string>::failure("save_slot.read_failed", error.message());
+    }
+    if (file_bytes > max_slot_metadata_bytes) {
+        return core::Result<std::string>::failure(
+            "save_slot.metadata_too_large",
+            "save slot metadata exceeds the configured safety limit");
+    }
     std::ifstream input(path, std::ios::binary);
     if (!input) {
         return core::Result<std::string>::failure(
             "save_slot.read_failed", "failed to open save slot file: " + path.string());
     }
 
-    std::ostringstream output;
-    output << input.rdbuf();
-    if (input.bad()) {
+    std::string result(static_cast<std::size_t>(file_bytes), '\0');
+    input.read(result.data(), static_cast<std::streamsize>(result.size()));
+    if (input.gcount() != static_cast<std::streamsize>(result.size()) || input.bad()) {
         return core::Result<std::string>::failure(
             "save_slot.read_failed", "failed to read save slot file: " + path.string());
     }
-    return core::Result<std::string>::success(output.str());
+    if (input.peek() != std::char_traits<char>::eof()) {
+        return core::Result<std::string>::failure(
+            "save_slot.metadata_too_large", "save slot metadata changed while it was being read");
+    }
+    return core::Result<std::string>::success(std::move(result));
 }
 
 [[nodiscard]] core::Result<std::uint64_t> parse_u64(std::string_view value,
@@ -226,6 +296,10 @@ constexpr std::string_view slot_metadata_magic = "heartstead.save_slot.v1";
         return core::Result<SaveSlotMetadata>::failure("save_slot.incomplete_metadata",
                                                        "save slot metadata is incomplete");
     }
+    if (std::getline(input, line)) {
+        return core::Result<SaveSlotMetadata>::failure(
+            "save_slot.trailing_data", "save slot metadata contains data after its end marker");
+    }
 
     const auto status = metadata.validate();
     if (!status) {
@@ -270,10 +344,23 @@ core::Status FileSaveSlotCatalog::create_slot(std::string_view slot_id) const {
         return status;
     }
 
+    status = reject_symbolic_link(root_, "save slot catalog root");
+    if (!status) {
+        return status;
+    }
+    status = reject_symbolic_link(slot_path(root_, slot_id), "save slot directory");
+    if (!status) {
+        return status;
+    }
+
     std::error_code error;
     std::filesystem::create_directories(slot_path(root_, slot_id), error);
     if (error) {
         return filesystem_failure("save_slot.create_failed", error);
+    }
+    status = require_slot_directory(root_, slot_id);
+    if (!status) {
+        return status;
     }
     const auto metadata_path = slot_metadata_path(root_, slot_id);
     const auto has_metadata = std::filesystem::exists(metadata_path, error);
@@ -288,6 +375,10 @@ core::Status FileSaveSlotCatalog::create_slot(std::string_view slot_id) const {
 
 core::Result<FileSaveDatabase> FileSaveSlotCatalog::database(std::string_view slot_id) const {
     auto status = validate_slot_id(slot_id);
+    if (!status) {
+        return core::Result<FileSaveDatabase>::failure(status.error().code, status.error().message);
+    }
+    status = require_slot_directory(root_, slot_id);
     if (!status) {
         return core::Result<FileSaveDatabase>::failure(status.error().code, status.error().message);
     }
@@ -334,12 +425,20 @@ core::Status FileSaveSlotCatalog::write_metadata(const SaveSlotMetadata& metadat
     if (!status) {
         return status;
     }
+    status = require_slot_directory(root_, metadata.slot_id);
+    if (!status) {
+        return status;
+    }
     return write_text_atomic(slot_metadata_path(root_, metadata.slot_id),
                              encode_metadata(metadata));
 }
 
 core::Result<SaveSlotMetadata> FileSaveSlotCatalog::read_metadata(std::string_view slot_id) const {
     auto status = validate_slot_id(slot_id);
+    if (!status) {
+        return core::Result<SaveSlotMetadata>::failure(status.error().code, status.error().message);
+    }
+    status = require_slot_directory(root_, slot_id);
     if (!status) {
         return core::Result<SaveSlotMetadata>::failure(status.error().code, status.error().message);
     }
@@ -373,6 +472,11 @@ core::Result<SaveSlotMetadata> FileSaveSlotCatalog::read_metadata(std::string_vi
 core::Result<std::vector<SaveSlotSummary>> FileSaveSlotCatalog::list_slots() const {
     std::vector<SaveSlotSummary> summaries;
 
+    auto root_status = reject_symbolic_link(root_, "save slot catalog root");
+    if (!root_status) {
+        return core::Result<std::vector<SaveSlotSummary>>::failure(root_status.error().code,
+                                                                   root_status.error().message);
+    }
     std::error_code error;
     const bool exists = std::filesystem::exists(root_, error);
     if (error) {
@@ -388,7 +492,16 @@ core::Result<std::vector<SaveSlotSummary>> FileSaveSlotCatalog::list_slots() con
             return core::Result<std::vector<SaveSlotSummary>>::failure("save_slot.list_failed",
                                                                        error.message());
         }
-        if (!entry.is_directory(error)) {
+        const auto entry_status = entry.symlink_status(error);
+        if (error) {
+            return core::Result<std::vector<SaveSlotSummary>>::failure("save_slot.list_failed",
+                                                                       error.message());
+        }
+        if (std::filesystem::is_symlink(entry_status)) {
+            return core::Result<std::vector<SaveSlotSummary>>::failure(
+                "save_slot.unsafe_symlink", "save slot catalog entries must not be symbolic links");
+        }
+        if (!std::filesystem::is_directory(entry_status)) {
             error.clear();
             continue;
         }

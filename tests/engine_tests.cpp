@@ -6699,11 +6699,29 @@ void test_file_save_slot_catalog() {
     auto invalid_database = catalog.database("../bad");
     assert(!invalid_database);
     assert(invalid_database.error().code == "save_slot.invalid_id");
+    auto missing_database = catalog.database("missing");
+    assert(!missing_database);
+    assert(missing_database.error().code == "save_slot.not_found");
+    auto missing_metadata = catalog.read_metadata("missing");
+    assert(!missing_metadata);
+    assert(missing_metadata.error().code == "save_slot.not_found");
 
     status = catalog.create_slot("settlement_a");
     assert(status);
     status = catalog.create_slot("winter-2");
     assert(status);
+
+    write_text(root / "winter-2" / "slot.txt", std::string(64U * 1024U + 1U, 'x'));
+    auto oversized_slot_metadata = catalog.read_metadata("winter-2");
+    assert(!oversized_slot_metadata);
+    assert(oversized_slot_metadata.error().code == "save_slot.metadata_too_large");
+    write_text(root / "winter-2" / "slot.txt",
+               "heartstead.save_slot.v1\nslot_id|winter-2\n"
+               "display_name|Winter 2\ncreated_at_ms|0\nlast_saved_at_ms|0\nend\n"
+               "unexpected|data\n");
+    auto trailing_slot_metadata = catalog.read_metadata("winter-2");
+    assert(!trailing_slot_metadata);
+    assert(trailing_slot_metadata.error().code == "save_slot.trailing_data");
 
     auto settlement_metadata = catalog.read_metadata("settlement_a");
     assert(settlement_metadata);
@@ -6736,6 +6754,25 @@ void test_file_save_slot_catalog() {
     assert(fallback_metadata);
     assert(fallback_metadata.value().slot_id == "winter-2");
     assert(fallback_metadata.value().display_name == "winter-2");
+
+    const auto outside_metadata = make_temp_root() / "outside-slot-metadata.txt";
+    write_text(outside_metadata, "outside");
+    std::filesystem::create_symlink(outside_metadata, root / "winter-2" / "slot.txt");
+    auto symlinked_metadata = catalog.read_metadata("winter-2");
+    assert(!symlinked_metadata);
+    assert(symlinked_metadata.error().code == "save_slot.unsafe_symlink");
+    std::filesystem::remove(root / "winter-2" / "slot.txt");
+
+    const auto outside_slot = make_temp_root() / "outside-slot";
+    std::filesystem::create_directories(outside_slot);
+    std::filesystem::create_directory_symlink(outside_slot, root / "linked");
+    auto symlinked_database = catalog.database("linked");
+    assert(!symlinked_database);
+    assert(symlinked_database.error().code == "save_slot.unsafe_symlink");
+    auto symlinked_slots = catalog.list_slots();
+    assert(!symlinked_slots);
+    assert(symlinked_slots.error().code == "save_slot.unsafe_symlink");
+    std::filesystem::remove(root / "linked");
 
     std::filesystem::create_directories(root / "UpperCase");
     write_text(root / "notes.txt", "not a save slot");
