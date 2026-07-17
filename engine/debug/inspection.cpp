@@ -256,7 +256,7 @@ assembly_total_port_capacity(const std::vector<assemblies::AssemblyPort>& ports)
            stats.cargo_count > 0 || stats.inventory_count > 0 || stats.workpiece_count > 0 ||
            stats.physical_resource_count > 0 || stats.assembly_count > 0 ||
            stats.process_count > 0 || stats.room_count > 0 || stats.network_count > 0 ||
-           stats.mod_state_count > 0;
+           stats.mod_state_count > 0 || stats.missing_prototype_count > 0 || stats.fire_count > 0;
 }
 
 void add_simulation_frame_plan_issues(InspectionData& data,
@@ -3449,6 +3449,8 @@ InspectionData Inspector::inspect(const world::WorldState& state) {
     add_field(data, "game_version", metadata.game_version);
     add_field(data, "world_seed", std::to_string(metadata.world_seed));
     add_field(data, "world_time", std::to_string(state.world_time()));
+    add_field(data, "voxel_palette_count",
+              std::to_string(state.voxel_palette_manifest().entries.size()));
     add_field(data, "enabled_mod_count", std::to_string(metadata.enabled_mods.size()));
     add_field(data, "migration_count", std::to_string(metadata.migration_history.size()));
     add_field(data, "next_save_id", state.save_ids().peek_next().to_string());
@@ -3472,6 +3474,8 @@ InspectionData Inspector::inspect(const world::WorldState& state) {
     add_field(data, "room_count", std::to_string(stats.room_count));
     add_field(data, "network_count", std::to_string(stats.network_count));
     add_field(data, "mod_state_count", std::to_string(stats.mod_state_count));
+    add_field(data, "missing_prototype_count", std::to_string(stats.missing_prototype_count));
+    add_field(data, "fire_count", std::to_string(stats.fire_count));
 
     add_status_issue(data, metadata.validate());
     data.state = data.has_errors() ? "invalid" : has_world_content(stats) ? "loaded" : "empty";
@@ -3725,6 +3729,7 @@ InspectionData Inspector::inspect(const save::SaveSnapshot& snapshot,
     add_field(data, "world_seed", std::to_string(snapshot.metadata.world_seed));
     add_field(data, "world_time", std::to_string(snapshot.metadata.world_time));
     add_field(data, "mod_count", std::to_string(snapshot.metadata.enabled_mods.size()));
+    add_field(data, "voxel_palette_count", std::to_string(snapshot.voxel_palette.entries.size()));
     add_field(data, "chunk_edit_count", std::to_string(snapshot.chunk_edits.size()));
     add_field(data, "build_piece_count", std::to_string(snapshot.build_pieces.size()));
     add_field(data, "entity_count", std::to_string(snapshot.entities.size()));
@@ -3734,6 +3739,8 @@ InspectionData Inspector::inspect(const save::SaveSnapshot& snapshot,
     add_field(data, "assembly_count", std::to_string(snapshot.assemblies.size()));
     add_field(data, "process_count", std::to_string(snapshot.processes.size()));
     add_field(data, "mod_state_count", std::to_string(snapshot.mod_states.size()));
+    add_field(data, "missing_prototype_count", std::to_string(snapshot.missing_prototypes.size()));
+    add_field(data, "fire_count", std::to_string(snapshot.fires.size()));
 
     add_status_issue(data, snapshot.metadata.validate());
     if (prototypes != nullptr) {

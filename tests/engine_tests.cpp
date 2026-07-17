@@ -7677,6 +7677,23 @@ void test_debug_inspection() {
     const auto* build_piece_count = snapshot_inspection.find_field("build_piece_count");
     assert(build_piece_count != nullptr);
     assert(build_piece_count->value == "1");
+    assert(snapshot_inspection.find_field("voxel_palette_count")->value == "0");
+    assert(snapshot_inspection.find_field("missing_prototype_count")->value == "0");
+    assert(snapshot_inspection.find_field("fire_count")->value == "0");
+
+    snapshot.voxel_palette.entries.push_back({1, raw_clay_id.value()});
+    snapshot.missing_prototypes.push_back({heartstead::world::MissingPrototypeKind::build_piece,
+                                           77,
+                                           wall_id.value(),
+                                           {},
+                                           {},
+                                           {},
+                                           {}});
+    snapshot.fires.push_back({heartstead::core::SaveId::from_value(88), wall_id.value()});
+    const auto complete_snapshot_inspection = heartstead::debug::Inspector::inspect(snapshot);
+    assert(complete_snapshot_inspection.find_field("voxel_palette_count")->value == "1");
+    assert(complete_snapshot_inspection.find_field("missing_prototype_count")->value == "1");
+    assert(complete_snapshot_inspection.find_field("fire_count")->value == "1");
 
     heartstead::world::WorldStateDesc world_desc;
     world_desc.metadata.game_version = "0.1.0";
@@ -7713,6 +7730,26 @@ void test_debug_inspection() {
     assert(world_inspection.find_field("dirty_region_chunk_collision_count")->value == "1");
     assert(world_inspection.find_field("dirty_region_chunk_lighting_count")->value == "1");
     assert(world_inspection.find_field("dirty_region_room_graph_count")->value == "0");
+
+    heartstead::world::WorldStateDesc diagnostic_world_desc;
+    diagnostic_world_desc.metadata.game_version = "0.1.0";
+    heartstead::world::WorldState diagnostic_world(diagnostic_world_desc);
+    diagnostic_world.missing_prototypes().push_back(
+        {heartstead::world::MissingPrototypeKind::build_piece,
+         77,
+         wall_id.value(),
+         {},
+         {},
+         {},
+         {}});
+    assert(diagnostic_world.fires().insert(
+        {heartstead::core::SaveId::from_value(88), wall_id.value()}));
+    const auto diagnostic_world_inspection =
+        heartstead::debug::Inspector::inspect(diagnostic_world);
+    assert(diagnostic_world_inspection.state == "loaded");
+    assert(diagnostic_world_inspection.find_field("voxel_palette_count")->value == "0");
+    assert(diagnostic_world_inspection.find_field("missing_prototype_count")->value == "1");
+    assert(diagnostic_world_inspection.find_field("fire_count")->value == "1");
 
     const auto rendered = heartstead::debug::Inspector::render_text(build_inspection);
     assert(rendered.find("build_piece") != std::string::npos);
