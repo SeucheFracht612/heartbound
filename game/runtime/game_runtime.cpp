@@ -471,6 +471,24 @@ core::Status GameRuntime::start_session(RuntimeConfiguration config, SessionRequ
     return core::Status::ok();
 }
 
+core::Status GameRuntime::start_session_from_save(RuntimeConfiguration config,
+                                                  const save::FileSaveDatabase& database,
+                                                  std::string scenario_id) {
+    if (!is_initialized() || prototypes_ == nullptr) {
+        return core::Status::failure("game_runtime.not_initialized",
+                                     "game runtime content must be initialized first");
+    }
+    auto snapshot = database.read_validated_snapshot(*prototypes_);
+    if (!snapshot) {
+        return core::Status::failure(snapshot.error().code, snapshot.error().message);
+    }
+    SessionRequest request;
+    request.metadata = snapshot.value().metadata;
+    request.scenario_id = std::move(scenario_id);
+    request.initial_snapshot = std::move(snapshot).value();
+    return start_session(std::move(config), std::move(request));
+}
+
 core::Result<RuntimeFrameStats> GameRuntime::run_frame(RuntimeFrameInput input) {
     if (session_ == nullptr) {
         return core::Result<RuntimeFrameStats>::failure(
@@ -486,6 +504,22 @@ core::Status GameRuntime::submit_command(std::string type, std::string payload,
                                      "game runtime has no active command path");
     }
     return session_->submit_command(std::move(type), std::move(payload), now_ms);
+}
+
+core::Result<save::SaveSnapshot> GameRuntime::capture_save_snapshot() const {
+    if (session_ == nullptr) {
+        return core::Result<save::SaveSnapshot>::failure(
+            "game_runtime.no_session", "game runtime has no active session to save");
+    }
+    return session_->capture_save_snapshot();
+}
+
+core::Status GameRuntime::save_to(const save::FileSaveDatabase& database) const {
+    if (session_ == nullptr) {
+        return core::Status::failure("game_runtime.no_session",
+                                     "game runtime has no active session to save");
+    }
+    return session_->save_to(database);
 }
 
 core::Status GameRuntime::shutdown() {

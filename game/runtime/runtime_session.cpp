@@ -1,5 +1,7 @@
 #include "game/runtime/runtime_session.hpp"
 
+#include "engine/world/world_snapshot.hpp"
+
 #include <cmath>
 #include <utility>
 
@@ -51,6 +53,9 @@ RuntimeSession::create(RuntimeConfiguration config, SessionRequest request,
         return core::Result<std::unique_ptr<RuntimeSession>>::failure(status.error().code,
                                                                       status.error().message);
     }
+    if (request.initial_snapshot.has_value()) {
+        request.metadata = request.initial_snapshot->metadata;
+    }
     if (!request.metadata.validate()) {
         return core::Result<std::unique_ptr<RuntimeSession>>::failure(
             "runtime_session.invalid_metadata", "session save metadata is invalid");
@@ -80,6 +85,7 @@ core::Status RuntimeSession::initialize() {
         server_desc.physics.backend = config_.physics_backend;
         server_desc.prototypes = prototypes_;
         server_desc.voxel_palette = voxel_palette_;
+        server_desc.initial_snapshot = request_.initial_snapshot;
         auto server = ServerRuntime::create(std::move(server_desc));
         if (!server) {
             return core::Status::failure(server.error().code, server.error().message);
@@ -199,6 +205,23 @@ core::Status RuntimeSession::submit_remove_voxel(const interaction::RemoveVoxelC
                                                  std::int64_t now_ms) {
     return submit_command(std::string(interaction::remove_voxel_command_type),
                           interaction::VoxelCommandTextCodec::encode(command), now_ms);
+}
+
+core::Result<save::SaveSnapshot> RuntimeSession::capture_save_snapshot() const {
+    if (!running_ || server_ == nullptr) {
+        return core::Result<save::SaveSnapshot>::failure(
+            "runtime_session.no_authoritative_world",
+            "saving requires an active authoritative server runtime");
+    }
+    return world::WorldSnapshotBridge::export_snapshot(server_->world());
+}
+
+core::Status RuntimeSession::save_to(const save::FileSaveDatabase& database) const {
+    auto snapshot = capture_save_snapshot();
+    if (!snapshot) {
+        return core::Status::failure(snapshot.error().code, snapshot.error().message);
+    }
+    return database.write_snapshot(snapshot.value());
 }
 
 core::Status RuntimeSession::pump_client_messages() {

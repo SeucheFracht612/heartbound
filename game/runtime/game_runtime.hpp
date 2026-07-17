@@ -113,9 +113,14 @@ class GameRuntime {
     [[nodiscard]] core::Status require_prototype_kind(std::string_view kind) const;
     [[nodiscard]] core::Status start_session(RuntimeConfiguration config,
                                              SessionRequest request);
+    [[nodiscard]] core::Status
+    start_session_from_save(RuntimeConfiguration config, const save::FileSaveDatabase& database,
+                            std::string scenario_id = {});
     [[nodiscard]] core::Result<RuntimeFrameStats> run_frame(RuntimeFrameInput input);
     [[nodiscard]] core::Status submit_command(std::string type, std::string payload,
                                               std::int64_t now_ms = 0);
+    [[nodiscard]] core::Result<save::SaveSnapshot> capture_save_snapshot() const;
+    [[nodiscard]] core::Status save_to(const save::FileSaveDatabase& database) const;
     [[nodiscard]] core::Status shutdown();
     [[nodiscard]] RuntimeSession* session() noexcept;
     [[nodiscard]] const RuntimeSession* session() const noexcept;

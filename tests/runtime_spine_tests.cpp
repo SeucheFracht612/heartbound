@@ -213,6 +213,60 @@ void test_typed_voxel_commands_validate_and_replicate() {
     assert(runtime.shutdown());
 }
 
+void test_session_save_and_reload_restores_authoritative_state() {
+    const auto report = content::ContentValidation::validate(source_root());
+    assert(!report.has_errors());
+    auto runtime = make_runtime(report);
+    auto request = make_session_request(report);
+    assert(runtime.start_session({}, request));
+    auto* session = runtime.session();
+    assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
+
+    const auto clay = core::PrototypeId::parse("base:voxels/clay");
+    assert(clay.has_value());
+    const game::interaction::PlaceVoxelCommand placed_voxel{{10, 1, 8}, *clay};
+    assert(session->submit_place_voxel(placed_voxel, 10));
+    movement::PlayerInputFrame input;
+    input.tick = 1;
+    input.sequence = 1;
+    input.move_z = 32'767;
+    assert(session->submit_player_input(input, 10));
+    auto frame = runtime.run_frame({16'667, 17});
+    assert(frame && frame.value().server_ticks.size() == 1);
+    const auto saved_player_position =
+        session->server()->player_for_client(session->client()->client_id())->state.position;
+
+    const auto save_root =
+        std::filesystem::temp_directory_path() / "heartstead-runtime-save-reload-test";
+    std::filesystem::remove_all(save_root);
+    const save::FileSaveDatabase database(save_root);
+    assert(runtime.save_to(database));
+    auto persisted = database.read_snapshot();
+    assert(persisted);
+    assert(!persisted.value().chunk_edits.empty());
+    assert(!persisted.value().entities.empty());
+    assert(runtime.shutdown());
+
+    assert(runtime.start_session_from_save({}, database, request.scenario_id));
+    session = runtime.session();
+    assert(session != nullptr && session->server() != nullptr && session->client() != nullptr);
+    const auto address = world::block_to_chunk_local(placed_voxel.position);
+    const auto authoritative =
+        session->server()->world().chunks().get(address.chunk, address.local);
+    const auto replicated = session->client()->world().chunks().get(address.chunk, address.local);
+    assert(authoritative && replicated);
+    assert(!authoritative.value().is_air());
+    assert(replicated.value() == authoritative.value());
+    const auto* restored_player =
+        session->server()->player_for_client(session->client()->client_id());
+    assert(restored_player != nullptr);
+    assert(restored_player->state.position == saved_player_position);
+    assert(session->client()->local_player_snapshot() != nullptr);
+    assert(session->client()->local_player_snapshot()->state.position == saved_player_position);
+    assert(runtime.shutdown());
+    std::filesystem::remove_all(save_root);
+}
+
 void test_runtime_configuration_rejects_invalid_compositions() {
     game::RuntimeConfiguration empty;
     empty.create_server = false;
@@ -238,6 +292,7 @@ int main() {
     test_dedicated_headless_runtime_uses_same_scheduler();
     test_authoritative_player_input_moves_and_replicates();
     test_typed_voxel_commands_validate_and_replicate();
+    test_session_save_and_reload_restores_authoritative_state();
     test_runtime_configuration_rejects_invalid_compositions();
     return 0;
 }

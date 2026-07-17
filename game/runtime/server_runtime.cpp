@@ -2,8 +2,10 @@
 
 #include "engine/entities/entity_prototype.hpp"
 #include "engine/world/chunks/chunk_replication.hpp"
+#include "engine/world/chunks/chunk_edit_delta_codec.hpp"
 #include "engine/world/voxel_change.hpp"
 #include "engine/world/world_commands.hpp"
+#include "engine/world/world_snapshot.hpp"
 #include "game/features/interaction/voxel_commands.hpp"
 
 #include <algorithm>
@@ -32,6 +34,28 @@ core::Result<std::unique_ptr<ServerRuntime>> ServerRuntime::create(ServerRuntime
 }
 
 core::Status ServerRuntime::initialize() {
+    if (desc_.initial_snapshot.has_value()) {
+        auto state_snapshot = *desc_.initial_snapshot;
+        const auto saved_chunk_edits = std::move(state_snapshot.chunk_edits);
+        state_snapshot.chunk_edits.clear();
+        auto imported = world::WorldSnapshotBridge::import_validated_snapshot(
+            state_snapshot, *desc_.prototypes);
+        if (!imported) {
+            return core::Status::failure(imported.error().code, imported.error().message);
+        }
+        world_ = std::move(imported).value();
+        for (const auto& saved_chunk : saved_chunk_edits) {
+            auto edits = world::ChunkEditDeltaTextCodec::decode(
+                saved_chunk.coord, saved_chunk.encoded_edit_delta);
+            if (!edits) {
+                return core::Status::failure(edits.error().code, edits.error().message);
+            }
+            pending_saved_voxel_edits_.insert(
+                pending_saved_voxel_edits_.end(),
+                std::make_move_iterator(edits.value().begin()),
+                std::make_move_iterator(edits.value().end()));
+        }
+    }
     auto physics = physics::create_physics_world(desc_.physics);
     if (!physics) {
         return core::Status::failure(physics.error().code, physics.error().message);
@@ -285,7 +309,10 @@ core::Status ServerRuntime::disconnect_client(core::NetId client_id) {
     const auto entity_id = found->second.entity_id;
     player_connections_.erase(found);
     (void)players_.erase(runtime_handle);
-    (void)world_.entities().erase(runtime_handle);
+    const auto* legacy = world_.entities().find(runtime_handle);
+    if (legacy != nullptr && !legacy->persistent) {
+        (void)world_.entities().erase(runtime_handle);
+    }
     if (entities_.is_alive(entity_id)) {
         status = entities_.destroy_entity(entity_id);
         if (!status) {
@@ -377,6 +404,14 @@ core::Status ServerRuntime::ensure_spawn_area() {
             }
         }
     }
+    if (!pending_saved_voxel_edits_.empty()) {
+        auto status = world_.chunks().apply_saved_edits(
+            pending_saved_voxel_edits_, world_.dirty_regions());
+        if (!status) {
+            return status;
+        }
+        pending_saved_voxel_edits_.clear();
+    }
     spawn_area_initialized_ = true;
     return core::Status::ok();
 }
@@ -400,37 +435,64 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
     if (!definition) {
         return core::Status::failure(definition.error().code, definition.error().message);
     }
-    auto runtime_handle = world_.runtime_handles().reserve();
-    auto net_id = world_.entity_net_ids().reserve();
-    auto save_id = world_.save_ids().reserve();
-    if (!runtime_handle || !net_id || !save_id) {
-        const auto& error = !runtime_handle ? runtime_handle.error()
-                            : !net_id       ? net_id.error()
-                                            : save_id.error();
-        return core::Status::failure(error.code, error.message);
+    const entities::EntityRecord* saved_player = nullptr;
+    for (const auto* candidate : world_.entities().records()) {
+        if (candidate->kind == entities::EntityKind::player &&
+            players_.find(candidate->runtime_handle) == nullptr) {
+            saved_player = candidate;
+            break;
+        }
     }
-
+    core::RuntimeHandle runtime_handle;
+    core::NetId net_id;
+    core::SaveId save_id;
     world::WorldTransform transform;
-    transform.position = world::WorldPosition{8.5, 1.0, 8.5};
-    auto legacy_record = definition.value().create_record(
-        runtime_handle.value(), net_id.value(), save_id.value(), transform);
-    if (!legacy_record) {
-        return core::Status::failure(legacy_record.error().code, legacy_record.error().message);
-    }
-    status = world_.entities().insert(std::move(legacy_record).value());
-    if (!status) {
-        return status;
+    bool inserted_legacy_record = false;
+    if (saved_player != nullptr) {
+        runtime_handle = saved_player->runtime_handle;
+        net_id = saved_player->net_id;
+        save_id = saved_player->save_id;
+        transform = saved_player->transform;
+    } else {
+        auto allocated_runtime = world_.runtime_handles().reserve();
+        auto allocated_net_id = world_.entity_net_ids().reserve();
+        auto allocated_save_id = world_.save_ids().reserve();
+        if (!allocated_runtime || !allocated_net_id || !allocated_save_id) {
+            const auto& error = !allocated_runtime ? allocated_runtime.error()
+                                : !allocated_net_id ? allocated_net_id.error()
+                                                    : allocated_save_id.error();
+            return core::Status::failure(error.code, error.message);
+        }
+        runtime_handle = allocated_runtime.value();
+        net_id = allocated_net_id.value();
+        save_id = allocated_save_id.value();
+        transform.position = world::WorldPosition{8.5, 1.0, 8.5};
+        auto legacy_record =
+            definition.value().create_record(runtime_handle, net_id, save_id, transform);
+        if (!legacy_record) {
+            return core::Status::failure(legacy_record.error().code,
+                                         legacy_record.error().message);
+        }
+        status = world_.entities().insert(std::move(legacy_record).value());
+        if (!status) {
+            return status;
+        }
+        inserted_legacy_record = true;
     }
 
     auto entity_id = entities_.create_entity(*player_id);
     if (!entity_id) {
-        (void)world_.entities().erase(runtime_handle.value());
+        if (inserted_legacy_record) {
+            (void)world_.entities().erase(runtime_handle);
+        }
         return core::Status::failure(entity_id.error().code, entity_id.error().message);
     }
     const auto cleanup_entity = [&]() {
         (void)entities_.destroy_entity(entity_id.value());
         (void)entities_.finalize_destruction(0, nullptr);
-        (void)world_.entities().erase(runtime_handle.value());
+        if (inserted_legacy_record) {
+            (void)world_.entities().erase(runtime_handle);
+        }
     };
     auto transform_component =
         entities_.emplace<entities::TransformComponent>(entity_id.value(),
@@ -461,9 +523,9 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
     controller_state.mode = movement::PlayerControllerMode::grounded;
     controller_state.grounded = true;
     movement::PlayerControllerRecord controller_record;
-    controller_record.runtime_handle = runtime_handle.value();
-    controller_record.net_id = net_id.value();
-    controller_record.save_id = save_id.value();
+    controller_record.runtime_handle = runtime_handle;
+    controller_record.net_id = net_id;
+    controller_record.save_id = save_id;
     controller_record.state = controller_state;
     controller_record.persistent = definition.value().persistent;
     status = players_.insert(std::move(controller_record), player_controller_.config());
@@ -473,7 +535,7 @@ core::Status ServerRuntime::spawn_player(core::NetId client_id) {
     }
     player_connections_.emplace(
         client_id.value(),
-        PlayerConnection{runtime_handle.value(), entity_id.value(),
+        PlayerConnection{runtime_handle, entity_id.value(),
                          movement::ServerMovementInputQueue{}, std::nullopt});
     return core::Status::ok();
 }

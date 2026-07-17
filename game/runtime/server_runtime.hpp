@@ -6,6 +6,7 @@
 #include "engine/movement/player_controller_store.hpp"
 #include "engine/net/host_session.hpp"
 #include "engine/physics/physics_world.hpp"
+#include "engine/save/save_snapshot.hpp"
 #include "engine/simulation/simulation_scheduler.hpp"
 #include "engine/world/replication_delta.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
@@ -24,6 +25,7 @@ struct ServerRuntimeDesc {
     physics::PhysicsWorldDesc physics;
     const modding::PrototypeRegistry* prototypes = nullptr;
     const world::VoxelPalette* voxel_palette = nullptr;
+    std::optional<save::SaveSnapshot> initial_snapshot;
 };
 
 struct ServerRuntimeTickStats {
@@ -100,6 +102,7 @@ class ServerRuntime final {
     movement::PlayerController player_controller_;
     movement::PlayerControllerStore players_;
     std::unordered_map<std::uint64_t, PlayerConnection> player_connections_;
+    std::vector<world::VoxelEditRecord> pending_saved_voxel_edits_;
     net::HostSessionTickResult current_commands_;
     world::WorldReplicationDeltaDeliveryReport current_replication_;
     physics::PhysicsStepStats current_physics_;

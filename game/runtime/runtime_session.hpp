@@ -5,6 +5,8 @@
 #include "engine/movement/player_input.hpp"
 #include "engine/physics/physics_world.hpp"
 #include "engine/save/save_metadata.hpp"
+#include "engine/save/save_database.hpp"
+#include "engine/save/save_snapshot.hpp"
 #include "engine/simulation/fixed_step.hpp"
 #include "engine/world/voxels/voxel_palette.hpp"
 #include "game/features/interaction/voxel_commands.hpp"
@@ -13,6 +15,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,6 +37,7 @@ struct RuntimeConfiguration {
 struct SessionRequest {
     save::SaveMetadata metadata;
     std::string scenario_id = "base:scenarios/homestead";
+    std::optional<save::SaveSnapshot> initial_snapshot;
 };
 
 struct RuntimeFrameInput {
@@ -67,6 +71,8 @@ class RuntimeSession final {
                                                   std::int64_t now_ms = 0);
     [[nodiscard]] core::Status submit_remove_voxel(const interaction::RemoveVoxelCommand& command,
                                                    std::int64_t now_ms = 0);
+    [[nodiscard]] core::Result<save::SaveSnapshot> capture_save_snapshot() const;
+    [[nodiscard]] core::Status save_to(const save::FileSaveDatabase& database) const;
     [[nodiscard]] core::Status shutdown();
 
     [[nodiscard]] bool is_running() const noexcept;
