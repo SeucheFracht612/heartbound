@@ -3875,6 +3875,23 @@ void test_script_module_loading_from_mod_lifecycle() {
     assert(tick_module->permissions.size() == 2);
     assert(tick_module->permissions[0] == heartstead::scripting::ScriptPermission::read_prototypes);
     assert(tick_module->permissions[1] == heartstead::scripting::ScriptPermission::emit_commands);
+    assert(tick_module->source.find("heartstead.permissions") == std::string::npos);
+    assert(tick_module->source.find("heartstead.api_version") == std::string::npos);
+
+    auto script_runtime = heartstead::scripting::create_script_runtime(
+        heartstead::scripting::ScriptRuntimeDesc{heartstead::scripting::ScriptBackend::luau, 512});
+    assert(script_runtime);
+    assert(script_runtime.value()->load_module(*tick_module));
+    auto tick_call =
+        script_runtime.value()->call({tick_module->module_id,
+                                      "tick",
+                                      heartstead::scripting::ScriptStage::runtime_server,
+                                      {heartstead::scripting::ScriptValue::number(42)},
+                                      32,
+                                      {}});
+    assert(tick_call);
+    assert(tick_call.value().return_value.kind == heartstead::scripting::ScriptValueKind::number);
+    assert(tick_call.value().return_value.number_value == 42);
 
     const auto migration_module =
         std::ranges::find(loaded.modules, "base:migrations/0001_schema",

@@ -176,16 +176,21 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
 [[nodiscard]] bool parse_script_directives(ScriptModuleDesc& module,
                                            ScriptModuleLoadResult& result) {
     bool ok = true;
-    std::string_view source(module.source);
-    while (!source.empty()) {
-        const auto newline = source.find('\n');
-        auto line = newline == std::string_view::npos ? source : source.substr(0, newline);
+    std::string sanitized_source = module.source;
+    const std::string_view source(module.source);
+    std::size_t line_start = 0;
+    while (line_start < source.size()) {
+        const auto newline = source.find('\n', line_start);
+        const auto line_end = newline == std::string_view::npos ? source.size() : newline;
+        auto line = source.substr(line_start, line_end - line_start);
         line = trim(line);
 
+        bool is_module_directive = false;
         if (starts_with(line, "--")) {
             line.remove_prefix(2);
             line = trim(line);
             if (starts_with(line, "heartstead.")) {
+                is_module_directive = true;
                 if (const auto permissions_value =
                         directive_value(line, "heartstead.permissions")) {
                     ok = parse_permissions_directive(module, permissions_value.value(), result,
@@ -204,11 +209,16 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
             }
         }
 
+        if (is_module_directive) {
+            std::fill(sanitized_source.begin() + static_cast<std::ptrdiff_t>(line_start),
+                      sanitized_source.begin() + static_cast<std::ptrdiff_t>(line_end), ' ');
+        }
         if (newline == std::string_view::npos) {
             break;
         }
-        source.remove_prefix(newline + 1);
+        line_start = newline + 1;
     }
+    module.source = std::move(sanitized_source);
     return ok;
 }
 
