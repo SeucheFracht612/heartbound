@@ -15,6 +15,9 @@ namespace heartstead::scripting {
 
 struct ScriptModuleLoadConfig {
     std::uint32_t max_source_bytes = 256u * 1024u;
+    std::uint32_t max_modules = 256;
+    std::uint32_t max_directives_per_module = 32;
+    std::uint32_t max_permissions_per_module = 6;
 };
 
 struct ScriptModuleLoadResult {

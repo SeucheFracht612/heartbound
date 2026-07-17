@@ -68,9 +68,68 @@ void test_replace_file_installs_staged_content_and_preserves_on_failure() {
     assert(!cleanup_error);
 }
 
+void test_bounded_recursive_listing_and_root_confinement() {
+    const auto root = make_temp_root();
+    std::filesystem::create_directories(root / "nested/deeper");
+    write_text(root / "top.txt", "top");
+    write_text(root / "nested/deeper/value.txt", "value");
+
+    const auto listed = heartstead::core::list_regular_files_recursive(root);
+    assert(listed);
+    assert(listed.value().size() == 2);
+    assert(listed.value().front().lexically_relative(root) ==
+           std::filesystem::path("nested/deeper/value.txt"));
+    assert(listed.value().back().lexically_relative(root) == std::filesystem::path("top.txt"));
+
+    const auto relative =
+        heartstead::core::relative_path_below(root, root / "nested/deeper/value.txt");
+    assert(relative);
+    assert(relative.value() == std::filesystem::path("nested/deeper/value.txt"));
+    const auto outside = heartstead::core::relative_path_below(root, root.parent_path());
+    assert(!outside);
+    assert(outside.error().code == "core.path_outside_root");
+
+    const auto entry_limited = heartstead::core::list_regular_files_recursive(
+        root, {.maximum_entries = 1, .maximum_depth = 32});
+    assert(!entry_limited);
+    assert(entry_limited.error().code == "core.directory_too_large");
+    const auto depth_limited = heartstead::core::list_regular_files_recursive(
+        root, {.maximum_entries = 32, .maximum_depth = 1});
+    assert(!depth_limited);
+    assert(depth_limited.error().code == "core.directory_too_deep");
+
+    const auto directories = heartstead::core::list_directories(root);
+    assert(directories);
+    assert(directories.value().size() == 1);
+    assert(directories.value().front().filename() == "nested");
+    const auto directory_limited = heartstead::core::list_directories(root, {.maximum_entries = 1});
+    assert(!directory_limited);
+    assert(directory_limited.error().code == "core.directory_too_large");
+
+    std::error_code link_error;
+    std::filesystem::create_symlink(root / "top.txt", root / "linked.txt", link_error);
+    if (!link_error) {
+        const auto linked = heartstead::core::list_regular_files_recursive(root);
+        assert(!linked);
+        assert(linked.error().code == "core.directory_symlink_forbidden");
+        const auto linked_directories = heartstead::core::list_directories(root);
+        assert(!linked_directories);
+        assert(linked_directories.error().code == "core.directory_symlink_forbidden");
+        const auto linked_relative =
+            heartstead::core::relative_path_below(root, root / "linked.txt");
+        assert(!linked_relative);
+        assert(linked_relative.error().code == "core.path_symlink_forbidden");
+    }
+
+    std::error_code cleanup_error;
+    std::filesystem::remove_all(root, cleanup_error);
+    assert(!cleanup_error);
+}
+
 } // namespace
 
 int main() {
     test_replace_file_installs_staged_content_and_preserves_on_failure();
+    test_bounded_recursive_listing_and_root_confinement();
     return 0;
 }

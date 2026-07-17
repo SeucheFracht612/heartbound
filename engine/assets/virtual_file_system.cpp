@@ -34,10 +34,16 @@ namespace {
 
 [[nodiscard]] core::Result<std::vector<VirtualFileEntry>>
 list_files_impl(const std::vector<MountPoint>& mounts, std::string_view namespace_id,
-                const std::filesystem::path* relative_directory, std::string_view display_path) {
+                const std::filesystem::path* relative_directory, std::string_view display_path,
+                VirtualFileListOptions options) {
+    if (options.maximum_entries == 0 || options.maximum_depth == 0) {
+        return core::Result<std::vector<VirtualFileEntry>>::failure(
+            "vfs.invalid_list_limit", "virtual file entry and depth limits must be non-zero");
+    }
     std::vector<VirtualFileEntry> entries;
     std::unordered_set<std::string> seen_relative_paths;
     bool namespace_mounted = false;
+    std::size_t inspected_entry_count = 0;
 
     for (std::size_t reverse_index = mounts.size(); reverse_index > 0; --reverse_index) {
         const auto mount_index = reverse_index - 1;
@@ -50,6 +56,17 @@ list_files_impl(const std::vector<MountPoint>& mounts, std::string_view namespac
         std::error_code error;
         const auto target =
             relative_directory == nullptr ? mount.root : mount.root / *relative_directory;
+        const auto target_status = std::filesystem::symlink_status(target, error);
+        if (error && error != std::errc::no_such_file_or_directory) {
+            return core::Result<std::vector<VirtualFileEntry>>::failure(
+                "vfs.list_failed", "failed to inspect virtual directory: " + target.string());
+        }
+        if (!error && std::filesystem::is_symlink(target_status)) {
+            return core::Result<std::vector<VirtualFileEntry>>::failure(
+                "vfs.symlink_forbidden",
+                "virtual directory must not be a symbolic link: " + target.string());
+        }
+        error.clear();
         const auto candidate = std::filesystem::weakly_canonical(target, error);
         std::error_code directory_error;
         if (error || !is_same_or_child_path(candidate, mount.root) ||
@@ -57,8 +74,7 @@ list_files_impl(const std::vector<MountPoint>& mounts, std::string_view namespac
             continue;
         }
 
-        std::filesystem::recursive_directory_iterator iterator{
-            candidate, std::filesystem::directory_options::skip_permission_denied, error};
+        std::filesystem::recursive_directory_iterator iterator{candidate, error};
         if (error) {
             return core::Result<std::vector<VirtualFileEntry>>::failure(
                 "vfs.list_failed",
@@ -73,18 +89,53 @@ list_files_impl(const std::vector<MountPoint>& mounts, std::string_view namespac
                     "failed to continue listing virtual directory: " + std::string(display_path));
             }
 
+            ++inspected_entry_count;
+            if (inspected_entry_count > options.maximum_entries) {
+                return core::Result<std::vector<VirtualFileEntry>>::failure(
+                    "vfs.directory_too_large",
+                    "virtual directory exceeds its entry limit: " + std::string(display_path));
+            }
+            if (static_cast<std::size_t>(iterator.depth()) + 1U > options.maximum_depth) {
+                return core::Result<std::vector<VirtualFileEntry>>::failure(
+                    "vfs.directory_too_deep",
+                    "virtual directory exceeds its depth limit: " + std::string(display_path));
+            }
+
             std::error_code entry_error;
-            if (!iterator->is_regular_file(entry_error) || entry_error) {
+            const auto entry_status = iterator->symlink_status(entry_error);
+            if (entry_error) {
+                return core::Result<std::vector<VirtualFileEntry>>::failure(
+                    "vfs.list_failed",
+                    "failed to inspect virtual directory entry: " + iterator->path().string());
+            }
+            if (std::filesystem::is_symlink(entry_status)) {
+                return core::Result<std::vector<VirtualFileEntry>>::failure(
+                    "vfs.symlink_forbidden",
+                    "virtual directory trees must not contain symbolic links: " +
+                        iterator->path().string());
+            }
+            if (!std::filesystem::is_regular_file(entry_status)) {
                 continue;
             }
 
-            const auto resolved_entry = std::filesystem::weakly_canonical(iterator->path(), error);
-            if (error || !is_same_or_child_path(resolved_entry, mount.root)) {
-                continue;
+            std::error_code resolve_error;
+            const auto resolved_entry =
+                std::filesystem::weakly_canonical(iterator->path(), resolve_error);
+            if (resolve_error) {
+                return core::Result<std::vector<VirtualFileEntry>>::failure(
+                    "vfs.list_failed",
+                    "failed to resolve virtual directory entry: " + iterator->path().string());
+            }
+            if (!is_same_or_child_path(resolved_entry, mount.root)) {
+                return core::Result<std::vector<VirtualFileEntry>>::failure(
+                    "vfs.path_outside_root",
+                    "virtual directory entry resolves outside its mount root: " +
+                        iterator->path().string());
             }
 
-            const auto relative = std::filesystem::relative(resolved_entry, mount.root, error);
-            if (error) {
+            const auto relative =
+                std::filesystem::relative(resolved_entry, mount.root, resolve_error);
+            if (resolve_error) {
                 return core::Result<std::vector<VirtualFileEntry>>::failure(
                     "vfs.relative_failed",
                     "failed to compute virtual file path below mount root: " +
@@ -103,6 +154,11 @@ list_files_impl(const std::vector<MountPoint>& mounts, std::string_view namespac
             }
 
             entries.push_back(VirtualFileEntry{parsed.value(), resolved_entry, mount_index});
+        }
+        if (error) {
+            return core::Result<std::vector<VirtualFileEntry>>::failure(
+                "vfs.list_failed",
+                "failed while listing virtual directory: " + std::string(display_path));
         }
     }
 
@@ -227,7 +283,7 @@ core::Status VirtualFileSystem::mount(std::string namespace_id, std::filesystem:
 
     std::error_code error;
     auto canonical_root = std::filesystem::weakly_canonical(root, error);
-    if (error || !std::filesystem::is_directory(canonical_root)) {
+    if (error || !std::filesystem::is_directory(canonical_root, error) || error) {
         return core::Status::failure("vfs.invalid_root",
                                      "mount root does not exist or is not a directory: " +
                                          root.string());
@@ -247,12 +303,24 @@ VirtualFileSystem::resolve_existing(const VirtualPath& path) const {
         std::error_code error;
         const auto candidate =
             std::filesystem::weakly_canonical(it->root / path.relative_path, error);
-        if (error || !is_same_or_child_path(candidate, it->root)) {
-            continue;
+        if (error) {
+            return core::Result<std::filesystem::path>::failure(
+                "vfs.resolve_failed",
+                "failed to resolve virtual path: " + path.to_string() + ": " + error.message());
+        }
+        if (!is_same_or_child_path(candidate, it->root)) {
+            return core::Result<std::filesystem::path>::failure(
+                "vfs.path_outside_root",
+                "virtual path resolves outside its mount root: " + path.to_string());
         }
 
-        if (std::filesystem::exists(candidate)) {
+        if (std::filesystem::exists(candidate, error) && !error) {
             return core::Result<std::filesystem::path>::success(candidate);
+        }
+        if (error) {
+            return core::Result<std::filesystem::path>::failure(
+                "vfs.resolve_failed",
+                "failed to inspect virtual path: " + path.to_string() + ": " + error.message());
         }
     }
 
@@ -271,28 +339,29 @@ VirtualFileSystem::resolve_existing(std::string_view path) const {
 }
 
 core::Result<std::vector<VirtualFileEntry>>
-VirtualFileSystem::list_files(const VirtualPath& directory) const {
+VirtualFileSystem::list_files(const VirtualPath& directory, VirtualFileListOptions options) const {
     return list_files_impl(mounts_, directory.namespace_id, &directory.relative_path,
-                           directory.to_string());
+                           directory.to_string(), options);
 }
 
 core::Result<std::vector<VirtualFileEntry>>
-VirtualFileSystem::list_files(std::string_view directory) const {
+VirtualFileSystem::list_files(std::string_view directory, VirtualFileListOptions options) const {
     auto parsed = VirtualPath::parse(directory);
     if (!parsed) {
         return core::Result<std::vector<VirtualFileEntry>>::failure(parsed.error().code,
                                                                     parsed.error().message);
     }
-    return list_files(parsed.value());
+    return list_files(parsed.value(), options);
 }
 
 core::Result<std::vector<VirtualFileEntry>>
-VirtualFileSystem::list_namespace_files(std::string_view namespace_id) const {
+VirtualFileSystem::list_namespace_files(std::string_view namespace_id,
+                                        VirtualFileListOptions options) const {
     if (!core::is_valid_namespace_id(namespace_id)) {
         return core::Result<std::vector<VirtualFileEntry>>::failure(
             "vfs.invalid_namespace", "virtual namespace is not valid");
     }
-    return list_files_impl(mounts_, namespace_id, nullptr, namespace_id);
+    return list_files_impl(mounts_, namespace_id, nullptr, namespace_id, options);
 }
 
 core::Result<std::vector<std::uint8_t>>

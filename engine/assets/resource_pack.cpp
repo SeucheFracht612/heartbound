@@ -1,6 +1,7 @@
 #include "engine/assets/resource_pack.hpp"
 
 #include "engine/assets/asset_catalog.hpp"
+#include "engine/core/filesystem.hpp"
 #include "engine/core/ids.hpp"
 #include "engine/modding/flat_manifest.hpp"
 
@@ -55,6 +56,14 @@ void validate_manifest_fields(const std::map<std::string, std::string>& values,
                 "unknown resource pack manifest field: " + key});
         }
     }
+}
+
+[[nodiscard]] bool has_errors_since(const std::vector<modding::ModDiagnostic>& diagnostics,
+                                    std::size_t start) noexcept {
+    return std::ranges::any_of(diagnostics.begin() + static_cast<std::ptrdiff_t>(start),
+                               diagnostics.end(), [](const modding::ModDiagnostic& diagnostic) {
+                                   return diagnostic.severity == modding::DiagnosticSeverity::error;
+                               });
 }
 
 [[nodiscard]] core::Result<ShaderExtensionPoint>
@@ -269,29 +278,44 @@ ResourcePackDiscoveryResult
 ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_root) const {
     ResourcePackDiscoveryResult result;
 
-    if (!std::filesystem::is_directory(resource_packs_root)) {
+    auto pack_directories = core::list_directories(resource_packs_root);
+    if (!pack_directories) {
+        const auto missing = pack_directories.error().code == "core.directory_not_directory";
         result.diagnostics.push_back(modding::ModDiagnostic{
-            modding::DiagnosticSeverity::error, resource_packs_root, "resource_pack.root.missing",
-            "resource packs root does not exist"});
+            modding::DiagnosticSeverity::error,
+            resource_packs_root,
+            missing ? "resource_pack.root.missing" : pack_directories.error().code,
+            pack_directories.error().message,
+        });
         return result;
     }
 
     std::set<std::string> seen_ids;
-    for (const auto& entry : std::filesystem::directory_iterator(resource_packs_root)) {
-        if (!entry.is_directory()) {
-            continue;
-        }
-
-        const auto manifest_path = entry.path() / "resource_pack.toml";
-        if (!std::filesystem::exists(manifest_path)) {
+    for (const auto& pack_directory : pack_directories.value()) {
+        const auto manifest_path = pack_directory / "resource_pack.toml";
+        std::error_code manifest_error;
+        const auto manifest_status = std::filesystem::symlink_status(manifest_path, manifest_error);
+        if (manifest_error == std::errc::no_such_file_or_directory ||
+            (!manifest_error && !std::filesystem::exists(manifest_status))) {
             result.diagnostics.push_back(
-                modding::ModDiagnostic{modding::DiagnosticSeverity::warning, entry.path(),
+                modding::ModDiagnostic{modding::DiagnosticSeverity::warning, pack_directory,
                                        "resource_pack.manifest.missing",
                                        "directory does not contain "
                                        "resource_pack.toml"});
             continue;
         }
+        if (manifest_error || std::filesystem::is_symlink(manifest_status) ||
+            !std::filesystem::is_regular_file(manifest_status)) {
+            result.diagnostics.push_back(modding::ModDiagnostic{
+                modding::DiagnosticSeverity::error,
+                manifest_path,
+                "resource_pack.manifest.unsafe_file",
+                "resource pack manifest must be a readable non-symlink regular file",
+            });
+            continue;
+        }
 
+        const auto diagnostic_start = result.diagnostics.size();
         const auto values = modding::parse_flat_manifest(
             manifest_path, result.diagnostics, {.diagnostic_prefix = "resource_pack.manifest"});
         validate_manifest_fields(values, manifest_path, result.diagnostics);
@@ -300,7 +324,7 @@ ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_roo
         manifest.name = required_value(values, "name", manifest_path, result.diagnostics);
         manifest.version = required_value(values, "version", manifest_path, result.diagnostics);
         manifest.description = values.contains("description") ? values.at("description") : "";
-        manifest.root = entry.path();
+        manifest.root = pack_directory;
         manifest.target_namespace = values.contains("target_namespace")
                                         ? values.at("target_namespace")
                                         : std::string("base");
@@ -354,21 +378,27 @@ ResourcePackDiscoverer::discover(const std::filesystem::path& resource_packs_roo
                                                                 "namespace id"});
         }
 
-        if (!manifest.id.empty() && !seen_ids.insert(manifest.id).second) {
-            result.diagnostics.push_back(
-                modding::ModDiagnostic{modding::DiagnosticSeverity::error, manifest_path,
-                                       "resource_pack.manifest.duplicate_id",
-                                       "duplicate resource pack id: " + manifest.id});
-        }
-
-        if (!manifest.id.empty()) {
+        if (!has_errors_since(result.diagnostics, diagnostic_start)) {
             if (auto status = ResourcePackPolicy::validate_manifest(manifest); !status) {
                 result.diagnostics.push_back(
                     modding::ModDiagnostic{modding::DiagnosticSeverity::error, manifest_path,
                                            status.error().code, status.error().message});
             }
-            result.packs.push_back(std::move(manifest));
         }
+
+        if (has_errors_since(result.diagnostics, diagnostic_start)) {
+            continue;
+        }
+
+        if (!seen_ids.insert(manifest.id).second) {
+            result.diagnostics.push_back(
+                modding::ModDiagnostic{modding::DiagnosticSeverity::error, manifest_path,
+                                       "resource_pack.manifest.duplicate_id",
+                                       "duplicate resource pack id: " + manifest.id});
+            continue;
+        }
+
+        result.packs.push_back(std::move(manifest));
     }
 
     std::ranges::sort(result.packs, {}, &ResourcePackManifest::id);

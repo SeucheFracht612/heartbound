@@ -438,6 +438,15 @@ void test_virtual_file_system() {
     assert(namespace_listed.value()[0].virtual_path.to_string() ==
            "base:data/items/raw_clay.prototype");
 
+    auto entry_limited =
+        vfs.list_namespace_files("base", {.maximum_entries = 1, .maximum_depth = 32});
+    assert(!entry_limited);
+    assert(entry_limited.error().code == "vfs.directory_too_large");
+    auto depth_limited =
+        vfs.list_namespace_files("base", {.maximum_entries = 128, .maximum_depth = 1});
+    assert(!depth_limited);
+    assert(depth_limited.error().code == "vfs.directory_too_deep");
+
     auto invalid_namespace_list = vfs.list_namespace_files("Base");
     assert(!invalid_namespace_list);
     assert(invalid_namespace_list.error().code == "vfs.invalid_namespace");
@@ -458,6 +467,25 @@ void test_virtual_file_system() {
     auto unsafe_list = vfs.list_files("base:../textures");
     assert(!unsafe_list);
     assert(unsafe_list.error().code == "vfs.unsafe_relative_path");
+
+    std::error_code link_error;
+    std::filesystem::create_symlink(root / "pack/textures/items/raw_clay.txt",
+                                    root / "pack/textures/items/linked.txt", link_error);
+    if (!link_error) {
+        auto linked_list = vfs.list_namespace_files("base");
+        assert(!linked_list);
+        assert(linked_list.error().code == "vfs.symlink_forbidden");
+    }
+
+    write_text(root / "outside.txt", "outside mount");
+    std::error_code escape_link_error;
+    std::filesystem::create_symlink(root / "outside.txt", root / "pack/textures/items/escaped.txt",
+                                    escape_link_error);
+    if (!escape_link_error) {
+        const auto escaped_read = vfs.read_text("base:textures/items/escaped.txt");
+        assert(!escaped_read);
+        assert(escaped_read.error().code == "vfs.path_outside_root");
+    }
 }
 
 void test_math_primitives() {
@@ -558,6 +586,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
                                                          "surprise = true\n");
     const auto invalid_discovery = discoverer.discover(root / "invalid_resource_packs");
     assert(invalid_discovery.has_errors());
+    assert(invalid_discovery.packs.empty());
     assert(std::ranges::any_of(invalid_discovery.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "resource_pack.manifest.duplicate_key";
     }));
@@ -588,6 +617,23 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(std::ranges::any_of(unsafe_index.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "resource_pack.unscoped_shader_forbidden";
     }));
+
+    const auto linked_pack_root = root / "linked_resource_packs/linked_pack";
+    const auto external_pack_manifest = root / "external_resource_pack.toml";
+    write_text(external_pack_manifest, "id = \"linked_pack\"\n"
+                                       "name = \"Linked Pack\"\n"
+                                       "version = \"1\"\n");
+    std::filesystem::create_directories(linked_pack_root);
+    std::error_code pack_link_error;
+    std::filesystem::create_symlink(external_pack_manifest, linked_pack_root / "resource_pack.toml",
+                                    pack_link_error);
+    if (!pack_link_error) {
+        const auto linked_pack_discovery = discoverer.discover(root / "linked_resource_packs");
+        assert(linked_pack_discovery.has_errors());
+        assert(std::ranges::any_of(linked_pack_discovery.diagnostics, [](const auto& diagnostic) {
+            return diagnostic.code == "resource_pack.manifest.unsafe_file";
+        }));
+    }
 
     auto pack_plan = heartstead::assets::ResourcePackLoadPlanner::plan(discovery.packs);
     assert(pack_plan);
@@ -681,6 +727,7 @@ void test_resource_pack_discovery_and_asset_catalog() {
     assert(std::ranges::any_of(bounded_index.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "asset_catalog.file_too_large";
     }));
+    assert(bounded_catalog.record_count() == 0);
 
     assert(heartstead::assets::infer_asset_kind("models/building/wall.glb") ==
            heartstead::assets::AssetKind::model);
@@ -4017,6 +4064,33 @@ void test_script_module_loading_from_mod_lifecycle() {
     assert(loaded.count_stage(heartstead::scripting::ScriptStage::runtime_client) == 1);
     assert(loaded.count_stage(heartstead::scripting::ScriptStage::migration) == 1);
 
+    const auto bounded = heartstead::scripting::ScriptModuleLoader::load_from_plan(
+        discovery.mods, lifecycle_plan, {.max_source_bytes = 16});
+    assert(bounded.has_errors());
+    assert(std::ranges::any_of(bounded.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "scripting.source_too_large";
+    }));
+    const auto module_limited = heartstead::scripting::ScriptModuleLoader::load_from_plan(
+        discovery.mods, lifecycle_plan, {.max_modules = 1});
+    assert(module_limited.has_errors());
+    assert(std::ranges::any_of(module_limited.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "scripting.module.module_limit_reached";
+    }));
+    const auto invalid_limits = heartstead::scripting::ScriptModuleLoader::load_from_plan(
+        discovery.mods, lifecycle_plan, {.max_source_bytes = 0});
+    assert(invalid_limits.has_errors());
+    assert(invalid_limits.diagnostics.front().code == "scripting.module.invalid_loader_limits");
+
+    write_text(root / "outside.luau", "return {}\n");
+    heartstead::modding::ModLifecyclePlan forged_plan;
+    forged_plan.tasks.push_back({heartstead::modding::ModLifecycleStage::runtime_server,
+                                 heartstead::modding::ModLifecycleTaskKind::runtime_server_script,
+                                 "base", root / "outside.luau"});
+    const auto forged =
+        heartstead::scripting::ScriptModuleLoader::load_from_plan(discovery.mods, forged_plan);
+    assert(forged.has_errors());
+    assert(forged.diagnostics.front().code == "scripting.module.unsafe_source_path");
+
     const auto tick_module = std::ranges::find(loaded.modules, "base:scripts/runtime_server/tick",
                                                &heartstead::scripting::ScriptModuleDesc::module_id);
     assert(tick_module != loaded.modules.end());
@@ -4072,6 +4146,18 @@ void test_script_module_loading_from_mod_lifecycle() {
     write_text(invalid_mods_root / "base/scripts/runtime_server/bad.luau",
                "-- heartstead.permissions = \"read_prototypes, unknown_permission\"\n"
                "return { bad = function() return true end }\n");
+    write_text(invalid_mods_root / "base/scripts/runtime_server/too_many.luau",
+               "-- heartstead.permissions = "
+               "\"read_prototypes, read_assets, emit_commands, read_save, write_mod_state, "
+               "client_ui, read_assets\"\n"
+               "return {}\n");
+    write_text(invalid_mods_root / "base/scripts/runtime_server/duplicate.luau",
+               "-- heartstead.api_version = 1\n"
+               "-- heartstead.api_version = 2\n"
+               "return {}\n");
+    write_text(invalid_mods_root / "base/scripts/runtime_server/mismatched.luau",
+               "-- heartstead.permissions = \"read_assets\n"
+               "return {}\n");
     write_text(invalid_mods_root / "base/migrations/readme.txt", "not a lua migration\n");
 
     auto invalid_report = heartstead::modding::ModValidation::validate(invalid_mods_root);
@@ -4081,6 +4167,25 @@ void test_script_module_loading_from_mod_lifecycle() {
     }));
     assert(std::ranges::any_of(invalid_report.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "scripting.module.unsupported_extension";
+    }));
+    assert(std::ranges::any_of(invalid_report.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "scripting.module.too_many_permissions";
+    }));
+    assert(std::ranges::any_of(invalid_report.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "scripting.module.duplicate_api_version_directive";
+    }));
+    assert(std::ranges::any_of(invalid_report.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "scripting.module.invalid_directive_string";
+    }));
+
+    write_text(mods_root / "base/scripts/runtime_server/collision.lua", "return {}\n");
+    write_text(mods_root / "base/scripts/runtime_server/collision.luau", "return {}\n");
+    const auto collision_plan = heartstead::modding::ModLifecyclePlanner::build(discovery.mods);
+    const auto collision_modules =
+        heartstead::scripting::ScriptModuleLoader::load_from_plan(discovery.mods, collision_plan);
+    assert(collision_modules.has_errors());
+    assert(std::ranges::any_of(collision_modules.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "scripting.module.duplicate_id";
     }));
 }
 
@@ -4394,6 +4499,7 @@ void test_mod_discovery_and_prototypes() {
                                                    "surprise = true\n");
     const auto invalid_discovery = discoverer.discover(invalid_mods_root);
     assert(invalid_discovery.has_errors());
+    assert(invalid_discovery.mods.empty());
     assert(std::ranges::any_of(invalid_discovery.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "mod.manifest.duplicate_key";
     }));
@@ -4408,9 +4514,52 @@ void test_mod_discovery_and_prototypes() {
                "display_name = \"Duplicate\"\n");
     const auto invalid_prototypes = loader.load_from_mods(discovery.mods);
     assert(invalid_prototypes.has_errors());
+    assert(invalid_prototypes.prototypes.empty());
     assert(std::ranges::any_of(invalid_prototypes.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "prototype.duplicate_key";
     }));
+
+    std::error_code prototype_link_error;
+    std::filesystem::create_symlink(mods_root / "base/data/items/raw_clay.prototype.toml",
+                                    mods_root / "base/data/items/linked.prototype.toml",
+                                    prototype_link_error);
+    if (!prototype_link_error) {
+        const auto linked_prototypes = loader.load_from_mods(discovery.mods);
+        assert(linked_prototypes.has_errors());
+        assert(std::ranges::any_of(linked_prototypes.diagnostics, [](const auto& diagnostic) {
+            return diagnostic.code == "core.directory_symlink_forbidden";
+        }));
+    }
+
+    const auto linked_manifest_root = root / "linked_manifest_mods";
+    const auto external_manifest = root / "external_mod.toml";
+    write_text(external_manifest, "id = \"linked\"\n"
+                                  "name = \"Linked\"\n"
+                                  "version = \"1\"\n");
+    std::filesystem::create_directories(linked_manifest_root / "linked");
+    std::error_code manifest_link_error;
+    std::filesystem::create_symlink(external_manifest, linked_manifest_root / "linked/mod.toml",
+                                    manifest_link_error);
+    if (!manifest_link_error) {
+        const auto linked_manifest_discovery = discoverer.discover(linked_manifest_root);
+        assert(linked_manifest_discovery.has_errors());
+        assert(
+            std::ranges::any_of(linked_manifest_discovery.diagnostics, [](const auto& diagnostic) {
+                return diagnostic.code == "mod.manifest.unsafe_file";
+            }));
+    }
+
+    const auto linked_directory_root = root / "linked_directory_mods";
+    std::filesystem::create_directories(linked_directory_root);
+    std::error_code directory_link_error;
+    std::filesystem::create_directory_symlink(mods_root / "base", linked_directory_root / "linked",
+                                              directory_link_error);
+    if (!directory_link_error) {
+        const auto linked_directory_discovery = discoverer.discover(linked_directory_root);
+        assert(linked_directory_discovery.has_errors());
+        assert(linked_directory_discovery.diagnostics.front().code ==
+               "core.directory_symlink_forbidden");
+    }
 }
 
 void test_mod_dependency_discovery() {
@@ -4579,6 +4728,7 @@ void test_mod_lifecycle_plan() {
                                                     "name = \"Heartstead Base\"\n"
                                                     "version = \"0.0.1\"\n");
     write_text(invalid_mods_root / "base/scripts/unknown/place.luau", "return {}\n");
+    write_text(invalid_mods_root / "base/other/scripts/runtime_server/hidden.luau", "return {}\n");
     auto invalid_discovery = discoverer.discover(invalid_mods_root);
     assert(!invalid_discovery.has_errors());
     auto invalid_plan = heartstead::modding::ModLifecyclePlanner::build(invalid_discovery.mods);
@@ -4586,6 +4736,10 @@ void test_mod_lifecycle_plan() {
     assert(std::ranges::any_of(invalid_plan.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "mod.lifecycle.unknown_script_stage";
     }));
+    assert(std::ranges::any_of(invalid_plan.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "mod.lifecycle.script_outside_stage";
+    }));
+    assert(invalid_plan.count_stage(heartstead::modding::ModLifecycleStage::runtime_server) == 0);
     lifecycle_inspection = heartstead::debug::Inspector::inspect(invalid_plan);
     assert(lifecycle_inspection.state == "invalid");
     assert(lifecycle_inspection.has_errors());
@@ -4597,6 +4751,18 @@ void test_mod_lifecycle_plan() {
     assert(std::ranges::any_of(invalid_report.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "mod.lifecycle.unknown_script_stage";
     }));
+
+    std::error_code link_error;
+    std::filesystem::create_symlink(invalid_mods_root / "base/scripts/unknown/place.luau",
+                                    invalid_mods_root / "base/scripts/linked.luau", link_error);
+    if (!link_error) {
+        const auto linked_plan =
+            heartstead::modding::ModLifecyclePlanner::build(invalid_discovery.mods);
+        assert(linked_plan.has_errors());
+        assert(std::ranges::any_of(linked_plan.diagnostics, [](const auto& diagnostic) {
+            return diagnostic.code == "core.directory_symlink_forbidden";
+        }));
+    }
 }
 
 void test_mod_prototype_fingerprints() {
@@ -4758,6 +4924,20 @@ void test_mod_validation_applies_prototype_patches() {
     assert(std::ranges::any_of(report.diagnostics, [](const auto& diagnostic) {
         return diagnostic.code == "prototype_semantic.invalid_number";
     }));
+
+    write_text(mods_root / "tweaks/data/items/raw_clay.prototype_patch.toml",
+               "target = \"base:items/raw_clay\"\n"
+               "set.id = \"base:items/forged\"\n"
+               "set.stack_limit = \"16\"\n");
+    report = heartstead::modding::ModValidation::validate(mods_root);
+    assert(report.has_errors());
+    assert(std::ranges::any_of(report.diagnostics, [](const auto& diagnostic) {
+        return diagnostic.code == "prototype_patch.immutable_field";
+    }));
+    assert(report.applied_patch_count == 1);
+    const auto* unmodified_clay = report.registry.find(clay_id.value());
+    assert(unmodified_clay != nullptr);
+    assert(unmodified_clay->fields.at("stack_limit") == "64");
 
     write_text(mods_root / "tweaks/data/items/raw_clay.prototype_patch.toml",
                "target = \"base:items/missing\"\n"

@@ -1,14 +1,16 @@
 #include "engine/scripting/script_module_loader.hpp"
 
+#include "engine/core/file_io.hpp"
+#include "engine/core/filesystem.hpp"
+#include "engine/core/ids.hpp"
+
 #include <algorithm>
 #include <charconv>
 #include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 
 namespace heartstead::scripting {
@@ -58,14 +60,6 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
     return extension == ".lua" || extension == ".luau";
 }
 
-[[nodiscard]] std::optional<std::string> read_script_source(const std::filesystem::path& source) {
-    std::ifstream input(source, std::ios::binary);
-    if (!input) {
-        return std::nullopt;
-    }
-    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-}
-
 [[nodiscard]] std::string_view trim(std::string_view value) noexcept {
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t' ||
                               value.front() == '\r' || value.front() == '\n')) {
@@ -82,12 +76,23 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
     return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
 }
 
-[[nodiscard]] std::string unquoted(std::string_view value) {
+[[nodiscard]] std::optional<std::string> unquoted(std::string_view value) {
     value = trim(value);
-    if (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
-                              (value.front() == '\'' && value.back() == '\''))) {
+    if (value.empty()) {
+        return std::string{};
+    }
+    const auto starts_quoted = value.front() == '"' || value.front() == '\'';
+    const auto ends_quoted = value.back() == '"' || value.back() == '\'';
+    if (starts_quoted || ends_quoted) {
+        if (value.size() < 2 || !starts_quoted || value.back() != value.front()) {
+            return std::nullopt;
+        }
+        const auto quote = value.front();
         value.remove_prefix(1);
         value.remove_suffix(1);
+        if (value.find(quote) != std::string_view::npos) {
+            return std::nullopt;
+        }
     }
     return std::string(value);
 }
@@ -122,17 +127,37 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
 
 [[nodiscard]] bool parse_permissions_directive(ScriptModuleDesc& module, std::string_view raw_value,
                                                ScriptModuleLoadResult& result,
-                                               const std::filesystem::path& source) {
+                                               const std::filesystem::path& source,
+                                               std::uint32_t maximum_permissions) {
     const auto permissions_text = unquoted(raw_value);
-    if (trim(permissions_text).empty()) {
+    if (!permissions_text) {
+        add_diagnostic(result, modding::DiagnosticSeverity::error, source,
+                       "scripting.module.invalid_directive_string",
+                       "script permissions directive has mismatched or embedded quotes");
+        return false;
+    }
+    if (trim(*permissions_text).empty()) {
         add_diagnostic(result, modding::DiagnosticSeverity::error, source,
                        "scripting.module.empty_permissions_directive",
                        "script permissions directive must name at least one permission");
         return false;
     }
+    if (permissions_text->front() == ',' || permissions_text->back() == ',') {
+        add_diagnostic(result, modding::DiagnosticSeverity::error, source,
+                       "scripting.module.empty_permission",
+                       "script permissions directive contains an empty permission");
+        return false;
+    }
+    if (static_cast<std::size_t>(std::ranges::count(*permissions_text, ',')) + 1U >
+        maximum_permissions) {
+        add_diagnostic(result, modding::DiagnosticSeverity::error, source,
+                       "scripting.module.too_many_permissions",
+                       "script permissions directive exceeds its permission limit");
+        return false;
+    }
 
     bool ok = true;
-    for (const auto token : split_csv(permissions_text)) {
+    for (const auto token : split_csv(*permissions_text)) {
         if (token.empty()) {
             add_diagnostic(result, modding::DiagnosticSeverity::error, source,
                            "scripting.module.empty_permission",
@@ -158,7 +183,13 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
                                                ScriptModuleLoadResult& result,
                                                const std::filesystem::path& source) {
     const auto version_text = unquoted(raw_value);
-    const auto version_view = trim(version_text);
+    if (!version_text) {
+        add_diagnostic(result, modding::DiagnosticSeverity::error, source,
+                       "scripting.module.invalid_directive_string",
+                       "script api_version directive has mismatched or embedded quotes");
+        return false;
+    }
+    const auto version_view = trim(*version_text);
     std::uint32_t version = 0;
     const auto* begin = version_view.data();
     const auto* end = begin + version_view.size();
@@ -173,9 +204,12 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
     return true;
 }
 
-[[nodiscard]] bool parse_script_directives(ScriptModuleDesc& module,
-                                           ScriptModuleLoadResult& result) {
+[[nodiscard]] bool parse_script_directives(ScriptModuleDesc& module, ScriptModuleLoadResult& result,
+                                           const ScriptModuleLoadConfig& config) {
     bool ok = true;
+    bool permissions_seen = false;
+    bool api_version_seen = false;
+    std::uint32_t directive_count = 0;
     std::string sanitized_source = module.source;
     const std::string_view source(module.source);
     std::size_t line_start = 0;
@@ -191,16 +225,42 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
             line = trim(line);
             if (starts_with(line, "heartstead.")) {
                 is_module_directive = true;
+                ++directive_count;
+                if (directive_count > config.max_directives_per_module) {
+                    add_diagnostic(result, modding::DiagnosticSeverity::error, module.source_path,
+                                   "scripting.module.too_many_directives",
+                                   "script module exceeds its directive limit");
+                    return false;
+                }
                 if (const auto permissions_value =
                         directive_value(line, "heartstead.permissions")) {
-                    ok = parse_permissions_directive(module, permissions_value.value(), result,
-                                                     module.source_path) &&
-                         ok;
+                    if (permissions_seen) {
+                        add_diagnostic(result, modding::DiagnosticSeverity::error,
+                                       module.source_path,
+                                       "scripting.module.duplicate_permissions_directive",
+                                       "script module repeats its permissions directive");
+                        ok = false;
+                    } else {
+                        permissions_seen = true;
+                        ok = parse_permissions_directive(module, permissions_value.value(), result,
+                                                         module.source_path,
+                                                         config.max_permissions_per_module) &&
+                             ok;
+                    }
                 } else if (const auto api_version_value =
                                directive_value(line, "heartstead.api_version")) {
-                    ok = parse_api_version_directive(module, api_version_value.value(), result,
-                                                     module.source_path) &&
-                         ok;
+                    if (api_version_seen) {
+                        add_diagnostic(result, modding::DiagnosticSeverity::error,
+                                       module.source_path,
+                                       "scripting.module.duplicate_api_version_directive",
+                                       "script module repeats its api_version directive");
+                        ok = false;
+                    } else {
+                        api_version_seen = true;
+                        ok = parse_api_version_directive(module, api_version_value.value(), result,
+                                                         module.source_path) &&
+                             ok;
+                    }
                 } else {
                     add_diagnostic(result, modding::DiagnosticSeverity::warning, module.source_path,
                                    "scripting.module.unknown_directive",
@@ -222,17 +282,6 @@ void add_diagnostic(ScriptModuleLoadResult& result, modding::DiagnosticSeverity 
     return ok;
 }
 
-[[nodiscard]] std::optional<std::string>
-module_local_id_from_path(const modding::ModManifest& mod, const std::filesystem::path& source) {
-    std::error_code error;
-    auto relative = std::filesystem::relative(source, mod.root, error);
-    if (error || relative.empty()) {
-        return std::nullopt;
-    }
-    relative.replace_extension();
-    return relative.generic_string();
-}
-
 } // namespace
 
 bool ScriptModuleLoadResult::has_errors() const noexcept {
@@ -251,10 +300,34 @@ ScriptModuleLoader::load_from_plan(const std::vector<modding::ModManifest>& mods
                                    const modding::ModLifecyclePlan& lifecycle_plan,
                                    ScriptModuleLoadConfig config) {
     ScriptModuleLoadResult result;
+    constexpr std::uint32_t known_permission_count = 6;
+    if (config.max_source_bytes == 0 || config.max_modules == 0 ||
+        config.max_directives_per_module == 0 || config.max_permissions_per_module == 0) {
+        add_diagnostic(result, modding::DiagnosticSeverity::error, {},
+                       "scripting.module.invalid_loader_limits",
+                       "script module loader limits must be non-zero");
+        return result;
+    }
+    if (config.max_permissions_per_module > known_permission_count) {
+        add_diagnostic(result, modding::DiagnosticSeverity::error, {},
+                       "scripting.module.invalid_loader_limits",
+                       "script module permission limit exceeds the known permission set");
+        return result;
+    }
+
+    std::set<std::string> seen_module_ids;
+    std::uint32_t script_task_count = 0;
 
     for (const auto& task : lifecycle_plan.tasks) {
         if (!is_script_task(task.kind)) {
             continue;
+        }
+        ++script_task_count;
+        if (script_task_count > config.max_modules) {
+            add_diagnostic(result, modding::DiagnosticSeverity::error, task.source,
+                           "scripting.module.module_limit_reached",
+                           "script lifecycle plan exceeds the module loader limit");
+            break;
         }
 
         const auto* mod = find_mod(mods, task.mod_id);
@@ -273,29 +346,51 @@ ScriptModuleLoader::load_from_plan(const std::vector<modding::ModManifest>& mods
         }
 
         const auto stage = script_stage_for_task(task.kind);
-        const auto local_id = module_local_id_from_path(*mod, task.source);
-        if (!stage || !local_id) {
+        if (!stage) {
             add_diagnostic(result, modding::DiagnosticSeverity::error, task.source,
                            "scripting.module.invalid_lifecycle_task",
-                           "script lifecycle task cannot be converted into a module");
+                           "script lifecycle task has no matching script stage");
+            continue;
+        }
+        auto relative_source = core::relative_path_below(mod->root, task.source);
+        if (!relative_source) {
+            add_diagnostic(result, modding::DiagnosticSeverity::error, task.source,
+                           "scripting.module.unsafe_source_path", relative_source.error().message);
+            continue;
+        }
+        relative_source.value().replace_extension();
+        const auto module_id = mod->id + ":" + relative_source.value().generic_string();
+        if (!core::PrototypeId::parse(module_id)) {
+            add_diagnostic(result, modding::DiagnosticSeverity::error, task.source,
+                           "scripting.module.invalid_module_id",
+                           "script lifecycle source does not produce a valid module id");
+            continue;
+        }
+        if (!seen_module_ids.insert(module_id).second) {
+            add_diagnostic(result, modding::DiagnosticSeverity::error, task.source,
+                           "scripting.module.duplicate_id",
+                           "multiple script files produce the same module id: " + module_id);
             continue;
         }
 
-        const auto source = read_script_source(task.source);
+        auto source = core::read_text_file(task.source, {.maximum_bytes = config.max_source_bytes});
         if (!source) {
             add_diagnostic(result, modding::DiagnosticSeverity::error, task.source,
-                           "scripting.module.read_failed", "script module source cannot be read");
+                           source.error().code == "core.file_too_large"
+                               ? "scripting.source_too_large"
+                               : "scripting.module.read_failed",
+                           source.error().message);
             continue;
         }
 
         ScriptModuleDesc module;
-        module.module_id = mod->id + ":" + local_id.value();
+        module.module_id = module_id;
         module.source_mod_id = mod->id;
         module.source_path = task.source;
-        module.source = source.value();
+        module.source = std::move(source).value();
         module.stage = stage.value();
 
-        if (!parse_script_directives(module, result)) {
+        if (!parse_script_directives(module, result, config)) {
             continue;
         }
 

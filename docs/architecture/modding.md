@@ -7,6 +7,8 @@ Current implemented foundation:
 - one-directory-per-mod discovery under `mods/`
 - required `mod.toml`
 - namespace-style mod ids
+- bounded, deterministic directory traversal that rejects symlinked mod/manifest/content entries,
+  excessive depth, excessive entry counts, and filesystem errors
 - one bounded flat-manifest parser shared by mod manifests, generic prototypes, prototype patches,
   and resource-pack manifests; it handles comments only outside quoted strings, decodes the
   supported quoted escapes, preserves the first value on duplicate keys, and reports malformed,
@@ -65,6 +67,8 @@ runtime_client     scripts/runtime_client/**/*.lua[u]
 
 Script files outside a known script stage produce validation diagnostics. This prevents
 runtime or migration scripts from silently landing in the wrong sandbox stage later.
+Stage recognition is anchored to the top-level mod layout, so a nested directory merely named
+`scripts`, `data`, or `assets` cannot impersonate an engine lifecycle stage.
 
 Prototype patch loading has two deterministic passes after all new prototype definitions
 are loaded and before registry semantic validation:
@@ -77,6 +81,9 @@ final_fixes        *.final_patch.toml
 Both patch stages use the same small contract. Patches can set representation fields, but
 they cannot change immutable prototype identity fields such as `id` or `kind`. A mod that
 patches another mod's prototype must declare that target mod in `dependencies`.
+Malformed prototype and patch files are not materialized, and each patch is applied atomically so
+an invalid immutable-field edit cannot partially change other fields or increment the applied
+patch count.
 
 The engine validates representation-level fields that affect core boundaries, such as
 item stack limits, cargo mass and transport modes, entity kind, build-piece tags,

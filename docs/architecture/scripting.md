@@ -45,12 +45,15 @@ Implemented foundation:
     records during mod validation
   - derives stable module ids from the owning mod id and mod-relative source path
   - maps lifecycle task kind to runtime server, runtime client, or migration stage
-  - reads source through the validation pipeline before any backend execution
+  - confines source files to their owning mod root and rejects symlinked or forged lifecycle paths
+  - applies the source byte limit while reading, before allocating the full script payload
+  - bounds module, directive, and permission counts and rejects duplicate module ids/directives
   - parses small source comments for module grants and API version:
     - `-- heartstead.permissions = "read_prototypes, emit_commands"`
     - `-- heartstead.api_version = "1"`
   - reports diagnostics for unreadable files, unsupported script extensions, invalid module ids,
-    unknown permissions, duplicate permissions, oversized source, and bad API versions
+    unknown permissions, duplicate permissions/directives, malformed directive quoting, oversized
+    source, and bad API versions
 
 - Script modules
   - stable `namespace:local_id` module id

@@ -1,5 +1,7 @@
 #include "engine/modding/mod_lifecycle.hpp"
 
+#include "engine/core/filesystem.hpp"
+
 #include <algorithm>
 #include <array>
 #include <filesystem>
@@ -24,13 +26,6 @@ constexpr std::array stage_order{
         }
     }
     return stage_order.size();
-}
-
-[[nodiscard]] bool path_has_component(const std::filesystem::path& path,
-                                      std::string_view component) {
-    return std::ranges::any_of(path, [component](const std::filesystem::path& part) {
-        return part.generic_string() == component;
-    });
 }
 
 [[nodiscard]] bool path_has_extension(const std::filesystem::path& path,
@@ -63,10 +58,31 @@ void add_diagnostic(ModLifecyclePlan& plan, DiagnosticSeverity severity,
 
 void classify_file(ModLifecyclePlan& plan, const ModManifest& mod,
                    const std::filesystem::path& file) {
-    const auto relative = std::filesystem::relative(file, mod.root);
+    auto relative_result = core::relative_path_below(mod.root, file);
+    if (!relative_result) {
+        add_diagnostic(plan, DiagnosticSeverity::error, file, "mod.lifecycle.unsafe_path",
+                       relative_result.error().message);
+        return;
+    }
+    const auto& relative = relative_result.value();
     const auto filename = filename_string(file);
+    auto component = relative.begin();
+    if (component == relative.end()) {
+        add_diagnostic(plan, DiagnosticSeverity::error, file, "mod.lifecycle.unsafe_path",
+                       "mod lifecycle file has no relative path below its mod root");
+        return;
+    }
+    const auto top_level = component->generic_string();
+    const auto is_lua_source =
+        path_has_extension(file, ".lua") || path_has_extension(file, ".luau");
 
-    if (path_has_component(relative, "data")) {
+    if (top_level != "scripts" && top_level != "migrations" && is_lua_source) {
+        add_diagnostic(plan, DiagnosticSeverity::error, file, "mod.lifecycle.script_outside_stage",
+                       "Lua script files must live in a declared runtime or migration stage");
+        return;
+    }
+
+    if (top_level == "data") {
         if (ends_with(filename, ".prototype.toml")) {
             add_task(plan, ModLifecycleStage::prototypes,
                      ModLifecycleTaskKind::prototype_definition, mod, file);
@@ -84,41 +100,44 @@ void classify_file(ModLifecyclePlan& plan, const ModManifest& mod,
         }
     }
 
-    if (path_has_component(relative, "assets") || path_has_component(relative, "locale")) {
+    if (top_level == "assets" || top_level == "locale") {
         add_task(plan, ModLifecycleStage::assets,
-                 path_has_component(relative, "locale") ? ModLifecycleTaskKind::resource_file
-                                                        : ModLifecycleTaskKind::asset_file,
+                 top_level == "locale" ? ModLifecycleTaskKind::resource_file
+                                       : ModLifecycleTaskKind::asset_file,
                  mod, file);
         return;
     }
 
-    if (path_has_component(relative, "migrations") && !path_has_component(relative, "scripts")) {
+    if (top_level == "migrations") {
         add_task(plan, ModLifecycleStage::migration, ModLifecycleTaskKind::migration_script, mod,
                  file);
         return;
     }
 
-    if (!path_has_component(relative, "scripts")) {
+    if (top_level != "scripts") {
         return;
     }
 
-    if (!path_has_extension(file, ".lua") && !path_has_extension(file, ".luau")) {
+    if (!is_lua_source) {
         add_diagnostic(plan, DiagnosticSeverity::warning, file, "mod.lifecycle.unknown_script_file",
                        "script directory contains a non-Lua script file");
         return;
     }
 
-    if (path_has_component(relative, "runtime_server")) {
+    ++component;
+    const auto script_stage =
+        component == relative.end() ? std::string{} : component->generic_string();
+    if (script_stage == "runtime_server") {
         add_task(plan, ModLifecycleStage::runtime_server,
                  ModLifecycleTaskKind::runtime_server_script, mod, file);
         return;
     }
-    if (path_has_component(relative, "runtime_client")) {
+    if (script_stage == "runtime_client") {
         add_task(plan, ModLifecycleStage::runtime_client,
                  ModLifecycleTaskKind::runtime_client_script, mod, file);
         return;
     }
-    if (path_has_component(relative, "migration") || path_has_component(relative, "migrations")) {
+    if (script_stage == "migration" || script_stage == "migrations") {
         add_task(plan, ModLifecycleStage::migration, ModLifecycleTaskKind::migration_script, mod,
                  file);
         return;
@@ -159,21 +178,22 @@ ModLifecyclePlan ModLifecyclePlanner::build(const std::vector<ModManifest>& mods
         add_task(plan, ModLifecycleStage::settings, ModLifecycleTaskKind::manifest, mod,
                  mod.root / "mod.toml");
 
-        if (!std::filesystem::is_directory(mod.root)) {
+        std::error_code error;
+        const auto root_status = std::filesystem::symlink_status(mod.root, error);
+        if (error || !std::filesystem::is_directory(root_status)) {
             add_diagnostic(plan, DiagnosticSeverity::error, mod.root, "mod.lifecycle.root_missing",
-                           "mod lifecycle root is not a directory");
+                           "mod lifecycle root is not a non-symlink directory");
             continue;
         }
 
-        std::vector<std::filesystem::path> files;
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(mod.root)) {
-            if (entry.is_regular_file()) {
-                files.push_back(entry.path());
-            }
+        auto files = core::list_regular_files_recursive(mod.root);
+        if (!files) {
+            add_diagnostic(plan, DiagnosticSeverity::error, mod.root, files.error().code,
+                           files.error().message);
+            continue;
         }
-        std::ranges::sort(files);
 
-        for (const auto& file : files) {
+        for (const auto& file : files.value()) {
             if (file.filename() == "mod.toml") {
                 continue;
             }

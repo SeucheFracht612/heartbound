@@ -1,5 +1,6 @@
 #include "engine/modding/generic_prototype_loader.hpp"
 
+#include "engine/core/filesystem.hpp"
 #include "engine/core/result.hpp"
 #include "engine/modding/flat_manifest.hpp"
 
@@ -41,7 +42,15 @@ namespace {
 [[nodiscard]] core::Result<GenericPrototypePatch>
 parse_patch(const std::filesystem::path& file, std::string_view source_mod_id,
             GenericPrototypePatchStage stage, std::vector<ModDiagnostic>& diagnostics) {
+    const auto diagnostic_start = diagnostics.size();
     const auto fields = parse_flat_manifest(file, diagnostics, {.diagnostic_prefix = "prototype"});
+    if (std::ranges::any_of(diagnostics.begin() + static_cast<std::ptrdiff_t>(diagnostic_start),
+                            diagnostics.end(), [](const ModDiagnostic& diagnostic) {
+                                return diagnostic.severity == DiagnosticSeverity::error;
+                            })) {
+        return core::Result<GenericPrototypePatch>::failure("prototype_patch.invalid_manifest",
+                                                            "prototype patch manifest is invalid");
+    }
     const auto target_text = required_value(fields, "target", file, diagnostics);
     const auto target_id = core::PrototypeId::parse(target_text);
     if (!target_id) {
@@ -101,7 +110,7 @@ void apply_patch(GenericPrototypeLoadResult& result,
         return;
     }
 
-    auto& prototype = result.prototypes[found->second];
+    const auto& prototype = result.prototypes[found->second];
     if (prototype.id.namespace_id() != source_mod.id &&
         !declares_dependency(source_mod, prototype.id.namespace_id())) {
         add_error(result.diagnostics, patch.source, "prototype_patch.missing_dependency",
@@ -110,40 +119,65 @@ void apply_patch(GenericPrototypeLoadResult& result,
         return;
     }
 
-    for (const auto& [field, value] : patch.set_fields) {
+    for (const auto& [field, _] : patch.set_fields) {
         if (field == "id" || field == "kind") {
             add_error(result.diagnostics, patch.source, "prototype_patch.immutable_field",
                       "prototype patch cannot modify immutable field: " + field);
-            continue;
+            return;
         }
-        if (field == "display_name") {
-            prototype.display_name = value;
-        }
-        prototype.fields[field] = value;
     }
+
+    auto staged = prototype;
+    for (const auto& [field, value] : patch.set_fields) {
+        if (field == "display_name") {
+            staged.display_name = value;
+        }
+        staged.fields[field] = value;
+    }
+    result.prototypes[found->second] = std::move(staged);
     ++result.applied_patch_count;
+}
+
+[[nodiscard]] std::vector<std::filesystem::path>
+collect_data_files(const ModManifest& mod, std::vector<ModDiagnostic>& diagnostics) {
+    const auto data_root = mod.root / "data";
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(data_root, error);
+    if (error == std::errc::no_such_file_or_directory ||
+        (!error && !std::filesystem::exists(status))) {
+        return {};
+    }
+    if (error) {
+        add_error(diagnostics, data_root, "prototype.data_root_failed",
+                  "could not inspect prototype data root: " + error.message());
+        return {};
+    }
+    if (!std::filesystem::is_directory(status)) {
+        add_error(diagnostics, data_root, "prototype.data_root_invalid",
+                  "prototype data root must be a non-symlink directory");
+        return {};
+    }
+
+    auto listed = core::list_regular_files_recursive(data_root);
+    if (!listed) {
+        add_error(diagnostics, data_root, listed.error().code, listed.error().message);
+        return {};
+    }
+
+    auto files = std::move(listed).value();
+    std::erase_if(files,
+                  [](const std::filesystem::path& file) { return file.extension() != ".toml"; });
+    return files;
 }
 
 void load_and_apply_patches(GenericPrototypeLoadResult& result,
                             std::unordered_map<std::string, std::size_t>& prototype_indexes,
-                            const std::vector<ModManifest>& mods, std::string_view suffix,
-                            GenericPrototypePatchStage stage) {
-    for (const auto& mod : mods) {
-        const auto data_root = mod.root / "data";
-        if (!std::filesystem::is_directory(data_root)) {
-            continue;
-        }
-
-        std::vector<std::filesystem::path> files;
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(data_root)) {
-            if (!entry.is_regular_file() || entry.path().extension() != ".toml") {
-                continue;
-            }
-            files.push_back(entry.path());
-        }
-        std::ranges::sort(files);
-
-        for (const auto& file : files) {
+                            const std::vector<ModManifest>& mods,
+                            const std::vector<std::vector<std::filesystem::path>>& data_files,
+                            std::string_view suffix, GenericPrototypePatchStage stage) {
+    for (std::size_t mod_index = 0; mod_index < mods.size(); ++mod_index) {
+        const auto& mod = mods[mod_index];
+        for (const auto& file : data_files[mod_index]) {
             const auto filename = file.filename().string();
             if (!filename.ends_with(suffix)) {
                 continue;
@@ -184,34 +218,35 @@ GenericPrototypeLoader::load_from_mods(const std::vector<ModManifest>& mods) con
     GenericPrototypeLoadResult result;
     std::set<std::string> seen_ids;
     std::unordered_map<std::string, std::size_t> prototype_indexes;
-
+    std::vector<std::vector<std::filesystem::path>> data_files;
+    data_files.reserve(mods.size());
     for (const auto& mod : mods) {
-        const auto data_root = mod.root / "data";
-        if (!std::filesystem::is_directory(data_root)) {
-            continue;
-        }
+        data_files.push_back(collect_data_files(mod, result.diagnostics));
+    }
 
-        std::vector<std::filesystem::path> files;
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(data_root)) {
-            if (!entry.is_regular_file() || entry.path().extension() != ".toml") {
-                continue;
-            }
-            files.push_back(entry.path());
-        }
-        std::ranges::sort(files);
-
-        for (const auto& file : files) {
+    for (std::size_t mod_index = 0; mod_index < mods.size(); ++mod_index) {
+        const auto& mod = mods[mod_index];
+        for (const auto& file : data_files[mod_index]) {
             const auto filename = file.filename().string();
             if (!filename.ends_with(".prototype.toml")) {
                 continue;
             }
 
+            const auto diagnostic_start = result.diagnostics.size();
             auto fields =
                 parse_flat_manifest(file, result.diagnostics, {.diagnostic_prefix = "prototype"});
             const auto kind = required_value(fields, "kind", file, result.diagnostics);
             const auto id_text = required_value(fields, "id", file, result.diagnostics);
             const auto display_name =
                 required_value(fields, "display_name", file, result.diagnostics);
+
+            if (std::ranges::any_of(result.diagnostics.begin() +
+                                        static_cast<std::ptrdiff_t>(diagnostic_start),
+                                    result.diagnostics.end(), [](const ModDiagnostic& diagnostic) {
+                                        return diagnostic.severity == DiagnosticSeverity::error;
+                                    })) {
+                continue;
+            }
 
             const auto parsed_id = core::PrototypeId::parse(id_text);
             if (!parsed_id) {
@@ -243,9 +278,9 @@ GenericPrototypeLoader::load_from_mods(const std::vector<ModManifest>& mods) con
         }
     }
 
-    load_and_apply_patches(result, prototype_indexes, mods, ".prototype_patch.toml",
+    load_and_apply_patches(result, prototype_indexes, mods, data_files, ".prototype_patch.toml",
                            GenericPrototypePatchStage::data_update);
-    load_and_apply_patches(result, prototype_indexes, mods, ".final_patch.toml",
+    load_and_apply_patches(result, prototype_indexes, mods, data_files, ".final_patch.toml",
                            GenericPrototypePatchStage::final_fix);
 
     std::ranges::sort(result.prototypes, {},

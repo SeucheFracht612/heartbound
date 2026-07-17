@@ -1,5 +1,6 @@
 #include "engine/modding/mod_discovery.hpp"
 
+#include "engine/core/filesystem.hpp"
 #include "engine/core/ids.hpp"
 #include "engine/core/result.hpp"
 #include "engine/modding/flat_manifest.hpp"
@@ -85,6 +86,14 @@ void validate_manifest_fields(const std::map<std::string, std::string>& values,
                       "unknown mod manifest field: " + key);
         }
     }
+}
+
+[[nodiscard]] bool has_errors_since(const std::vector<ModDiagnostic>& diagnostics,
+                                    std::size_t start) noexcept {
+    return std::ranges::any_of(diagnostics.begin() + static_cast<std::ptrdiff_t>(start),
+                               diagnostics.end(), [](const ModDiagnostic& diagnostic) {
+                                   return diagnostic.severity == DiagnosticSeverity::error;
+                               });
 }
 
 void validate_dependencies(ModDiscoveryResult& result) {
@@ -190,26 +199,42 @@ bool ModDiscoveryResult::has_errors() const noexcept {
 ModDiscoveryResult ModDiscoverer::discover(const std::filesystem::path& mods_root) const {
     ModDiscoveryResult result;
 
-    if (!std::filesystem::is_directory(mods_root)) {
-        result.diagnostics.push_back(ModDiagnostic{DiagnosticSeverity::error, mods_root,
-                                                   "mod.root.missing", "mods root does not exist"});
+    auto mod_directories = core::list_directories(mods_root);
+    if (!mod_directories) {
+        const auto missing = mod_directories.error().code == "core.directory_not_directory";
+        result.diagnostics.push_back(ModDiagnostic{
+            DiagnosticSeverity::error,
+            mods_root,
+            missing ? "mod.root.missing" : mod_directories.error().code,
+            mod_directories.error().message,
+        });
         return result;
     }
 
     std::set<std::string> seen_ids;
-    for (const auto& entry : std::filesystem::directory_iterator(mods_root)) {
-        if (!entry.is_directory()) {
-            continue;
-        }
-
-        const auto manifest_path = entry.path() / "mod.toml";
-        if (!std::filesystem::exists(manifest_path)) {
-            result.diagnostics.push_back(ModDiagnostic{DiagnosticSeverity::warning, entry.path(),
+    for (const auto& mod_directory : mod_directories.value()) {
+        const auto manifest_path = mod_directory / "mod.toml";
+        std::error_code manifest_error;
+        const auto manifest_status = std::filesystem::symlink_status(manifest_path, manifest_error);
+        if (manifest_error == std::errc::no_such_file_or_directory ||
+            (!manifest_error && !std::filesystem::exists(manifest_status))) {
+            result.diagnostics.push_back(ModDiagnostic{DiagnosticSeverity::warning, mod_directory,
                                                        "mod.manifest.missing",
                                                        "directory does not contain mod.toml"});
             continue;
         }
+        if (manifest_error || std::filesystem::is_symlink(manifest_status) ||
+            !std::filesystem::is_regular_file(manifest_status)) {
+            result.diagnostics.push_back(ModDiagnostic{
+                DiagnosticSeverity::error,
+                manifest_path,
+                "mod.manifest.unsafe_file",
+                "mod manifest must be a readable non-symlink regular file",
+            });
+            continue;
+        }
 
+        const auto diagnostic_start = result.diagnostics.size();
         const auto values = parse_flat_manifest(manifest_path, result.diagnostics,
                                                 {.diagnostic_prefix = "mod.manifest"});
         validate_manifest_fields(values, manifest_path, result.diagnostics);
@@ -227,7 +252,7 @@ ModDiscoveryResult ModDiscoverer::discover(const std::filesystem::path& mods_roo
                 manifest.dependencies = std::move(parsed_dependencies).value();
             }
         }
-        manifest.root = entry.path();
+        manifest.root = mod_directory;
 
         if (!core::is_valid_namespace_id(manifest.id)) {
             result.diagnostics.push_back(ModDiagnostic{DiagnosticSeverity::error, manifest_path,
@@ -235,15 +260,18 @@ ModDiscoveryResult ModDiscoverer::discover(const std::filesystem::path& mods_roo
                                                        "mod id must be a valid namespace id"});
         }
 
-        if (!manifest.id.empty() && !seen_ids.insert(manifest.id).second) {
+        if (has_errors_since(result.diagnostics, diagnostic_start)) {
+            continue;
+        }
+
+        if (!seen_ids.insert(manifest.id).second) {
             result.diagnostics.push_back(ModDiagnostic{DiagnosticSeverity::error, manifest_path,
                                                        "mod.manifest.duplicate_id",
                                                        "duplicate mod id: " + manifest.id});
+            continue;
         }
 
-        if (!manifest.id.empty()) {
-            result.mods.push_back(std::move(manifest));
-        }
+        result.mods.push_back(std::move(manifest));
     }
 
     validate_dependencies(result);

@@ -234,6 +234,7 @@ AssetCatalogBuilder::index_virtual_namespace(AssetCatalog& catalog, const Virtua
         return result;
     }
 
+    auto staged_catalog = catalog;
     for (const auto& entry : entries.value()) {
         const auto logical_id = asset_logical_id(entry.virtual_path);
         auto hash = hash_file(entry.resolved_path, maximum_file_bytes);
@@ -244,7 +245,7 @@ AssetCatalogBuilder::index_virtual_namespace(AssetCatalog& catalog, const Virtua
             continue;
         }
 
-        auto status = catalog.add(AssetRecord{
+        auto status = staged_catalog.add(AssetRecord{
             logical_id,
             infer_asset_kind(entry.virtual_path.relative_path),
             entry.virtual_path,
@@ -261,6 +262,10 @@ AssetCatalogBuilder::index_virtual_namespace(AssetCatalog& catalog, const Virtua
                 modding::ModDiagnostic{modding::DiagnosticSeverity::error, entry.resolved_path,
                                        status.error().code, status.error().message});
         }
+    }
+
+    if (!result.has_errors()) {
+        catalog = std::move(staged_catalog);
     }
 
     return result;
@@ -289,6 +294,7 @@ AssetCatalogBuildResult AssetCatalogBuilder::index_virtual_directory(
         return result;
     }
 
+    auto staged_catalog = catalog;
     for (const auto& entry : entries.value()) {
         const auto logical_id = asset_logical_id(entry.virtual_path);
         auto hash = hash_file(entry.resolved_path, maximum_file_bytes);
@@ -299,7 +305,7 @@ AssetCatalogBuildResult AssetCatalogBuilder::index_virtual_directory(
             continue;
         }
 
-        auto status = catalog.add(AssetRecord{
+        auto status = staged_catalog.add(AssetRecord{
             logical_id,
             infer_asset_kind(entry.virtual_path.relative_path),
             entry.virtual_path,
@@ -316,6 +322,10 @@ AssetCatalogBuildResult AssetCatalogBuilder::index_virtual_directory(
                 modding::ModDiagnostic{modding::DiagnosticSeverity::error, entry.resolved_path,
                                        status.error().code, status.error().message});
         }
+    }
+
+    if (!result.has_errors()) {
+        catalog = std::move(staged_catalog);
     }
 
     return result;

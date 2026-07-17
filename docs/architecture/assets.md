@@ -13,6 +13,8 @@ Implemented foundation:
     byte limit (256 MiB by default)
   - lists active files below a virtual directory with later mounts overriding earlier files at the
     same virtual path
+  - bounds aggregate traversal entries and depth, rejects symlinks in listed trees, and reports
+    filesystem failures instead of silently falling back to a lower-priority mount
 
 - `ResourcePackDiscoverer`
   - discovers `resource_pack.toml`
@@ -48,6 +50,8 @@ Implemented foundation:
   - simple content hashes
   - bounded streaming hashes that report short reads and oversized source files
   - priority-based active asset selection
+  - transactional directory indexing that leaves the existing catalog unchanged if any file in a
+    source fails traversal, hashing, identity, or insertion validation
 
 - Material prototype assets
   - material prototypes refer to shader templates and textures through virtual paths
