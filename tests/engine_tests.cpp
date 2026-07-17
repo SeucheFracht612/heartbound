@@ -5569,6 +5569,29 @@ void test_save_migration_registry() {
     conflict_snapshot.metadata.migration_history.push_back("0001-add-base-state");
     auto conflict = heartstead::save::SaveMigrationRunner::migrate(conflict_snapshot, registry, 2);
     assert(!conflict);
+
+    heartstead::save::SaveSnapshot failure_snapshot;
+    failure_snapshot.metadata.schema_version = 1;
+    failure_snapshot.metadata.game_version = "0.1.0";
+    failure_snapshot.metadata.world_seed = 88;
+    const auto before_failed_migration =
+        heartstead::save::SaveTextCodec::encode_snapshot(failure_snapshot);
+    heartstead::save::SaveMigrationRegistry failing_registry;
+    auto succeeding_step = first;
+    auto failing_step = second;
+    failing_step.apply = [](heartstead::save::SaveSnapshot& active_snapshot) {
+        active_snapshot.metadata.world_seed = 999;
+        active_snapshot.mod_states.push_back({"base", "partial_failure", "must-not-commit"});
+        return heartstead::core::Status::failure("test.migration_failed",
+                                                 "intentional migration failure");
+    };
+    assert(failing_registry.register_migration(std::move(succeeding_step)));
+    assert(failing_registry.register_migration(std::move(failing_step)));
+    auto failed =
+        heartstead::save::SaveMigrationRunner::migrate(failure_snapshot, failing_registry, 3);
+    assert(!failed && failed.error().code == "test.migration_failed");
+    assert(heartstead::save::SaveTextCodec::encode_snapshot(failure_snapshot) ==
+           before_failed_migration);
 }
 
 heartstead::modding::PrototypeRegistry build_snapshot_test_registry() {
@@ -13484,8 +13507,12 @@ void test_world_snapshot_bridge() {
     wrong_item_kind.inventories.front().stacks.front().prototype_id = cargo_prototype.value();
     auto wrong_item_kind_import = heartstead::world::WorldSnapshotBridge::import_validated_snapshot(
         wrong_item_kind, bridge_registry, load_config);
-    assert(!wrong_item_kind_import);
-    assert(wrong_item_kind_import.error().code == "prototype_registry.kind_mismatch");
+    assert(wrong_item_kind_import);
+    assert(wrong_item_kind_import.value().inventories().count() == 0);
+    assert(std::ranges::any_of(
+        wrong_item_kind_import.value().missing_prototypes(), [](const auto& missing) {
+            return missing.kind == heartstead::world::MissingPrototypeKind::inventory;
+        }));
 
     auto duplicate = snapshot.value();
     duplicate.cargo_records.front().cargo_id = wall_id.value();

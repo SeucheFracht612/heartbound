@@ -120,32 +120,34 @@ SaveMigrationRunner::migrate(SaveSnapshot& snapshot, const SaveMigrationRegistry
                                                           status.error().message);
     }
 
-    while (snapshot.metadata.schema_version < target_schema_version) {
-        const auto* migration = registry.find_from_schema(snapshot.metadata.schema_version);
+    SaveSnapshot staged_snapshot = snapshot;
+    while (staged_snapshot.metadata.schema_version < target_schema_version) {
+        const auto* migration = registry.find_from_schema(staged_snapshot.metadata.schema_version);
         if (migration == nullptr) {
             return core::Result<SaveMigrationResult>::failure(
                 "save_migration.missing_path",
                 "missing save migration from schema " +
-                    std::to_string(snapshot.metadata.schema_version));
+                    std::to_string(staged_snapshot.metadata.schema_version));
         }
-        if (has_migration_history_entry(snapshot.metadata, migration->id)) {
+        if (has_migration_history_entry(staged_snapshot.metadata, migration->id)) {
             return core::Result<SaveMigrationResult>::failure(
                 "save_migration.history_conflict",
                 "save migration history already contains pending migration: " + migration->id);
         }
 
-        status = migration->apply(snapshot);
+        status = migration->apply(staged_snapshot);
         if (!status) {
             return core::Result<SaveMigrationResult>::failure(status.error().code,
                                                               status.error().message);
         }
 
-        snapshot.metadata.schema_version = migration->to_schema_version;
-        snapshot.metadata.migration_history.push_back(migration->id);
+        staged_snapshot.metadata.schema_version = migration->to_schema_version;
+        staged_snapshot.metadata.migration_history.push_back(migration->id);
         result.applied_migrations.push_back(migration->id);
         result.final_schema_version = migration->to_schema_version;
     }
 
+    snapshot = std::move(staged_snapshot);
     return core::Result<SaveMigrationResult>::success(std::move(result));
 }
 
