@@ -65,6 +65,7 @@ class TransportReliabilityTracker final {
     [[nodiscard]] std::size_t tracked_received_count() const noexcept;
 
     [[nodiscard]] core::Status track_send(TransportEnvelope envelope, std::int64_t now_ms);
+    [[nodiscard]] core::Status rollback_tracked_send(const TransportEnvelope& envelope);
     [[nodiscard]] core::Result<TransportReliableReceiveResult>
     accept_reliable_message(const TransportEnvelope& envelope, std::int64_t now_ms);
     [[nodiscard]] core::Result<TransportReliableAckResult>

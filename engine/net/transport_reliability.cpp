@@ -184,6 +184,24 @@ core::Status TransportReliabilityTracker::track_send(TransportEnvelope envelope,
     return core::Status::ok();
 }
 
+core::Status TransportReliabilityTracker::rollback_tracked_send(const TransportEnvelope& envelope) {
+    if (envelope.sender != local_id_ || envelope.recipient != remote_id_) {
+        return core::Status::failure(
+            "transport_reliability.endpoint_mismatch",
+            "reliable send rollback endpoints must match the tracker local and remote ids");
+    }
+    auto key = transport_reliable_message_key_from_envelope(envelope);
+    if (!key) {
+        return core::Status::failure(key.error().code, key.error().message);
+    }
+    if (pending_.erase(key_id(key.value())) == 0) {
+        return core::Status::failure(
+            "transport_reliability.rollback_missing",
+            "reliable send rollback did not match a tracked in-flight message");
+    }
+    return core::Status::ok();
+}
+
 core::Result<TransportReliableReceiveResult>
 TransportReliabilityTracker::accept_reliable_message(const TransportEnvelope& envelope,
                                                      std::int64_t now_ms) {

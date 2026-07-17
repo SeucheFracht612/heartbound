@@ -360,16 +360,26 @@ class PosixDatagramTransportHost final : public ITransportHost {
         }
 
         TransportEnvelope envelope{client_id, config_.server_id, std::move(message)};
-        auto sent =
-            send_envelope(client.value()->socket.fd(), server_address_for_local_clients_, envelope);
-        if (!sent) {
-            return sent;
-        }
         if (envelope.message.channel == TransportChannel::reliable) {
             status = client.value()->client_reliability.track_send(envelope, current_time_ms_);
             if (!status) {
                 return status;
             }
+        }
+        auto sent =
+            send_envelope(client.value()->socket.fd(), server_address_for_local_clients_, envelope);
+        if (!sent) {
+            if (envelope.message.channel == TransportChannel::reliable) {
+                const auto rollback =
+                    client.value()->client_reliability.rollback_tracked_send(envelope);
+                if (!rollback) {
+                    return core::Status::failure(
+                        rollback.error().code,
+                        sent.error().message +
+                            "; tracking rollback failed: " + rollback.error().message);
+                }
+            }
+            return sent;
         }
         record_local_client_send_sequence(*client.value(), envelope.message);
         return core::Status::ok();
@@ -386,15 +396,25 @@ class PosixDatagramTransportHost final : public ITransportHost {
             return status;
         }
         TransportEnvelope envelope{config_.server_id, client_id, std::move(message)};
-        status = send_envelope(server_socket_.fd(), client.value()->address, envelope);
-        if (!status) {
-            return status;
-        }
         if (envelope.message.channel == TransportChannel::reliable) {
             status = client.value()->server_reliability.track_send(envelope, current_time_ms_);
             if (!status) {
                 return status;
             }
+        }
+        status = send_envelope(server_socket_.fd(), client.value()->address, envelope);
+        if (!status) {
+            if (envelope.message.channel == TransportChannel::reliable) {
+                const auto rollback =
+                    client.value()->server_reliability.rollback_tracked_send(envelope);
+                if (!rollback) {
+                    return core::Status::failure(
+                        rollback.error().code,
+                        status.error().message +
+                            "; tracking rollback failed: " + rollback.error().message);
+                }
+            }
+            return status;
         }
         return core::Status::ok();
     }
